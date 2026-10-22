@@ -19,6 +19,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Install simul's hooks into an agent's settings.
+    InstallHooks {
+        #[arg(value_parser = ["claude", "kiro"])]
+        agent: String,
+        /// Install into ./.claude/settings.local.json instead of ~/.claude/settings.json.
+        #[arg(long)]
+        project: bool,
+        /// Install into this settings file.
+        #[arg(long, conflicts_with = "project")]
+        settings: Option<PathBuf>,
+    },
+    /// Check the tmux setup, daemon, and installed hooks.
+    Doctor,
     /// Run the daemon for one tmux server (normally started automatically).
     #[command(hide = true)]
     Daemon {
@@ -54,6 +67,12 @@ fn main() {
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Ls { json } => cli::ls::run(json),
+        Command::InstallHooks {
+            agent,
+            project,
+            settings,
+        } => cli::install_hooks::run(&agent, project, settings),
+        Command::Doctor => cli::doctor::run(),
         Command::Daemon { tmux_socket } => run_daemon(tmux_socket),
         Command::Internal { what } => {
             match what {
