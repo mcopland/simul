@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+use anyhow::{Context, Result, bail};
 
 /// FNV-1a, hand-rolled because std's hasher is not stable across Rust releases and the
 /// shim and daemon may be built by different toolchains after an upgrade.
@@ -16,18 +18,63 @@ pub fn socket_path(
     uid: u32,
     tmux_socket: Option<&Path>,
 ) -> Result<PathBuf> {
+    let mut candidates = socket_candidates(env, uid, tmux_socket)?;
+    Ok(candidates.remove(0))
+}
+
+/// Every place a daemon for this tmux server may listen, preferred first.
+pub fn socket_candidates(
+    env: impl Fn(&str) -> Option<String>,
+    uid: u32,
+    tmux_socket: Option<&Path>,
+) -> Result<Vec<PathBuf>> {
     if let Some(explicit) = env("SIMUL_SOCKET") {
-        return Ok(PathBuf::from(explicit));
+        return Ok(vec![PathBuf::from(explicit)]);
     }
     let Some(tmux_socket) = tmux_socket else {
         bail!("cannot derive the simul socket: no tmux server socket known");
     };
-    let dir = match env("XDG_RUNTIME_DIR") {
-        Some(run) => PathBuf::from(run).join("simul"),
-        None => PathBuf::from(format!("/tmp/simul-{uid}")),
-    };
-    let hash = fnv64(tmux_socket.as_os_str().as_encoded_bytes());
-    Ok(dir.join(format!("{hash:016x}.sock")))
+    let name = format!(
+        "{:016x}.sock",
+        fnv64(tmux_socket.as_os_str().as_encoded_bytes())
+    );
+    // The daemon (started under tmux's environment) and hooks (in a pane's shell) can
+    // disagree about XDG_RUNTIME_DIR, so clients look in both places.
+    let mut out: Vec<PathBuf> = env("XDG_RUNTIME_DIR")
+        .map(|run| PathBuf::from(run).join("simul").join(&name))
+        .into_iter()
+        .collect();
+    out.push(PathBuf::from(format!("/tmp/simul-{uid}")).join(&name));
+    Ok(out)
+}
+
+/// Creates `dir` as 0700 if missing, then checks it is private to this user.
+pub fn ensure_private_dir(dir: &Path) -> Result<()> {
+    if !dir.exists() {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .with_context(|| format!("failed to create {}", dir.display()))?;
+    }
+    check_private_dir(dir)
+}
+
+/// Refuses directories another user owns or can write, since the socket inside carries
+/// hook traffic and the log names working directories.
+pub fn check_private_dir(dir: &Path) -> Result<()> {
+    let meta = std::fs::symlink_metadata(dir)
+        .with_context(|| format!("failed to stat {}", dir.display()))?;
+    let mode = meta.permissions().mode() & 0o777;
+    if !meta.is_dir() || meta.uid() != uid() || mode & 0o077 != 0 {
+        bail!(
+            "refusing {}: must be a directory owned by uid {} with mode 700 (found uid {}, mode {mode:o})",
+            dir.display(),
+            uid(),
+            meta.uid()
+        );
+    }
+    Ok(())
 }
 
 pub fn uid() -> u32 {
@@ -57,7 +104,16 @@ pub fn client_socket() -> Result<PathBuf> {
             "cannot locate the simul daemon: not inside tmux ($TMUX unset) and $SIMUL_SOCKET unset"
         );
     }
-    socket_path(env_var, uid(), tmux.as_deref())
+    let candidates = socket_candidates(env_var, uid(), tmux.as_deref())?;
+    let chosen = candidates
+        .iter()
+        .find(|p| p.exists())
+        .unwrap_or(&candidates[0])
+        .clone();
+    if let Some(dir) = chosen.parent().filter(|d| d.exists()) {
+        check_private_dir(dir)?;
+    }
+    Ok(chosen)
 }
 
 #[cfg(test)]
@@ -78,6 +134,37 @@ mod tests {
         assert_eq!(fnv64(b""), 0xcbf29ce484222325);
         assert_eq!(fnv64(b"a"), 0xaf63dc4c8601ec8c);
         assert_eq!(fnv64(b"foobar"), 0x85944171f73967e8);
+    }
+
+    #[test]
+    fn candidates_cover_both_locations() {
+        let tmux = Path::new("/tmp/tmux-501/default");
+        let name = format!("{:016x}.sock", fnv64(b"/tmp/tmux-501/default"));
+        let c = socket_candidates(env(&[("XDG_RUNTIME_DIR", "/run/u")]), 501, Some(tmux)).unwrap();
+        assert_eq!(
+            c,
+            vec![
+                PathBuf::from("/run/u/simul").join(&name),
+                PathBuf::from("/tmp/simul-501").join(&name)
+            ]
+        );
+        let c = socket_candidates(env(&[("SIMUL_SOCKET", "/x.sock")]), 501, Some(tmux)).unwrap();
+        assert_eq!(c, vec![PathBuf::from("/x.sock")]);
+    }
+
+    #[test]
+    fn private_dir_is_created_and_checked() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("simul");
+        ensure_private_dir(&dir).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        check_private_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let err = check_private_dir(&dir).unwrap_err().to_string();
+        assert!(err.contains("simul") && err.contains("755"), "{err}");
+        assert!(ensure_private_dir(&dir).is_err());
     }
 
     #[test]

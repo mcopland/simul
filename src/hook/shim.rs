@@ -6,7 +6,7 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -52,7 +52,11 @@ fn deliver(args: &[String], deadline: Instant) -> Result<()> {
         // Not inside tmux: nothing to track.
         return Ok(());
     };
-    let payload = serde_json::from_str::<Value>(&raw).unwrap_or(Value::Null);
+    // A malformed payload still carries the event name, which is enough to update state.
+    let payload = serde_json::from_str::<Value>(&raw).unwrap_or_else(|e| {
+        eprintln!("simul hook: payload is not JSON ({e}); sending event without it");
+        Value::Null
+    });
     let req = Request::Hook(Envelope {
         agent: agent.clone(),
         event: event.clone(),
@@ -64,25 +68,35 @@ fn deliver(args: &[String], deadline: Instant) -> Result<()> {
     line.push('\n');
 
     let tmux_socket = paths::current_tmux_socket();
-    let socket = paths::socket_path(env_var, paths::uid(), tmux_socket.as_deref())?;
-    let mut stream = connect_or_start(&socket, deadline)?;
+    let sockets = paths::socket_candidates(env_var, paths::uid(), tmux_socket.as_deref())?;
+    let mut stream = connect_or_start(&sockets, deadline)?;
     stream
         .write_all(line.as_bytes())
-        .with_context(|| format!("failed to write hook to {}", socket.display()))
+        .context("failed to write hook to the simul daemon")
 }
 
-fn connect_or_start(socket: &Path, deadline: Instant) -> Result<UnixStream> {
-    if let Ok(stream) = UnixStream::connect(socket) {
+/// Connects to the first live daemon socket whose directory is private to this user.
+fn connect_any(sockets: &[PathBuf]) -> Option<UnixStream> {
+    sockets.iter().find_map(|s| {
+        let private = s
+            .parent()
+            .is_none_or(|d| paths::check_private_dir(d).is_ok());
+        private.then(|| UnixStream::connect(s).ok()).flatten()
+    })
+}
+
+fn connect_or_start(sockets: &[PathBuf], deadline: Instant) -> Result<UnixStream> {
+    if let Some(stream) = connect_any(sockets) {
         return Ok(stream);
     }
     start_daemon()?;
     loop {
         std::thread::sleep(Duration::from_millis(10));
-        if let Ok(stream) = UnixStream::connect(socket) {
+        if let Some(stream) = connect_any(sockets) {
             return Ok(stream);
         }
         if Instant::now() >= deadline {
-            bail!("daemon did not come up at {}", socket.display());
+            bail!("daemon did not come up at {}", sockets[0].display());
         }
     }
 }

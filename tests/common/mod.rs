@@ -1,6 +1,7 @@
 #![allow(dead_code)] // Each integration test binary uses a different subset of these helpers.
 
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -43,6 +44,8 @@ impl Harness {
             .prefix("st")
             .tempdir_in(short_tmp())
             .unwrap();
+        // The daemon refuses socket directories other users can read.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::create_dir_all(dir.path().join("config/simul")).unwrap();
         std::fs::write(dir.path().join("config/simul/config.toml"), config).unwrap();
         let h = Harness {

@@ -103,8 +103,7 @@ fn run_daemon(tmux_socket: Option<PathBuf>) -> Result<()> {
     let socket = paths::socket_path(paths::env_var, paths::uid(), Some(&tmux_socket))?;
     let log_path = socket.with_extension("log");
     if let Some(dir) = log_path.parent() {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("failed to create {}", dir.display()))?;
+        paths::ensure_private_dir(dir)?;
     }
     simul::log::init(&log_path)?;
     let opts = daemon::Options {

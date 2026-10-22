@@ -1,5 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
@@ -10,6 +11,7 @@ static SINK: OnceLock<Mutex<File>> = OnceLock::new();
 /// Sends daemon log lines to `path` instead of stderr, which is /dev/null when detached.
 pub fn init(path: &Path) -> Result<()> {
     let file = OpenOptions::new()
+        .mode(0o600)
         .create(true)
         .append(true)
         .open(path)

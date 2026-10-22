@@ -1,5 +1,4 @@
 use std::io::ErrorKind;
-use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -16,11 +15,7 @@ use crate::protocol::{Ack, Request, Toggled};
 /// Binds the daemon socket, or returns `None` if a live daemon already owns it.
 pub fn bind(path: &Path) -> Result<Option<UnixListener>> {
     if let Some(dir) = path.parent() {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .with_context(|| format!("failed to create socket dir: {}", dir.display()))?;
+        crate::paths::ensure_private_dir(dir)?;
     }
     match UnixListener::bind(path) {
         Ok(l) => Ok(Some(l)),
