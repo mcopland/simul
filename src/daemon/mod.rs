@@ -183,14 +183,14 @@ impl Daemon {
             Some(info) => self.store.locate(info),
             None => self.schedule_reconcile(),
         }
-        self.on_transitions(transition.into_iter().collect());
+        self.on_transitions(transition.into_iter().collect(), &env.event);
         self.publish();
     }
 
-    fn on_transitions(&mut self, transitions: Vec<Transition>) {
+    fn on_transitions(&mut self, transitions: Vec<Transition>, cause: &str) {
         for t in transitions {
             log!(
-                "{} {}: {} -> {}",
+                "{} {}: {} -> {} ({cause})",
                 t.pane,
                 t.agent.name(),
                 t.from.map_or("new", |s| s.name()),
@@ -248,7 +248,7 @@ impl Daemon {
         }
         let transitions = self.store.reconcile(&snap, now);
         self.snapshot = snap;
-        self.on_transitions(transitions);
+        self.on_transitions(transitions, "viewed");
         self.publish();
     }
 
@@ -264,7 +264,7 @@ impl Daemon {
             }
         }
         if !changed.is_empty() {
-            self.on_transitions(changed);
+            self.on_transitions(changed, "screen");
             self.publish();
         }
     }
