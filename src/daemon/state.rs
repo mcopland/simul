@@ -1,0 +1,616 @@
+use std::collections::{BTreeMap, HashSet};
+
+use serde::{Deserialize, Serialize};
+
+use crate::hook::{Agent, AgentEvent, Parsed, Screen};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum State {
+    Working,
+    Blocked,
+    Done,
+    Idle,
+    Unknown,
+}
+
+impl State {
+    pub fn name(self) -> &'static str {
+        match self {
+            State::Working => "working",
+            State::Blocked => "blocked",
+            State::Done => "done",
+            State::Idle => "idle",
+            State::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PaneRecord {
+    pub pane: String,
+    pub agent: Agent,
+    pub state: State,
+    /// Unix ms of the last state change.
+    pub since_ms: u64,
+    /// Unix ms of the last hook event; 0 if none yet (recovered panes).
+    pub last_event_ms: u64,
+    pub session_id: Option<String>,
+    pub cwd: Option<String>,
+    pub branch: Option<String>,
+    pub pending_tool: Option<String>,
+    pub session: Option<String>,
+    pub window: Option<u32>,
+    #[serde(skip)]
+    idle_scrapes: u8,
+}
+
+impl PaneRecord {
+    fn new(pane: &str, agent: Agent, state: State, now: u64) -> PaneRecord {
+        PaneRecord {
+            pane: pane.to_owned(),
+            agent,
+            state,
+            since_ms: now,
+            last_event_ms: 0,
+            session_id: None,
+            cwd: None,
+            branch: None,
+            pending_tool: None,
+            session: None,
+            window: None,
+            idle_scrapes: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Transition {
+    pub pane: String,
+    pub agent: Agent,
+    pub from: Option<State>,
+    pub to: State,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PaneInfo {
+    pub id: String,
+    pub session: String,
+    pub window: u32,
+    pub window_id: String,
+    pub current_command: String,
+    pub path: String,
+    pub is_sidebar: bool,
+    pub window_panes: u32,
+}
+
+/// A point-in-time view of the tmux server used to reconcile tracked panes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Snapshot {
+    pub panes: Vec<PaneInfo>,
+    /// Panes the user is looking at right now.
+    pub viewed: HashSet<String>,
+}
+
+/// Consecutive idle scrapes required before demoting a busy pane, to ride out spinner redraws.
+const IDLE_SCRAPES_TO_DEMOTE: u8 = 2;
+
+#[derive(Debug, Default)]
+pub struct Store {
+    panes: BTreeMap<String, PaneRecord>,
+}
+
+impl Store {
+    pub fn records(&self) -> Vec<PaneRecord> {
+        self.panes.values().cloned().collect()
+    }
+
+    pub fn get(&self, pane: &str) -> Option<&PaneRecord> {
+        self.panes.get(pane)
+    }
+
+    pub fn apply(
+        &mut self,
+        pane: &str,
+        agent: Agent,
+        parsed: &Parsed,
+        now: u64,
+        viewed: bool,
+    ) -> Option<Transition> {
+        if parsed.event == AgentEvent::SessionEnd {
+            self.panes.remove(pane);
+            return None;
+        }
+        let created = !self.panes.contains_key(pane);
+        let rec = self
+            .panes
+            .entry(pane.to_owned())
+            .or_insert_with(|| PaneRecord::new(pane, agent, State::Unknown, now));
+        rec.agent = agent;
+        rec.last_event_ms = now;
+        rec.idle_scrapes = 0;
+        if parsed.meta.session_id.is_some() {
+            rec.session_id.clone_from(&parsed.meta.session_id);
+        }
+        if parsed.meta.cwd.is_some() {
+            rec.cwd.clone_from(&parsed.meta.cwd);
+        }
+        let next = match &parsed.event {
+            AgentEvent::SessionStart => Some(State::Idle),
+            AgentEvent::PromptSubmit => Some(State::Working),
+            AgentEvent::PreTool { tool } => {
+                rec.pending_tool.clone_from(tool);
+                Some(State::Working)
+            }
+            AgentEvent::PostTool => {
+                rec.pending_tool = None;
+                Some(State::Working)
+            }
+            AgentEvent::PermissionPrompt => Some(State::Blocked),
+            AgentEvent::IdlePrompt => (rec.state != State::Done).then_some(State::Idle),
+            AgentEvent::Stop => {
+                rec.pending_tool = None;
+                Some(if viewed { State::Idle } else { State::Done })
+            }
+            AgentEvent::Unrecognized => Some(State::Unknown),
+            AgentEvent::NoChange | AgentEvent::SessionEnd => None,
+        };
+        let from = (!created).then_some(rec.state);
+        set_state(rec, next?, now, from)
+    }
+
+    pub fn reconcile(&mut self, snap: &Snapshot, now: u64) -> Vec<Transition> {
+        let live: BTreeMap<&str, &PaneInfo> =
+            snap.panes.iter().map(|p| (p.id.as_str(), p)).collect();
+        self.panes.retain(|id, _| live.contains_key(id.as_str()));
+        let mut out = Vec::new();
+        for rec in self.panes.values_mut() {
+            if let Some(info) = live.get(rec.pane.as_str()) {
+                rec.session = Some(info.session.clone());
+                rec.window = Some(info.window);
+            }
+            if rec.state == State::Done && snap.viewed.contains(&rec.pane) {
+                let from = Some(rec.state);
+                out.extend(set_state(rec, State::Idle, now, from));
+            }
+        }
+        out
+    }
+
+    /// Inserts agent panes found in the snapshot that no hook has reported yet.
+    pub fn recover(&mut self, snap: &Snapshot, now: u64) -> Vec<String> {
+        let mut added = Vec::new();
+        for info in snap.panes.iter().filter(|p| !p.is_sidebar) {
+            if self.panes.contains_key(&info.id) {
+                continue;
+            }
+            let Some(agent) = Agent::all()
+                .iter()
+                .copied()
+                .find(|a| a.matches_process(&info.current_command))
+            else {
+                continue;
+            };
+            let mut rec = PaneRecord::new(&info.id, agent, State::Unknown, now);
+            rec.cwd = Some(info.path.clone());
+            rec.session = Some(info.session.clone());
+            rec.window = Some(info.window);
+            self.panes.insert(info.id.clone(), rec);
+            added.push(info.id.clone());
+        }
+        added
+    }
+
+    /// Panes whose state should be checked against the screen: busy or unknown, with no recent hook.
+    pub fn needs_scrape(&self, now: u64, threshold_ms: u64) -> Vec<(String, Agent)> {
+        self.panes
+            .values()
+            .filter(|r| match r.state {
+                State::Working | State::Blocked => {
+                    now.saturating_sub(r.last_event_ms) >= threshold_ms
+                }
+                State::Unknown => true,
+                State::Done | State::Idle => false,
+            })
+            .map(|r| (r.pane.clone(), r.agent))
+            .collect()
+    }
+
+    pub fn apply_screen(&mut self, pane: &str, screen: Screen, now: u64) -> Option<Transition> {
+        let rec = self.panes.get_mut(pane)?;
+        let next = match (rec.state, screen) {
+            (_, Screen::Unknown) | (State::Done | State::Idle, _) => None,
+            (_, Screen::Blocked) => Some(State::Blocked),
+            (_, Screen::Working) => {
+                rec.idle_scrapes = 0;
+                Some(State::Working)
+            }
+            (State::Unknown, Screen::Idle) => Some(State::Idle),
+            (State::Working | State::Blocked, Screen::Idle) => {
+                rec.idle_scrapes += 1;
+                (rec.idle_scrapes >= IDLE_SCRAPES_TO_DEMOTE).then_some(State::Idle)
+            }
+        };
+        let from = Some(rec.state);
+        set_state(rec, next?, now, from)
+    }
+
+    pub fn locate(&mut self, info: &PaneInfo) {
+        if let Some(rec) = self.panes.get_mut(&info.id) {
+            rec.session = Some(info.session.clone());
+            rec.window = Some(info.window);
+        }
+    }
+
+    pub fn set_branch(&mut self, cwd: &str, branch: Option<String>) -> bool {
+        let mut changed = false;
+        for rec in self.panes.values_mut() {
+            if rec.cwd.as_deref() == Some(cwd) && rec.branch != branch {
+                rec.branch.clone_from(&branch);
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
+fn set_state(
+    rec: &mut PaneRecord,
+    next: State,
+    now: u64,
+    from: Option<State>,
+) -> Option<Transition> {
+    if from == Some(next) {
+        return None;
+    }
+    rec.state = next;
+    rec.since_ms = now;
+    rec.idle_scrapes = 0;
+    Some(Transition {
+        pane: rec.pane.clone(),
+        agent: rec.agent,
+        from,
+        to: next,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hook::{Envelope, Meta};
+
+    fn ev(event: AgentEvent) -> Parsed {
+        Parsed {
+            event,
+            meta: Meta::default(),
+        }
+    }
+
+    fn state(store: &Store, pane: &str) -> Option<State> {
+        store.get(pane).map(|r| r.state)
+    }
+
+    #[test]
+    fn hook_events_follow_the_table() {
+        let cases = [
+            (AgentEvent::SessionStart, State::Idle),
+            (AgentEvent::PromptSubmit, State::Working),
+            (AgentEvent::PreTool { tool: None }, State::Working),
+            (AgentEvent::PermissionPrompt, State::Blocked),
+            (AgentEvent::PostTool, State::Working),
+            (AgentEvent::Stop, State::Done),
+            (AgentEvent::Unrecognized, State::Unknown),
+        ];
+        for (event, want) in cases {
+            let mut s = Store::default();
+            s.apply("%1", Agent::Claude, &ev(AgentEvent::PromptSubmit), 1, false);
+            s.apply("%1", Agent::Claude, &ev(event.clone()), 2, false);
+            assert_eq!(state(&s, "%1"), Some(want), "{event:?}");
+        }
+    }
+
+    #[test]
+    fn transition_reports_change_only() {
+        let mut s = Store::default();
+        let t = s.apply("%1", Agent::Claude, &ev(AgentEvent::PromptSubmit), 5, false);
+        assert_eq!(
+            t,
+            Some(Transition {
+                pane: "%1".into(),
+                agent: Agent::Claude,
+                from: None,
+                to: State::Working
+            })
+        );
+        assert_eq!(
+            s.apply("%1", Agent::Claude, &ev(AgentEvent::PostTool), 9, false),
+            None
+        );
+        let rec = s.get("%1").unwrap();
+        assert_eq!(rec.since_ms, 5);
+        assert_eq!(rec.last_event_ms, 9);
+    }
+
+    #[test]
+    fn session_end_removes_pane() {
+        let mut s = Store::default();
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::SessionStart), 1, false);
+        assert_eq!(
+            s.apply("%1", Agent::Claude, &ev(AgentEvent::SessionEnd), 2, false),
+            None
+        );
+        assert!(s.get("%1").is_none());
+    }
+
+    #[test]
+    fn stop_while_viewed_goes_idle() {
+        let mut s = Store::default();
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::PromptSubmit), 1, true);
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::Stop), 2, true);
+        assert_eq!(state(&s, "%1"), Some(State::Idle));
+    }
+
+    #[test]
+    fn pending_tool_tracks_pre_and_post() {
+        let mut s = Store::default();
+        let pre = ev(AgentEvent::PreTool {
+            tool: Some("Write".into()),
+        });
+        s.apply("%1", Agent::Claude, &pre, 1, false);
+        assert_eq!(s.get("%1").unwrap().pending_tool.as_deref(), Some("Write"));
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::PostTool), 2, false);
+        assert_eq!(s.get("%1").unwrap().pending_tool, None);
+    }
+
+    #[test]
+    fn idle_prompt_clears_busy_but_not_done() {
+        let mut s = Store::default();
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::PromptSubmit), 1, false);
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::IdlePrompt), 2, false);
+        assert_eq!(state(&s, "%1"), Some(State::Idle));
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::Stop), 3, false);
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::IdlePrompt), 4, false);
+        assert_eq!(state(&s, "%1"), Some(State::Done));
+    }
+
+    #[test]
+    fn meta_is_recorded() {
+        let mut s = Store::default();
+        let p = Parsed {
+            event: AgentEvent::SessionStart,
+            meta: Meta {
+                session_id: Some("abc".into()),
+                cwd: Some("/w".into()),
+            },
+        };
+        s.apply("%1", Agent::Claude, &p, 1, false);
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::Stop), 2, false);
+        let rec = s.get("%1").unwrap();
+        assert_eq!(rec.session_id.as_deref(), Some("abc"));
+        assert_eq!(rec.cwd.as_deref(), Some("/w"));
+    }
+
+    fn pane(id: &str, cmd: &str) -> PaneInfo {
+        PaneInfo {
+            id: id.into(),
+            session: "main".into(),
+            window: 2,
+            window_id: "@2".into(),
+            current_command: cmd.into(),
+            path: "/w".into(),
+            is_sidebar: false,
+            window_panes: 1,
+        }
+    }
+
+    #[test]
+    fn reconcile_drops_vanished_and_clears_viewed_done() {
+        let mut s = Store::default();
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::Stop), 1, false);
+        s.apply("%2", Agent::Claude, &ev(AgentEvent::Stop), 1, false);
+        s.apply("%3", Agent::Claude, &ev(AgentEvent::Stop), 1, false);
+        let snap = Snapshot {
+            panes: vec![pane("%1", "claude"), pane("%2", "claude")],
+            viewed: HashSet::from(["%1".to_string()]),
+        };
+        let ts = s.reconcile(&snap, 7);
+        assert_eq!(ts.len(), 1);
+        assert_eq!(ts[0].to, State::Idle);
+        assert_eq!(state(&s, "%1"), Some(State::Idle));
+        assert_eq!(state(&s, "%2"), Some(State::Done));
+        assert!(s.get("%3").is_none());
+        let rec = s.get("%2").unwrap();
+        assert_eq!(rec.session.as_deref(), Some("main"));
+        assert_eq!(rec.window, Some(2));
+    }
+
+    #[test]
+    fn recover_inserts_untracked_agents_as_unknown() {
+        let mut s = Store::default();
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::Stop), 1, false);
+        let mut side = pane("%4", "2.1.307");
+        side.is_sidebar = true;
+        let snap = Snapshot {
+            panes: vec![
+                pane("%1", "claude"),
+                pane("%2", "2.1.307"),
+                pane("%3", "zsh"),
+                side,
+            ],
+            viewed: HashSet::new(),
+        };
+        assert_eq!(s.recover(&snap, 5), vec!["%2".to_string()]);
+        assert_eq!(state(&s, "%1"), Some(State::Done));
+        assert_eq!(state(&s, "%2"), Some(State::Unknown));
+        assert_eq!(s.get("%2").unwrap().cwd.as_deref(), Some("/w"));
+    }
+
+    #[test]
+    fn scrape_selection_respects_threshold() {
+        let mut s = Store::default();
+        s.apply(
+            "%1",
+            Agent::Claude,
+            &ev(AgentEvent::PromptSubmit),
+            1000,
+            false,
+        );
+        s.apply("%2", Agent::Claude, &ev(AgentEvent::Stop), 1000, false);
+        s.apply(
+            "%3",
+            Agent::Claude,
+            &ev(AgentEvent::PermissionPrompt),
+            1000,
+            false,
+        );
+        assert!(s.needs_scrape(2000, 1500).is_empty());
+        let mut got = s.needs_scrape(2600, 1500);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("%1".to_string(), Agent::Claude),
+                ("%3".to_string(), Agent::Claude)
+            ]
+        );
+    }
+
+    #[test]
+    fn screen_corrects_busy_states() {
+        let mut s = Store::default();
+        s.apply(
+            "%1",
+            Agent::Claude,
+            &ev(AgentEvent::PreTool { tool: None }),
+            1,
+            false,
+        );
+        assert_eq!(
+            s.apply_screen("%1", Screen::Blocked, 2).map(|t| t.to),
+            Some(State::Blocked)
+        );
+        assert_eq!(s.apply_screen("%1", Screen::Blocked, 3), None);
+        assert_eq!(s.apply_screen("%1", Screen::Idle, 4), None);
+        assert_eq!(state(&s, "%1"), Some(State::Blocked));
+        assert_eq!(
+            s.apply_screen("%1", Screen::Idle, 5).map(|t| t.to),
+            Some(State::Idle)
+        );
+        assert_eq!(s.apply_screen("%1", Screen::Working, 6), None);
+    }
+
+    #[test]
+    fn working_screen_resets_idle_streak() {
+        let mut s = Store::default();
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::PromptSubmit), 1, false);
+        s.apply_screen("%1", Screen::Idle, 2);
+        s.apply_screen("%1", Screen::Working, 3);
+        assert_eq!(s.apply_screen("%1", Screen::Idle, 4), None);
+        assert_eq!(state(&s, "%1"), Some(State::Working));
+    }
+
+    #[test]
+    fn unknown_resolves_from_first_screen() {
+        let mut s = Store::default();
+        let snap = Snapshot {
+            panes: vec![pane("%2", "claude")],
+            viewed: HashSet::new(),
+        };
+        s.recover(&snap, 1);
+        assert_eq!(
+            s.needs_scrape(1, 1500),
+            vec![("%2".to_string(), Agent::Claude)]
+        );
+        assert_eq!(
+            s.apply_screen("%2", Screen::Idle, 2).map(|t| t.to),
+            Some(State::Idle)
+        );
+        assert!(s.needs_scrape(10_000, 1500).is_empty());
+        assert_eq!(s.apply_screen("%2", Screen::Unknown, 3), None);
+    }
+
+    #[test]
+    fn hook_event_resets_scrape_timer() {
+        let mut s = Store::default();
+        s.apply(
+            "%1",
+            Agent::Claude,
+            &ev(AgentEvent::PromptSubmit),
+            1000,
+            false,
+        );
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::PostTool), 2400, false);
+        assert!(s.needs_scrape(2600, 1500).is_empty());
+    }
+
+    #[test]
+    fn locate_copies_session_and_window() {
+        let mut s = Store::default();
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::Stop), 1, false);
+        s.locate(&pane("%1", "claude"));
+        s.locate(&pane("%9", "claude"));
+        let rec = s.get("%1").unwrap();
+        assert_eq!(
+            (rec.session.as_deref(), rec.window),
+            (Some("main"), Some(2))
+        );
+        assert!(s.get("%9").is_none());
+    }
+
+    #[test]
+    fn set_branch_updates_matching_cwd() {
+        let mut s = Store::default();
+        let p = Parsed {
+            event: AgentEvent::SessionStart,
+            meta: Meta {
+                session_id: None,
+                cwd: Some("/w".into()),
+            },
+        };
+        s.apply("%1", Agent::Claude, &p, 1, false);
+        assert!(s.set_branch("/w", Some("main".into())));
+        assert!(!s.set_branch("/w", Some("main".into())));
+        assert!(!s.set_branch("/other", Some("x".into())));
+        assert_eq!(s.get("%1").unwrap().branch.as_deref(), Some("main"));
+    }
+
+    /// Replays the recorded calibration session and checks the state after each event.
+    #[test]
+    fn replays_recorded_session() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/claude/session.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut s = Store::default();
+        let mut seen = Vec::new();
+        for (i, line) in text.lines().enumerate() {
+            let env: Envelope = serde_json::from_str(line).unwrap();
+            let agent = Agent::from_name(&env.agent).unwrap();
+            let pane = env.pane.clone().unwrap();
+            let parsed = agent.parse(&env.event, &crate::hook::slim_payload(&env.payload));
+            s.apply(&pane, agent, &parsed, i as u64, false);
+            seen.push(state(&s, &pane).map_or("gone", State::name));
+        }
+        assert_eq!(
+            seen,
+            vec![
+                "idle",    // SessionStart
+                "working", // prompt: write hello.txt
+                "working", // PreToolUse Write
+                "blocked", // permission_prompt
+                "working", // approved: PostToolUse
+                "done",    // Stop
+                "working", // prompt: write bye.txt
+                "working", // PreToolUse, denied with 3 (no hook; scrape corrects)
+                "working", // prompt: write bye2.txt
+                "working", // PreToolUse
+                "blocked", // permission_prompt, then Escape (no hook)
+                "working", // essay prompt, interrupted (no hook)
+                "working", // prompt: sleep 12
+                "working", "working", "done", "working", // prompt: sleep 20
+                "working", "working", "done",
+                "done", // idle_prompt does not clear an unseen done
+                "gone", // SessionEnd
+            ]
+        );
+    }
+}
