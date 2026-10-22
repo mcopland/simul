@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use simul::{cli, config, daemon, paths, tmux::Tmux};
+use simul::protocol::{Ack, Request, Toggled};
+use simul::{cli, client, config, daemon, paths, tmux::Tmux};
 
 #[derive(Parser)]
 #[command(name = "simul", version, about = "Track coding agents running in tmux")]
@@ -32,6 +33,10 @@ enum Command {
     },
     /// Check the tmux setup, daemon, and installed hooks.
     Doctor,
+    /// Show or hide the sidebar in every window.
+    Toggle,
+    /// Run the sidebar UI in the current pane (opened by `toggle`).
+    Sidebar,
     /// Run the daemon for one tmux server (normally started automatically).
     #[command(hide = true)]
     Daemon {
@@ -50,6 +55,7 @@ enum Command {
 #[derive(Subcommand)]
 enum Internal {
     Refresh,
+    Resized,
 }
 
 fn main() {
@@ -73,16 +79,18 @@ fn run(cli: Cli) -> Result<()> {
             settings,
         } => cli::install_hooks::run(&agent, project, settings),
         Command::Doctor => cli::doctor::run(),
+        Command::Toggle => {
+            let _: Toggled = client::request(&paths::client_socket()?, &Request::Toggle)?;
+            Ok(())
+        }
+        Command::Sidebar => simul::sidebar::run(),
         Command::Daemon { tmux_socket } => run_daemon(tmux_socket),
         Command::Internal { what } => {
-            match what {
-                Internal::Refresh => {
-                    let _: simul::protocol::Ack = simul::client::request(
-                        &paths::client_socket()?,
-                        &simul::protocol::Request::Refresh,
-                    )?;
-                }
-            }
+            let req = match what {
+                Internal::Refresh => Request::Refresh,
+                Internal::Resized => Request::Resized,
+            };
+            let _: Ack = client::request(&paths::client_socket()?, &req)?;
             Ok(())
         }
     }

@@ -14,17 +14,27 @@ pub enum Request {
     Subscribe,
     Ping,
     Refresh,
+    /// Shows or hides the sidebar in every window; replies with `Toggled`.
+    Toggle,
+    /// Reasserts sidebar widths after a client resize.
+    Resized,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Status {
     pub now_ms: u64,
+    pub sidebar: bool,
     pub panes: Vec<PaneRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ack {
     pub ok: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Toggled {
+    pub sidebar: bool,
 }
 
 pub fn now_ms() -> u64 {

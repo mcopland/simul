@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# TPM entry point: checks tmux, finds the simul binary, and starts the daemon.
+# TPM entry point: checks tmux, finds the simul binary, starts the daemon, and binds
+# @simul-key (default prefix + a) to toggle the sidebar.
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -37,6 +38,10 @@ main() {
 	fi
 	socket=$(tmux display-message -p '#{socket_path}')
 	tmux run-shell -b "'$bin' daemon --tmux-socket '$socket' >/dev/null 2>&1"
+
+	local key
+	key=$(tmux show-option -gqv @simul-key)
+	tmux bind-key "${key:-a}" run-shell -b "'$bin' toggle"
 }
 
 main

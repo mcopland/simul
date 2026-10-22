@@ -11,7 +11,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::Cmd;
 use crate::log;
-use crate::protocol::{Ack, Request};
+use crate::protocol::{Ack, Request, Toggled};
 
 /// Binds the daemon socket, or returns `None` if a live daemon already owns it.
 pub fn bind(path: &Path) -> Result<Option<UnixListener>> {
@@ -96,6 +96,16 @@ async fn serve(stream: UnixStream, tx: mpsc::Sender<Cmd>) -> Result<()> {
                 }
             }
             Request::Ping => write_json(&mut w, &Ack { ok: true }).await?,
+            Request::Toggle => {
+                let (reply, rx) = oneshot::channel();
+                send(&tx, Cmd::Toggle(reply)).await?;
+                let sidebar = rx.await.context("daemon dropped toggle request")?;
+                write_json(&mut w, &Toggled { sidebar }).await?;
+            }
+            Request::Resized => {
+                send(&tx, Cmd::Resized).await?;
+                write_json(&mut w, &Ack { ok: true }).await?;
+            }
             Request::Refresh => {
                 send(&tx, Cmd::Refresh).await?;
                 write_json(&mut w, &Ack { ok: true }).await?;

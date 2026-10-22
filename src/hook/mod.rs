@@ -24,6 +24,12 @@ impl Agent {
         }
     }
 
+    pub fn label(self) -> &'static str {
+        match self {
+            Agent::Claude => "Claude",
+        }
+    }
+
     pub fn tag(self) -> char {
         match self {
             Agent::Claude => 'C',

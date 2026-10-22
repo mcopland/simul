@@ -5,6 +5,7 @@ use serde_json::Value;
 
 use super::install_hooks;
 use crate::client;
+use crate::daemon::notify::{self, Message};
 use crate::hook::claude;
 use crate::paths::{self, env_var};
 use crate::protocol::{Ack, Request, Status};
@@ -81,6 +82,7 @@ fn gather() -> Vec<Check> {
         }
     };
     checks.push(check_claude_hooks_file(&claude_settings_paths()));
+    checks.push(test_notification());
     if let (true, Ok(sock)) = (daemon_up, &socket) {
         checks.push(match client::request::<Status>(sock, &Request::List) {
             Ok(status) => pass("agents", format!("{} tracked", status.panes.len())),
@@ -88,6 +90,22 @@ fn gather() -> Vec<Check> {
         });
     }
     checks
+}
+
+fn test_notification() -> Check {
+    let msg = Message {
+        title: "simul".into(),
+        body: "test notification from simul doctor".into(),
+    };
+    let sent = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(anyhow::Error::from)
+        .and_then(|rt| rt.block_on(notify::desktop(&msg)));
+    match sent {
+        Ok(()) => pass("notification", "sent; check that it appeared"),
+        Err(e) => fail("notification", format!("{e:#}")),
+    }
 }
 
 pub fn check_version(output: &str) -> Check {

@@ -110,6 +110,7 @@ mod tests {
     fn renders_aligned_table() {
         let status = Status {
             now_ms: 181_000,
+            sidebar: false,
             panes: vec![rec("%1", State::Blocked), rec("%12", State::Done)],
         };
         let out = render(&status);
@@ -128,6 +129,7 @@ mod tests {
     fn empty_status_says_so() {
         let out = render(&Status {
             now_ms: 0,
+            sidebar: false,
             panes: vec![],
         });
         assert_eq!(out, "no agents\n");

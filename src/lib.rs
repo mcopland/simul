@@ -7,4 +7,5 @@ pub mod hook;
 pub mod log;
 pub mod paths;
 pub mod protocol;
+pub mod sidebar;
 pub mod tmux;

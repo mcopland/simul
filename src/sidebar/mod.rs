@@ -1,0 +1,218 @@
+pub mod model;
+
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result};
+use crossterm::event::{self, Event, KeyEventKind, MouseButton, MouseEventKind};
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Layout};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line as TextLine, Span};
+use ratatui::widgets::Paragraph;
+
+use crate::client;
+use crate::daemon::state::State;
+use crate::paths::{self, env_var};
+use crate::protocol::{Status, now_ms};
+use crate::tmux::Tmux;
+use model::{Action, App, Line};
+
+const SESSION_REFRESH: Duration = Duration::from_secs(5);
+const RECONNECT: Duration = Duration::from_secs(1);
+
+enum Update {
+    Status(Status),
+    Disconnected(String),
+}
+
+pub fn run() -> Result<()> {
+    let socket = paths::client_socket()?;
+    let tmux = paths::current_tmux_socket()
+        .map(Tmux::new)
+        .context("the sidebar must run inside tmux")?;
+    let own_pane = env_var("TMUX_PANE");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || subscribe_forever(&socket, &tx));
+
+    let mut terminal = ratatui::init();
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)
+        .context("failed to enable mouse capture")?;
+    let result = ui_loop(&mut terminal, &rx, &tmux, own_pane.as_deref());
+    // Restoring the terminal is best effort; the pane is usually being closed anyway.
+    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+    ratatui::restore();
+    result
+}
+
+fn subscribe_forever(socket: &std::path::Path, tx: &mpsc::Sender<Update>) {
+    loop {
+        let err = match client::subscribe(socket) {
+            Ok(stream) => stream
+                .map(|item| match item {
+                    Ok(status) => tx.send(Update::Status(status)).map_err(|_| None),
+                    Err(e) => Err(Some(format!("{e:#}"))),
+                })
+                .find_map(Result::err)
+                .flatten(),
+            Err(e) => Some(format!("{e:#}")),
+        };
+        let Some(err) = err else {
+            return; // UI gone.
+        };
+        if tx.send(Update::Disconnected(err)).is_err() {
+            return;
+        }
+        std::thread::sleep(RECONNECT);
+    }
+}
+
+struct View {
+    app: App,
+    error: Option<String>,
+    offset: usize,
+}
+
+fn ui_loop(
+    terminal: &mut ratatui::DefaultTerminal,
+    rx: &mpsc::Receiver<Update>,
+    tmux: &Tmux,
+    own_pane: Option<&str>,
+) -> Result<()> {
+    let mut view = View {
+        app: App::default(),
+        error: None,
+        offset: 0,
+    };
+    let mut session_checked: Option<Instant> = None;
+    loop {
+        while let Ok(update) = rx.try_recv() {
+            match update {
+                Update::Status(s) => {
+                    view.error = None;
+                    view.app.set_status(s);
+                }
+                Update::Disconnected(e) => view.error = Some(format!("daemon unavailable: {e}")),
+            }
+        }
+        if session_checked.is_none_or(|t| t.elapsed() >= SESSION_REFRESH) {
+            session_checked = Some(Instant::now());
+            if let Some(pane) = own_pane {
+                match tmux.run(&["display-message", "-p", "-t", pane, "#{session_name}"]) {
+                    Ok(s) => view.app.own_session = Some(s.trim().to_owned()),
+                    Err(e) => view.error = Some(format!("{e:#}")),
+                }
+            }
+        }
+        if let Some(status) = view.app.status.as_mut() {
+            status.now_ms = now_ms();
+        }
+        terminal
+            .draw(|f| render(f, &mut view))
+            .context("failed to draw sidebar")?;
+
+        if !event::poll(Duration::from_millis(250)).context("failed to poll terminal input")? {
+            continue;
+        }
+        let action = match event::read().context("failed to read terminal input")? {
+            Event::Key(k) if k.kind == KeyEventKind::Press => view.app.on_key(k),
+            Event::Mouse(m) if m.kind == MouseEventKind::Down(MouseButton::Left) => {
+                view.app.on_click(view.offset + usize::from(m.row))
+            }
+            _ => Action::None,
+        };
+        if let Action::Jump(pane) = action
+            && let Err(e) = jump(tmux, &pane)
+        {
+            view.error = Some(format!("{e:#}"));
+        }
+    }
+}
+
+fn jump(tmux: &Tmux, pane: &str) -> Result<()> {
+    tmux.run(&["switch-client", "-t", pane])?;
+    tmux.run(&["select-window", "-t", pane])?;
+    tmux.run(&["select-pane", "-t", pane])?;
+    Ok(())
+}
+
+fn state_color(state: State) -> Color {
+    match state {
+        State::Blocked => Color::Red,
+        State::Done => Color::Green,
+        State::Working => Color::Yellow,
+        State::Idle => Color::Blue,
+        State::Unknown => Color::DarkGray,
+    }
+}
+
+fn render(f: &mut Frame, view: &mut View) {
+    let [list, footer] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
+    let lines = view.app.lines();
+    let mut agent_index = 0;
+    let mut selected_line = 0;
+    let rendered: Vec<TextLine> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| match line {
+            Line::Session(name) => TextLine::from(Span::styled(
+                name.clone(),
+                Style::new().add_modifier(Modifier::BOLD),
+            )),
+            Line::Agent(row) => {
+                let selected = agent_index == view.app.selected;
+                if selected {
+                    selected_line = i;
+                }
+                agent_index += 1;
+                let mut spans = vec![
+                    Span::styled(" \u{25cf} ", Style::new().fg(state_color(row.state))),
+                    Span::raw(format!(
+                        "{} {:<8} {:>4} {}",
+                        row.tag, row.location, row.age, row.branch
+                    )),
+                ];
+                if selected {
+                    spans = spans
+                        .into_iter()
+                        .map(|s| s.patch_style(Style::new().add_modifier(Modifier::REVERSED)))
+                        .collect();
+                }
+                TextLine::from(spans)
+            }
+        })
+        .collect();
+    let height = usize::from(list.height);
+    if selected_line < view.offset {
+        view.offset = selected_line;
+    } else if height > 0 && selected_line >= view.offset + height {
+        view.offset = selected_line + 1 - height;
+    }
+    let body = if rendered.is_empty() {
+        vec![TextLine::from(Span::styled(
+            "no agents",
+            Style::new().fg(Color::DarkGray),
+        ))]
+    } else {
+        rendered.into_iter().skip(view.offset).collect()
+    };
+    f.render_widget(Paragraph::new(body), list);
+
+    let footer_line = if let Some(err) = &view.error {
+        TextLine::from(Span::styled(err.clone(), Style::new().fg(Color::Red)))
+    } else if view.app.editing {
+        TextLine::from(format!("/{}_", view.app.text))
+    } else {
+        let text = if view.app.text.is_empty() {
+            "-".to_owned()
+        } else {
+            view.app.text.clone()
+        };
+        TextLine::from(Span::styled(
+            format!("f:{} /:{text}", view.app.filter.label()),
+            Style::new().fg(Color::DarkGray),
+        ))
+    };
+    f.render_widget(Paragraph::new(footer_line), footer);
+}

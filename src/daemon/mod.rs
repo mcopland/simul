@@ -1,4 +1,5 @@
 pub mod control_mode;
+pub mod notify;
 pub mod scan;
 pub mod server;
 pub mod state;
@@ -27,6 +28,8 @@ pub enum Cmd {
     List(oneshot::Sender<Status>),
     Subscribe(oneshot::Sender<(Status, broadcast::Receiver<Status>)>),
     Refresh,
+    Toggle(oneshot::Sender<bool>),
+    Resized,
     TmuxNotification { name: String },
     Reconcile,
     Tick,
@@ -51,6 +54,10 @@ struct Daemon {
     updates: broadcast::Sender<Status>,
     reconcile_pending: bool,
     branch_inflight: HashSet<String>,
+    sidebar_on: bool,
+    /// Windows seen at the last reconcile; only windows new since then get a sidebar.
+    known_windows: HashSet<String>,
+    notify_gate: notify::Gate,
 }
 
 pub async fn run(opts: Options) -> Result<()> {
@@ -80,6 +87,9 @@ pub async fn run(opts: Options) -> Result<()> {
         updates,
         reconcile_pending: false,
         branch_inflight: HashSet::new(),
+        sidebar_on: false,
+        known_windows: HashSet::new(),
+        notify_gate: notify::Gate::default(),
     };
     d.install_tmux_hooks().await;
     d.reconcile().await;
@@ -144,6 +154,11 @@ impl Daemon {
                     self.publish();
                 }
             }
+            Cmd::Toggle(reply) => {
+                let on = self.toggle().await;
+                let _ = reply.send(on);
+            }
+            Cmd::Resized => self.reassert_widths().await,
             Cmd::Shutdown => {}
         }
     }
@@ -151,6 +166,7 @@ impl Daemon {
     fn status(&self) -> Status {
         Status {
             now_ms: now_ms(),
+            sidebar: self.sidebar_on,
             panes: self.store.records(),
         }
     }
@@ -196,6 +212,16 @@ impl Daemon {
                 t.from.map_or("new", |s| s.name()),
                 t.to.name()
             );
+            let viewed = self.snapshot.viewed.contains(&t.pane);
+            let cfg = &self.opts.config.notify;
+            if cfg.enabled
+                && self
+                    .notify_gate
+                    .admit(&t, viewed, now_ms(), cfg.dedupe_secs * 1000)
+            {
+                let msg = notify::message(&t, self.store.get(&t.pane));
+                tokio::spawn(notify::deliver(self.opts.tmux.clone(), msg));
+            }
         }
     }
 
@@ -248,6 +274,7 @@ impl Daemon {
         }
         let transitions = self.store.reconcile(&snap, now);
         self.snapshot = snap;
+        self.maintain_sidebars().await;
         self.on_transitions(transitions, "viewed");
         self.publish();
     }
@@ -292,16 +319,138 @@ impl Daemon {
             shell_quote(&self.opts.socket.to_string_lossy()),
             shell_quote(&self.opts.exe.to_string_lossy()),
         );
-        let run = format!("run-shell -b {}", tmux_double_quote(&cmd));
-        for hook in ["pane-focus-in", "pane-focus-out"] {
+        let refresh = format!("run-shell -b {}", tmux_double_quote(&cmd));
+        let resized = refresh.replace("internal refresh", "internal resized");
+        for (hook, run) in [
+            ("pane-focus-in", &refresh),
+            ("pane-focus-out", &refresh),
+            ("client-resized", &resized),
+        ] {
             let name = format!("{hook}[{HOOK_INDEX}]");
             if let Err(e) = self
                 .opts
                 .tmux
-                .run_async(&["set-hook", "-g", &name, &run])
+                .run_async(&["set-hook", "-g", &name, run])
                 .await
             {
                 log!("failed to install tmux hook {name}: {e:#}");
+            }
+        }
+    }
+
+    fn windows(&self) -> HashSet<String> {
+        self.snapshot
+            .panes
+            .iter()
+            .map(|p| p.window_id.clone())
+            .collect()
+    }
+
+    fn windows_with_sidebar(&self) -> HashSet<String> {
+        self.snapshot
+            .panes
+            .iter()
+            .filter(|p| p.is_sidebar)
+            .map(|p| p.window_id.clone())
+            .collect()
+    }
+
+    async fn toggle(&mut self) -> bool {
+        self.reconcile().await;
+        if self.sidebar_on {
+            self.sidebar_on = false;
+            for pane in self.snapshot.panes.iter().filter(|p| p.is_sidebar) {
+                if let Err(e) = self
+                    .opts
+                    .tmux
+                    .run_async(&["kill-pane", "-t", &pane.id])
+                    .await
+                {
+                    log!("failed to close sidebar {}: {e:#}", pane.id);
+                }
+            }
+        } else {
+            self.sidebar_on = true;
+            let have = self.windows_with_sidebar();
+            for window in self.windows().difference(&have) {
+                self.add_sidebar(window).await;
+            }
+        }
+        self.known_windows = self.windows();
+        self.publish();
+        self.schedule_reconcile();
+        self.sidebar_on
+    }
+
+    /// Adds sidebars to new windows and closes sidebars left alone in their window.
+    async fn maintain_sidebars(&mut self) {
+        let windows = self.windows();
+        if self.sidebar_on {
+            let have = self.windows_with_sidebar();
+            let new: Vec<String> = windows
+                .difference(&self.known_windows)
+                .filter(|w| !have.contains(*w))
+                .cloned()
+                .collect();
+            for window in &new {
+                self.add_sidebar(window).await;
+            }
+        }
+        self.known_windows = windows;
+        let lone: Vec<String> = self
+            .snapshot
+            .panes
+            .iter()
+            .filter(|p| p.is_sidebar && p.window_panes == 1)
+            .map(|p| p.id.clone())
+            .collect();
+        for pane in lone {
+            if let Err(e) = self.opts.tmux.run_async(&["kill-pane", "-t", &pane]).await {
+                log!("failed to close lone sidebar {pane}: {e:#}");
+            }
+        }
+    }
+
+    async fn add_sidebar(&self, window: &str) {
+        let width = self.opts.config.sidebar.width.to_string();
+        let cmd = format!(
+            "SIMUL_SOCKET={} exec {} sidebar",
+            shell_quote(&self.opts.socket.to_string_lossy()),
+            shell_quote(&self.opts.exe.to_string_lossy()),
+        );
+        let split = [
+            "split-window",
+            "-hbfd",
+            "-l",
+            &width,
+            "-t",
+            window,
+            "-P",
+            "-F",
+            "#{pane_id}",
+            &cmd,
+        ];
+        let pane = match self.opts.tmux.run_async(&split).await {
+            Ok(p) => p.trim().to_owned(),
+            Err(e) => {
+                log!("failed to open sidebar in {window}: {e:#}");
+                return;
+            }
+        };
+        // The actor awaits this before handling the next reconcile, so no snapshot sees an
+        // untagged sidebar and adds a second one.
+        let tag = ["set-option", "-p", "-t", &pane, "@simul-sidebar", "1"];
+        if let Err(e) = self.opts.tmux.run_async(&tag).await {
+            log!("failed to tag sidebar {pane}: {e:#}");
+        }
+    }
+
+    async fn reassert_widths(&mut self) {
+        let width = self.opts.config.sidebar.width.to_string();
+        for pane in self.snapshot.panes.iter().filter(|p| p.is_sidebar) {
+            let resize = ["resize-pane", "-t", &pane.id, "-x", &width];
+            if let Err(e) = self.opts.tmux.run_async(&resize).await {
+                log!("failed to resize sidebar {}: {e:#}", pane.id);
             }
         }
     }
