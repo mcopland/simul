@@ -218,13 +218,13 @@ impl Store {
 
     pub fn apply_screen(&mut self, pane: &str, screen: Screen, now: u64) -> Option<Transition> {
         let rec = self.panes.get_mut(pane)?;
+        if screen != Screen::Idle {
+            rec.idle_scrapes = 0;
+        }
         let next = match (rec.state, screen) {
             (_, Screen::Unknown) | (State::Done | State::Idle, _) => None,
             (_, Screen::Blocked) => Some(State::Blocked),
-            (_, Screen::Working) => {
-                rec.idle_scrapes = 0;
-                Some(State::Working)
-            }
+            (_, Screen::Working) => Some(State::Working),
             (State::Unknown, Screen::Idle) => Some(State::Idle),
             (State::Working | State::Blocked, Screen::Idle) => {
                 rec.idle_scrapes += 1;
@@ -473,6 +473,27 @@ mod tests {
                 ("%3".to_string(), Agent::Claude)
             ]
         );
+    }
+
+    #[test]
+    fn idle_streak_requires_consecutive_scrapes() {
+        let mut s = Store::default();
+        s.apply(
+            "%1",
+            Agent::Claude,
+            &ev(AgentEvent::PermissionPrompt),
+            1,
+            false,
+        );
+        s.apply_screen("%1", Screen::Idle, 2);
+        s.apply_screen("%1", Screen::Blocked, 3);
+        assert_eq!(s.apply_screen("%1", Screen::Idle, 4), None);
+        assert_eq!(state(&s, "%1"), Some(State::Blocked));
+        s.apply("%2", Agent::Claude, &ev(AgentEvent::PromptSubmit), 1, false);
+        s.apply_screen("%2", Screen::Idle, 2);
+        s.apply_screen("%2", Screen::Unknown, 3);
+        assert_eq!(s.apply_screen("%2", Screen::Idle, 4), None);
+        assert_eq!(state(&s, "%2"), Some(State::Working));
     }
 
     #[test]
