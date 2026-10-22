@@ -58,6 +58,8 @@ struct Daemon {
     /// Windows seen at the last reconcile; only windows new since then get a sidebar.
     known_windows: HashSet<String>,
     notify_gate: notify::Gate,
+    /// Working directories whose branch has been looked up at least once.
+    branch_fetched: HashSet<String>,
 }
 
 pub async fn run(opts: Options) -> Result<()> {
@@ -90,6 +92,7 @@ pub async fn run(opts: Options) -> Result<()> {
         sidebar_on: false,
         known_windows: HashSet::new(),
         notify_gate: notify::Gate::default(),
+        branch_fetched: HashSet::new(),
     };
     d.install_tmux_hooks().await;
     d.reconcile().await;
@@ -187,11 +190,10 @@ impl Daemon {
         let parsed = agent.parse(&env.event, &env.payload);
         let viewed = self.snapshot.viewed.contains(&pane);
         let transition = self.store.apply(&pane, agent, &parsed, now_ms(), viewed);
-        if let Some(rec) = self.store.get(&pane) {
-            let refresh_branch =
-                matches!(parsed.event, AgentEvent::SessionStart | AgentEvent::Stop)
-                    || rec.branch.is_none();
-            if let (true, Some(cwd)) = (refresh_branch, rec.cwd.clone()) {
+        if let Some(cwd) = self.store.get(&pane).and_then(|r| r.cwd.clone()) {
+            let refresh = matches!(parsed.event, AgentEvent::SessionStart | AgentEvent::Stop)
+                || !self.branch_fetched.contains(&cwd);
+            if refresh {
                 self.fetch_branch(cwd);
             }
         }
@@ -229,6 +231,7 @@ impl Daemon {
         if !self.branch_inflight.insert(cwd.clone()) {
             return;
         }
+        self.branch_fetched.insert(cwd.clone());
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let branch = match crate::git::current_branch(&cwd).await {
@@ -267,6 +270,8 @@ impl Daemon {
         let now = now_ms();
         if !self.recovered {
             self.recovered = true;
+            // Sidebars outlive a daemon restart; adopt them so the next toggle hides them.
+            self.sidebar_on = snap.panes.iter().any(|p| p.is_sidebar);
             let added = self.store.recover(&snap, now);
             if !added.is_empty() {
                 log!("recovered agent panes: {}", added.join(" "));

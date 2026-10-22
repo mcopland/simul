@@ -115,3 +115,42 @@ fn sidebar_renders_agents() {
     assert!(screen.starts_with('t'), "session header first: {screen}");
     assert!(screen.contains("f:all"), "{screen}");
 }
+
+#[test]
+fn toggle_after_daemon_restart_hides_existing_sidebars() {
+    let mut h = Harness::new();
+    h.start_daemon();
+    toggle(&h);
+    assert_eq!(sidebars(&h).len(), 1);
+    h.stop_daemon();
+    h.start_daemon();
+    toggle(&h);
+    eventually("sidebars removed", || sidebars(&h).is_empty());
+}
+
+#[test]
+fn windows_in_every_session_get_sidebars() {
+    let mut h = Harness::new();
+    h.tmux(&["new-session", "-d", "-s", "u", "sh"]);
+    h.start_daemon();
+    toggle(&h);
+    assert_eq!(sidebars(&h).len(), 2);
+    for (session, want) in [("t:", 3), ("u:", 4)] {
+        h.tmux(&["new-window", "-d", "-t", session, "sleep 600"]);
+        eventually(&format!("sidebar in new window of {session}"), || {
+            sidebars(&h).len() == want
+        });
+    }
+}
+
+#[test]
+fn lone_sidebar_in_unattached_session_is_closed() {
+    let mut h = Harness::new();
+    let pane = h.new_pane("sleep 600");
+    h.tmux(&["new-session", "-d", "-s", "u", "sh"]);
+    h.start_daemon();
+    toggle(&h);
+    let window = h.tmux(&["display-message", "-p", "-t", &pane, "#{window_id}"]);
+    h.tmux(&["kill-pane", "-t", &pane]);
+    eventually("window closed", || !windows(&h).contains(&window));
+}

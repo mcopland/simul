@@ -183,9 +183,16 @@ async fn alert_clients(tmux: &Tmux, msg: &Message) -> Result<()> {
         if tty.is_empty() || flags.split(',').any(|f| f == "control-mode") {
             continue;
         }
-        tmux.run_async(&["display-message", "-c", tty, "-d", "4000", &text])
-            .await?;
-        ring_bell(tty)?;
+        // One unreachable client must not keep the alert from the others.
+        if let Err(e) = tmux
+            .run_async(&["display-message", "-c", tty, "-d", "4000", &text])
+            .await
+        {
+            log!("{e:#}");
+        }
+        if let Err(e) = ring_bell(tty) {
+            log!("{e:#}");
+        }
     }
     Ok(())
 }

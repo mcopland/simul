@@ -58,6 +58,7 @@ pub fn triggers_reconcile(name: &str) -> bool {
     matches!(
         name,
         "%window-add"
+            | "%unlinked-window-add"
             | "%window-close"
             | "%unlinked-window-close"
             | "%layout-change"
@@ -84,6 +85,7 @@ pub async fn run(tmux: Tmux, tx: mpsc::Sender<Cmd>) {
             let _ = tx.send(Cmd::Shutdown).await;
             return;
         }
+        // Reattached: state may have changed while detached. A send error means shutdown.
         let _ = tx
             .send(Cmd::TmuxNotification {
                 name: "%sessions-changed".into(),
@@ -164,6 +166,7 @@ mod tests {
     fn reconcile_triggers() {
         for name in [
             "%window-add",
+            "%unlinked-window-add",
             "%window-close",
             "%unlinked-window-close",
             "%layout-change",
