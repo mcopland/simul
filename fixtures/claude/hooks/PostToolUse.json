@@ -1,0 +1,26 @@
+{
+  "session_id": "6619bca9-5cea-45c1-8083-cfd45dffb9df",
+  "transcript_path": "/home/user/.claude/projects/-home-user-src-scratch/6619bca9-5cea-45c1-8083-cfd45dffb9df.jsonl",
+  "cwd": "/home/user/src/scratch",
+  "prompt_id": "988f2bdc-3eaf-4125-9cac-888c707331c1",
+  "permission_mode": "default",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "/home/user/src/scratch/hello.txt",
+    "content": "hi\n"
+  },
+  "tool_response": {
+    "type": "create",
+    "filePath": "/home/user/src/scratch/hello.txt",
+    "content": "hi\n",
+    "structuredPatch": [],
+    "originalFile": null,
+    "userModified": false
+  },
+  "tool_use_id": "toolu_019rZDjWTWZ6m9G5z7B9PWWt",
+  "duration_ms": 170
+}

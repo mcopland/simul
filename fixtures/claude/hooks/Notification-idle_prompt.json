@@ -1,0 +1,9 @@
+{
+  "session_id": "6619bca9-5cea-45c1-8083-cfd45dffb9df",
+  "transcript_path": "/home/user/.claude/projects/-home-user-src-scratch/6619bca9-5cea-45c1-8083-cfd45dffb9df.jsonl",
+  "cwd": "/home/user/src/scratch",
+  "prompt_id": "9ce09eba-9fe2-4f25-a47c-91fdaa08af7f",
+  "hook_event_name": "Notification",
+  "message": "Claude is waiting for your input",
+  "notification_type": "idle_prompt"
+}

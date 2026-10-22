@@ -1,0 +1,9 @@
+{
+  "session_id": "6619bca9-5cea-45c1-8083-cfd45dffb9df",
+  "transcript_path": "/home/user/.claude/projects/-home-user-src-scratch/6619bca9-5cea-45c1-8083-cfd45dffb9df.jsonl",
+  "cwd": "/home/user/src/scratch",
+  "prompt_id": "988f2bdc-3eaf-4125-9cac-888c707331c1",
+  "permission_mode": "default",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "Create a file named hello.txt containing the word hi. Use the Write tool."
+}

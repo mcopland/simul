@@ -1,0 +1,40 @@
+
+❯ Create a file named bye2.txt containing bye. Use the Write tool.
+
+⏺ Write(/home/user/src/scratch/bye2.txt)
+  ⎿  User rejected write to /home/user/src/scratch/bye2.txt
+      1 bye
+
+✻ Cogitated for 3s · done 11:42 PM
+
+❯ Run this exact bash command: sleep 12 && echo finished
+
+⏺ Bash(sleep 12 && echo finished)
+  ⎿  finished
+
+⏺ The command finished and printed finished.
+
+  bye.txt and bye2.txt don't exist because you rejected both writes. hello.txt is still there and hasn't been committed.
+
+  settled: hello.txt created, sleep command ran / open: whether you want bye.txt or bye2.txt, whether to commit / next:
+  waiting on you
+
+✻ Sautéed for 23s · done 11:43 PM
+
+❯ Run this exact bash command: sleep 20 && echo finished
+
+⏺ Bash(sleep 20 && echo finished)
+  ⎿  finished
+
+⏺ It finished and printed finished.
+
+  settled: both sleep commands ran, hello.txt exists / open: whether you want bye.txt or bye2.txt, whether to commit /
+  next: waiting on you
+
+✻ Sautéed for 27s · done 11:44 PM
+                                                                                                          24831 tokens
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  repo main *1 | 2% | 5h 8% (3:40am) · 7d 4% (Oct 28) | Opus 5.5 · high
+  ⏸ manual mode on

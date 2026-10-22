@@ -1,0 +1,8 @@
+{
+  "session_id": "6619bca9-5cea-45c1-8083-cfd45dffb9df",
+  "transcript_path": "/home/user/.claude/projects/-home-user-src-scratch/6619bca9-5cea-45c1-8083-cfd45dffb9df.jsonl",
+  "cwd": "/home/user/src/scratch",
+  "prompt_id": "e3af8b4f-e839-4db4-b1c2-0c7e67ed7e45",
+  "hook_event_name": "SessionEnd",
+  "reason": "prompt_input_exit"
+}

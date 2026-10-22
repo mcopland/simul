@@ -1,0 +1,40 @@
+ ▝▝   ▝▝   /home/user/src/scratch
+
+
+❯ Create a file named hello.txt containing the word hi. Use the Write tool.
+
+⏺ Write(/home/user/src/scratch/hello.txt)
+  ⎿  Wrote 1 line to /home/user/src/scratch/hello.txt
+      1 hi
+
+⏺ I created hello.txt in the repo root. It contains hi followed by a newline, and I haven't committed it.
+
+  settled: file created / open: whether to commit it / next: commit if you want
+
+✻ Cogitated for 11s · done 11:41 PM
+
+❯ Create a file named bye.txt containing bye. Use the Write tool.
+
+⏺ Write(/home/user/src/scratch/bye.txt)
+  ⎿  User rejected write to /home/user/src/scratch/bye.txt
+      1 bye
+
+✻ Sautéed for 2s · done 11:41 PM
+
+❯ Create a file named bye2.txt containing bye. Use the Write tool.
+
+⏺ Write(/home/user/src/scratch/bye2.txt)
+  ⎿  User rejected write to /home/user/src/scratch/bye2.txt
+      1 bye
+
+✻ Cogitated for 3s · done 11:42 PM
+
+❯ Write a 600 word essay about tmux, directly in your reply, no tools.
+
+✽ Unfurling… (4s · thinking with high effort)
+                                                                                                      ● high · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  repo main *1 | 2% | 5h 7% (3:40am) · 7d 3% (Oct 28) | Opus 5.5 · high
+  ⏸ manual mode on

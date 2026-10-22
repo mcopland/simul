@@ -1,0 +1,8 @@
+{
+  "session_id": "6619bca9-5cea-45c1-8083-cfd45dffb9df",
+  "transcript_path": "/home/user/.claude/projects/-home-user-src-scratch/6619bca9-5cea-45c1-8083-cfd45dffb9df.jsonl",
+  "cwd": "/home/user/src/scratch",
+  "hook_event_name": "SessionStart",
+  "source": "startup",
+  "model": "claude-opus-5-5"
+}
