@@ -27,6 +27,10 @@ fn is_version(s: &str) -> bool {
 
 pub fn parse(event: &str, payload: &Value) -> Parsed {
     let event = match event {
+        // Compaction restarts the session mid-turn; the agent is still busy.
+        "SessionStart" if str_field(payload, "source").as_deref() == Some("compact") => {
+            AgentEvent::NoChange
+        }
         "SessionStart" => AgentEvent::SessionStart,
         "UserPromptSubmit" => AgentEvent::PromptSubmit,
         "PreToolUse" => AgentEvent::PreTool {
@@ -66,7 +70,7 @@ const SCRAPE_LINES: usize = 15;
 pub fn classify_screen(screen: &str) -> Screen {
     let lines = bottom_lines(screen, SCRAPE_LINES);
     let has = |needle: &str| lines.iter().any(|l| l.contains(needle));
-    if has("Do you want to") && has("Esc to cancel") {
+    if (has("Do you want to") && has("Esc to cancel")) || lines.iter().any(|l| is_selector(l)) {
         Screen::Blocked
     } else if lines.iter().any(|l| is_spinner(l)) {
         Screen::Working
@@ -75,6 +79,14 @@ pub fn classify_screen(screen: &str) -> Screen {
     } else {
         Screen::Unknown
     }
+}
+
+/// A numbered option under the cursor (`\u{276f} 1. Yes`): approvals, plan exit, questions.
+fn is_selector(line: &str) -> bool {
+    line.trim_start()
+        .strip_prefix("\u{276f} ")
+        .and_then(|rest| rest.split_once(". "))
+        .is_some_and(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Matches `<glyph> <Verb>\u{2026} (<n>s ...`.
@@ -158,6 +170,22 @@ mod tests {
         );
         let p = json!({"message": "something else"});
         assert_eq!(parse("Notification", &p).event, AgentEvent::NoChange);
+    }
+
+    #[test]
+    fn compaction_session_start_keeps_state() {
+        let p = json!({"source": "compact", "session_id": "s"});
+        assert_eq!(parse("SessionStart", &p).event, AgentEvent::NoChange);
+        let p = json!({"source": "clear"});
+        assert_eq!(parse("SessionStart", &p).event, AgentEvent::SessionStart);
+    }
+
+    #[test]
+    fn numbered_selector_is_blocked() {
+        let plan_exit = "Ready to code?\n\n Would you like to proceed?\n \u{276f} 1. Yes, and auto-accept edits\n   2. Yes\n   3. No, keep planning\n";
+        assert_eq!(classify_screen(plan_exit), Screen::Blocked);
+        let idle_with_text = "\u{276f} hello\n";
+        assert_eq!(classify_screen(idle_with_text), Screen::Idle);
     }
 
     #[test]
