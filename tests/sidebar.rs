@@ -154,3 +154,31 @@ fn lone_sidebar_in_unattached_session_is_closed() {
     h.tmux(&["kill-pane", "-t", &pane]);
     eventually("window closed", || !windows(&h).contains(&window));
 }
+
+#[test]
+fn closing_sidebars_does_not_log_errors() {
+    let mut h = Harness::new();
+    h.new_pane("sleep 600");
+    h.start_daemon();
+    toggle(&h);
+    let side = sidebars(&h);
+    eventually("sidebars subscribed", || {
+        side.iter().all(|s| {
+            h.tmux(&[
+                "display-message",
+                "-p",
+                "-t",
+                &s.0,
+                "#{pane_current_command}",
+            ]) == "simul"
+        })
+    });
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    toggle(&h);
+    eventually("sidebars removed", || sidebars(&h).is_empty());
+    // A status push after the sidebars are gone hits their closed sockets.
+    h.hook_fixture(&h.first_pane(), "UserPromptSubmit", "UserPromptSubmit");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let log = std::fs::read_to_string(h.simul_sock.with_extension("log")).unwrap();
+    assert!(!log.contains("Broken pipe"), "{log}");
+}

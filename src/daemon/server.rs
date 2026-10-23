@@ -45,14 +45,28 @@ pub async fn accept(listener: UnixListener, tx: mpsc::Sender<Cmd>) {
             Ok((stream, _)) => {
                 let tx = tx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = serve(stream, tx).await {
-                        log!("client connection: {e:#}");
+                    match serve(stream, tx).await {
+                        Ok(()) => {}
+                        Err(e) if is_disconnect(&e) => {}
+                        Err(e) => log!("client connection: {e:#}"),
                     }
                 });
             }
             Err(e) => log!("accept failed: {e}"),
         }
     }
+}
+
+/// A client that hung up (a closed sidebar, an interrupted `ls`) is normal, not an error.
+fn is_disconnect(e: &anyhow::Error) -> bool {
+    e.chain()
+        .filter_map(|c| c.downcast_ref::<std::io::Error>())
+        .any(|io| {
+            matches!(
+                io.kind(),
+                ErrorKind::BrokenPipe | ErrorKind::ConnectionReset
+            )
+        })
 }
 
 async fn write_json(w: &mut OwnedWriteHalf, value: &impl Serialize) -> Result<()> {
@@ -114,4 +128,21 @@ async fn send(tx: &mpsc::Sender<Cmd>, cmd: Cmd) -> Result<()> {
     tx.send(cmd)
         .await
         .map_err(|_| anyhow::anyhow!("daemon is shutting down"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hangups_are_disconnects() {
+        let pipe = anyhow::Error::new(std::io::Error::from(ErrorKind::BrokenPipe))
+            .context("failed to write reply");
+        assert!(is_disconnect(&pipe));
+        let reset = anyhow::Error::new(std::io::Error::from(ErrorKind::ConnectionReset));
+        assert!(is_disconnect(&reset));
+        let other = anyhow::Error::new(std::io::Error::from(ErrorKind::PermissionDenied));
+        assert!(!is_disconnect(&other));
+        assert!(!is_disconnect(&anyhow::anyhow!("malformed request")));
+    }
 }
