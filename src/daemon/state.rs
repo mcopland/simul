@@ -41,6 +41,13 @@ pub struct PaneRecord {
     pub pending_tool: Option<String>,
     pub session: Option<String>,
     pub window: Option<u32>,
+    #[serde(default)]
+    pub window_id: Option<String>,
+    #[serde(default)]
+    pub window_name: Option<String>,
+    /// Whether this is the active pane of its window.
+    #[serde(default)]
+    pub active: bool,
     #[serde(skip)]
     idle_scrapes: u8,
 }
@@ -59,6 +66,9 @@ impl PaneRecord {
             pending_tool: None,
             session: None,
             window: None,
+            window_id: None,
+            window_name: None,
+            active: false,
             idle_scrapes: 0,
         }
     }
@@ -82,6 +92,9 @@ pub struct PaneInfo {
     pub path: String,
     pub is_sidebar: bool,
     pub window_panes: u32,
+    /// Whether this is the active pane of its window.
+    pub active: bool,
+    pub window_name: String,
 }
 
 /// A point-in-time view of the tmux server used to reconcile tracked panes.
@@ -166,8 +179,7 @@ impl Store {
         let mut out = Vec::new();
         for rec in self.panes.values_mut() {
             if let Some(info) = live.get(rec.pane.as_str()) {
-                rec.session = Some(info.session.clone());
-                rec.window = Some(info.window);
+                place(rec, info);
             }
             if rec.state == State::Done && snap.viewed.contains(&rec.pane) {
                 let from = Some(rec.state);
@@ -193,8 +205,7 @@ impl Store {
             };
             let mut rec = PaneRecord::new(&info.id, agent, State::Unknown, now);
             rec.cwd = Some(info.path.clone());
-            rec.session = Some(info.session.clone());
-            rec.window = Some(info.window);
+            place(&mut rec, info);
             self.panes.insert(info.id.clone(), rec);
             added.push(info.id.clone());
         }
@@ -237,8 +248,7 @@ impl Store {
 
     pub fn locate(&mut self, info: &PaneInfo) {
         if let Some(rec) = self.panes.get_mut(&info.id) {
-            rec.session = Some(info.session.clone());
-            rec.window = Some(info.window);
+            place(rec, info);
         }
     }
 
@@ -252,6 +262,15 @@ impl Store {
         }
         changed
     }
+}
+
+/// Copies where the pane lives in tmux onto its record.
+fn place(rec: &mut PaneRecord, info: &PaneInfo) {
+    rec.session = Some(info.session.clone());
+    rec.window = Some(info.window);
+    rec.window_id = Some(info.window_id.clone());
+    rec.window_name = Some(info.window_name.clone());
+    rec.active = info.active;
 }
 
 fn set_state(
@@ -400,6 +419,8 @@ mod tests {
             path: "/w".into(),
             is_sidebar: false,
             window_panes: 1,
+            active: true,
+            window_name: "api".into(),
         }
     }
 
@@ -422,6 +443,9 @@ mod tests {
         let rec = s.get("%2").unwrap();
         assert_eq!(rec.session.as_deref(), Some("main"));
         assert_eq!(rec.window, Some(2));
+        assert_eq!(rec.window_id.as_deref(), Some("@2"));
+        assert_eq!(rec.window_name.as_deref(), Some("api"));
+        assert!(rec.active);
     }
 
     #[test]
@@ -575,6 +599,7 @@ mod tests {
             (rec.session.as_deref(), rec.window),
             (Some("main"), Some(2))
         );
+        assert_eq!(rec.window_name.as_deref(), Some("api"));
         assert!(s.get("%9").is_none());
     }
 
