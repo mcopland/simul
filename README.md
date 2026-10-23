@@ -14,20 +14,25 @@ Status: early development. See `fixtures/CALIBRATION.md` for verified agent beha
 
 ```sh
 cargo build --release
+ln -s "$PWD/target/release/simul" ~/.cargo/bin/simul  # or any directory on your PATH
 ```
+
+The symlink puts `simul` on your PATH, and rebuilds update it in place.
 
 With TPM, add `set -g @plugin 'mcopland/simul'` to `tmux.conf`. Without TPM, add `run-shell /path/to/simul/simul.tmux`. Either one starts the daemon when tmux loads.
 
 Then install the agent hooks:
 
 ```sh
-target/release/simul install-hooks claude            # ~/.claude/settings.json
-target/release/simul install-hooks claude --project  # ./.claude/settings.local.json
+simul install-hooks claude            # ~/.claude/settings.json
+simul install-hooks claude --project  # ./.claude/settings.local.json
 ```
+
+Hooks record the path you ran `simul` from, so run it through a path that won't move, such as the symlink above. Start new agent sessions to pick up the hooks.
 
 The merge keeps your existing hooks. If the settings file is a symlink, simul writes through it and leaves the link in place. Each run replaces simul's previous entries, which are tagged `#simul-managed`, and saves a `.simul-bak` copy first.
 
-Check the setup with `simul doctor`.
+Check the setup with `simul doctor`. After a rebuild, run `pkill -f 'simul daemon'`. The next hook event or tmux reload starts the new binary, and toggling the sidebar off and on restarts it too.
 
 ## Use
 
