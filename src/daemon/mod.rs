@@ -227,6 +227,20 @@ impl Daemon {
         }
     }
 
+    /// Panes found by the startup scan send no hook until used, so look their branch up here.
+    fn fetch_missing_branches(&mut self) {
+        let missing: HashSet<String> = self
+            .store
+            .records()
+            .into_iter()
+            .filter_map(|r| r.cwd)
+            .filter(|cwd| !self.branch_fetched.contains(cwd))
+            .collect();
+        for cwd in missing {
+            self.fetch_branch(cwd);
+        }
+    }
+
     fn fetch_branch(&mut self, cwd: String) {
         if !self.branch_inflight.insert(cwd.clone()) {
             return;
@@ -279,6 +293,7 @@ impl Daemon {
         }
         let transitions = self.store.reconcile(&snap, now);
         self.snapshot = snap;
+        self.fetch_missing_branches();
         self.maintain_sidebars().await;
         self.on_transitions(transitions, "viewed");
         self.publish();

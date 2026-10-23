@@ -165,3 +165,23 @@ fn ls_without_daemon_explains() {
         "{err}"
     );
 }
+
+#[test]
+fn recovered_panes_get_their_branch() {
+    let mut h = Harness::new();
+    let repo = h.dir.path().join("repo");
+    common::git_repo(&repo, "feat/scan");
+    let pane = h.fake_claude_pane_in("done", &repo);
+    h.start_daemon();
+    let mut branch = None;
+    let ok = common::poll(std::time::Duration::from_secs(5), || {
+        branch = h
+            .ls()
+            .into_iter()
+            .find(|r| r["pane"] == pane.as_str())
+            .and_then(|r| r["branch"].as_str().map(str::to_owned));
+        branch.is_some()
+    });
+    assert!(ok, "no branch for recovered pane");
+    assert_eq!(branch.as_deref(), Some("feat/scan"));
+}

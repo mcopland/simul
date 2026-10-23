@@ -201,6 +201,11 @@ impl Harness {
 
     /// A pane whose foreground process is named `claude`, showing a recorded screen.
     pub fn fake_claude_pane(&self, screen: &str) -> String {
+        self.fake_claude_pane_in(screen, self.dir.path())
+    }
+
+    /// Like `fake_claude_pane`, with the pane's working directory set to `cwd`.
+    pub fn fake_claude_pane_in(&self, screen: &str, cwd: &Path) -> String {
         let fake = self.dir.path().join("claude");
         if !fake.exists() {
             std::fs::copy(fake_agent_bin(), &fake).unwrap();
@@ -210,7 +215,18 @@ impl Harness {
             fake.display(),
             fixture(&format!("claude/screens/{screen}.txt")).display()
         );
-        let pane = self.new_pane(&cmd);
+        let pane = self.tmux(&[
+            "new-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            "t:",
+            "-c",
+            &cwd.to_string_lossy(),
+            &cmd,
+        ]);
         eventually("fake claude running", || {
             self.tmux(&[
                 "display-message",
@@ -252,6 +268,34 @@ fn fake_agent_bin() -> PathBuf {
             Path::new(BIN).parent().unwrap().join("examples/fake_agent")
         })
         .clone()
+}
+
+/// A git repo with one commit on `branch`.
+pub fn git_repo(dir: &Path, branch: &str) {
+    std::fs::create_dir_all(dir).unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", branch]);
+    git(&["commit", "-q", "--allow-empty", "-m", "chore: init"]);
 }
 
 pub fn poll(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
