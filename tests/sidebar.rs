@@ -303,3 +303,21 @@ fn header(screen: &str, session: &str) -> Option<bool> {
         (visible.trim() == session).then_some(text_bold)
     })
 }
+
+#[test]
+fn layout_hooks_see_the_sidebar_tag() {
+    let mut h = Harness::new();
+    // A user hook that hides pane borders when only one non-sidebar pane is left.
+    h.tmux(&[
+        "set-hook",
+        "-g",
+        "window-layout-changed",
+        "if -F \"#{==:#{P:#{?#{@simul-sidebar},,x}},x}\" \"setw pane-border-status off\" \"setw pane-border-status top\"",
+    ]);
+    h.start_daemon();
+    toggle(&h);
+    assert_eq!(sidebars(&h).len(), 1);
+    eventually("borders off with one real pane", || {
+        h.tmux(&["show-options", "-wv", "-t", "t:0", "pane-border-status"]) == "off"
+    });
+}

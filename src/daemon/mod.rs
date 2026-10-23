@@ -447,6 +447,13 @@ impl Daemon {
         let tag = ["set-option", "-p", "-t", &pane, "@simul-sidebar", "1"];
         if let Err(e) = self.opts.tmux.run_async(&tag).await {
             log!("failed to tag sidebar {pane}: {e:#}");
+            return;
+        }
+        // The split fired window-layout-changed before the tag existed; rerun the user's
+        // hooks so any that skip sidebars (e.g. pane-count checks) see it.
+        let rerun = ["set-hook", "-R", "-t", &pane, "window-layout-changed"];
+        if let Err(e) = self.opts.tmux.run_async(&rerun).await {
+            log!("failed to rerun layout hooks for {pane}: {e:#}");
         }
     }
 
