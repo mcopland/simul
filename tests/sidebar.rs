@@ -204,3 +204,102 @@ fn each_sidebar_highlights_its_own_windows_agent() {
         });
     }
 }
+
+#[test]
+fn highlight_is_one_solid_style() {
+    let mut h = Harness::new();
+    let agent = h.new_pane("sleep 600");
+    h.start_daemon();
+    h.hook_fixture(&agent, "UserPromptSubmit", "UserPromptSubmit");
+    toggle(&h);
+    let agent_window = h.tmux(&["display-message", "-p", "-t", &agent, "#{window_id}"]);
+    let (pane, _, width) = sidebars(&h)
+        .into_iter()
+        .find(|s| s.1 == agent_window)
+        .unwrap();
+    let mut line = String::new();
+    eventually("highlighted row", || {
+        let screen = h.tmux(&["capture-pane", "-e", "-p", "-t", &pane]);
+        line = screen
+            .lines()
+            .find(|l| l.contains("\x1b[7m"))
+            .unwrap_or_default()
+            .to_owned();
+        !line.is_empty()
+    });
+    assert!(
+        !line.contains("\x1b[38;"),
+        "no per-cell colors inside the highlight: {line:?}"
+    );
+    let visible: String = line
+        .split('\x1b')
+        .map(|seg| seg.split_once('m').map_or(seg, |(_, t)| t))
+        .collect();
+    assert_eq!(
+        visible.chars().count(),
+        width as usize,
+        "highlight spans the pane: {visible:?}"
+    );
+}
+
+#[test]
+fn only_the_current_session_header_is_bold() {
+    let mut h = Harness::new();
+    let agent = h.new_pane("sleep 600");
+    h.tmux(&["new-session", "-d", "-s", "u", "sleep 600"]);
+    h.start_daemon();
+    h.hook_fixture(&agent, "UserPromptSubmit", "UserPromptSubmit");
+    let other = h.tmux(&["display-message", "-p", "-t", "u:", "#{pane_id}"]);
+    h.hook_fixture(&other, "UserPromptSubmit", "UserPromptSubmit");
+    toggle(&h);
+    let (pane, _, _) = sidebars(&h)
+        .into_iter()
+        .find(|s| s.1 == h.tmux(&["display-message", "-p", "-t", &agent, "#{window_id}"]))
+        .unwrap();
+    let mut screen = String::new();
+    eventually("both sessions listed", || {
+        screen = h.tmux(&["capture-pane", "-e", "-p", "-t", &pane]);
+        header(&screen, "u").is_some()
+    });
+    assert_eq!(
+        header(&screen, "t"),
+        Some(true),
+        "own session bold: {screen:?}"
+    );
+    assert_eq!(
+        header(&screen, "u"),
+        Some(false),
+        "other session plain: {screen:?}"
+    );
+}
+
+/// Whether the header line for `session` is bold, if present.
+fn header(screen: &str, session: &str) -> Option<bool> {
+    screen.lines().find_map(|line| {
+        let mut visible = String::new();
+        let mut bold = false;
+        let mut text_bold = false;
+        let mut rest = line;
+        while let Some(start) = rest.find("\x1b[") {
+            if !rest[..start].trim().is_empty() {
+                text_bold = bold;
+            }
+            visible.push_str(&rest[..start]);
+            let after = &rest[start + 2..];
+            let end = after.find('m')?;
+            for param in after[..end].split(';') {
+                match param {
+                    "1" => bold = true,
+                    "0" | "" | "22" => bold = false,
+                    _ => {}
+                }
+            }
+            rest = &after[end + 1..];
+        }
+        if !rest.trim().is_empty() {
+            text_bold = bold;
+        }
+        visible.push_str(rest);
+        (visible.trim() == session).then_some(text_bold)
+    })
+}

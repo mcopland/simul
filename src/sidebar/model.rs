@@ -51,7 +51,11 @@ pub struct Row {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Line {
-    Session(String),
+    /// A session header; `current` marks the session this sidebar is in.
+    Session {
+        name: String,
+        current: bool,
+    },
     Agent(Row),
     /// Second line of an agent, naming its branch.
     Branch {
@@ -132,7 +136,10 @@ pub fn lines(
         let session = r.session.as_deref();
         if current != Some(session) {
             current = Some(session);
-            out.push(Line::Session(session.unwrap_or("?").to_owned()));
+            out.push(Line::Session {
+                name: session.unwrap_or("?").to_owned(),
+                current: session.is_some() && session == own_session,
+            });
         }
         out.push(Line::Agent(Row {
             pane: r.pane.clone(),
@@ -388,7 +395,19 @@ mod tests {
     #[test]
     fn rows_have_window_label_and_branch_line() {
         let out = lines(&status(), Some("me"), StateFilter::All, "");
-        assert_eq!(out[0], Line::Session("me".into()));
+        assert_eq!(
+            out[0],
+            Line::Session {
+                name: "me".into(),
+                current: true
+            }
+        );
+        assert!(
+            out.iter()
+                .skip(1)
+                .all(|l| !matches!(l, Line::Session { current: true, .. })),
+            "only the sidebar's own session is current"
+        );
         assert_eq!(panes(&out), ["%3", "%2", "%4", "%1", "%5"]);
         let Line::Agent(row) = &out[1] else {
             panic!("{out:?}")
