@@ -61,7 +61,7 @@ Each agent row shows a state symbol, `window:window_name`, and time in the curre
 | `○`    | `idle`    | Waiting for input                      |
 | `?`    | `unknown` | Not yet classified                     |
 
-Notifications fire when an agent becomes `blocked` or `done` in a pane you are not looking at.
+When an agent becomes `blocked` or `done` in a pane you are not looking at, simul shows a message in the tmux status line. Desktop notifications and the terminal bell are off by default; turn them on under `[notify]`.
 
 ## Config
 
@@ -71,11 +71,13 @@ Notifications fire when an agent becomes `blocked` or `done` in a pane you are n
 blocked_threshold_ms = 1500  # quiet time before a busy pane's screen is checked
 
 [sidebar]
-width = 40
+width = 30
 
 [notify]
-enabled = true
+enabled = true   # tmux status-line messages
 dedupe_secs = 10
+desktop = false  # macOS, Linux D-Bus, or WSL toast notifications
+bell = false     # ring the terminal bell
 ```
 
 The daemon log is next to its socket: `$XDG_RUNTIME_DIR/simul/<hash>.log`, or `/tmp/simul-$UID/<hash>.log`.
