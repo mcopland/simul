@@ -36,11 +36,19 @@ pub fn run() -> Result<()> {
     std::thread::spawn(move || subscribe_forever(&socket, &tx));
 
     let mut terminal = ratatui::init();
-    crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)
-        .context("failed to enable mouse capture")?;
+    crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::EnableMouseCapture,
+        crossterm::event::EnableFocusChange
+    )
+    .context("failed to enable mouse capture and focus reporting")?;
     let result = ui_loop(&mut terminal, &rx, &tmux, own_pane.as_deref());
     // Restoring the terminal is best effort; the pane is usually being closed anyway.
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::event::DisableMouseCapture,
+        crossterm::event::DisableFocusChange
+    );
     ratatui::restore();
     result
 }
@@ -98,8 +106,14 @@ fn ui_loop(
         if session_checked.is_none_or(|t| t.elapsed() >= SESSION_REFRESH) {
             session_checked = Some(Instant::now());
             if let Some(pane) = own_pane {
-                match tmux.run(&["display-message", "-p", "-t", pane, "#{session_name}"]) {
-                    Ok(s) => view.app.own_session = Some(s.trim().to_owned()),
+                let where_ = "#{session_name}\t#{window_id}";
+                match tmux.run(&["display-message", "-p", "-t", pane, where_]) {
+                    Ok(out) => match out.trim_end().split_once('\t') {
+                        Some((session, window)) => {
+                            view.app.set_location(session.to_owned(), window.to_owned());
+                        }
+                        None => view.error = Some(format!("unexpected tmux reply: {out:?}")),
+                    },
                     Err(e) => view.error = Some(format!("{e:#}")),
                 }
             }
@@ -116,6 +130,14 @@ fn ui_loop(
         }
         let action = match event::read().context("failed to read terminal input")? {
             Event::Key(k) if k.kind == KeyEventKind::Press => view.app.on_key(k),
+            Event::FocusGained => {
+                view.app.on_focus(true);
+                Action::None
+            }
+            Event::FocusLost => {
+                view.app.on_focus(false);
+                Action::None
+            }
             Event::Mouse(m) if m.kind == MouseEventKind::Down(MouseButton::Left) => {
                 view.app.on_click(view.offset + usize::from(m.row))
             }
@@ -146,49 +168,78 @@ fn state_color(state: State) -> Color {
     }
 }
 
+/// Width of the ` <symbol> ` prefix, which the branch line indents to match.
+const PREFIX: usize = 3;
+
 fn render(f: &mut Frame, view: &mut View) {
     let [list, footer] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
+    let width = usize::from(list.width).saturating_sub(PREFIX);
     let lines = view.app.lines();
-    let mut agent_index = 0;
-    let mut selected_line = 0;
+    let selected_pane = view.app.selected.and_then(|i| {
+        lines
+            .iter()
+            .filter_map(|l| match l {
+                Line::Agent(r) => Some(r.pane.as_str()),
+                _ => None,
+            })
+            .nth(i)
+    });
+    let reversed = Style::new().add_modifier(Modifier::REVERSED);
+    let mut selected_line = None;
     let rendered: Vec<TextLine> = lines
         .iter()
         .enumerate()
         .map(|(i, line)| match line {
             Line::Session(name) => TextLine::from(Span::styled(
-                name.clone(),
+                model::truncate(name, usize::from(list.width)),
                 Style::new().add_modifier(Modifier::BOLD),
             )),
             Line::Agent(row) => {
-                let selected = agent_index == view.app.selected;
+                let selected = selected_pane == Some(row.pane.as_str());
                 if selected {
-                    selected_line = i;
+                    selected_line = Some(i);
                 }
-                agent_index += 1;
-                let mut spans = vec![
-                    Span::styled(" \u{25cf} ", Style::new().fg(state_color(row.state))),
-                    Span::raw(format!(
-                        "{} {:<8} {:>4} {}",
-                        row.tag, row.location, row.age, row.branch
-                    )),
+                let spans = [
+                    Span::styled(
+                        format!(" {} ", model::symbol(row.state)),
+                        Style::new().fg(state_color(row.state)),
+                    ),
+                    Span::raw(model::agent_text(row, width)),
                 ];
-                if selected {
-                    spans = spans
-                        .into_iter()
-                        .map(|s| s.patch_style(Style::new().add_modifier(Modifier::REVERSED)))
-                        .collect();
+                TextLine::from(
+                    spans
+                        .map(|s| if selected { s.patch_style(reversed) } else { s })
+                        .to_vec(),
+                )
+            }
+            Line::Branch { pane, branch } => {
+                let mut style = Style::new().fg(Color::DarkGray);
+                if selected_pane == Some(pane.as_str()) {
+                    style = style.add_modifier(Modifier::REVERSED);
                 }
-                TextLine::from(spans)
+                TextLine::from(Span::styled(
+                    format!("{:PREFIX$}{}", "", model::truncate(branch, width)),
+                    style,
+                ))
             }
         })
         .collect();
     let height = usize::from(list.height);
-    if selected_line < view.offset {
-        view.offset = selected_line;
-    } else if height > 0 && selected_line >= view.offset + height {
-        view.offset = selected_line + 1 - height;
+    if let Some(line) = selected_line {
+        // Keep both lines of a selected agent in view.
+        let last = if matches!(lines.get(line + 1), Some(Line::Branch { .. })) {
+            line + 1
+        } else {
+            line
+        };
+        if line < view.offset {
+            view.offset = line;
+        } else if height > 0 && last >= view.offset + height {
+            view.offset = last + 1 - height;
+        }
     }
+    view.offset = view.offset.min(rendered.len().saturating_sub(1));
     let body = if rendered.is_empty() {
         vec![TextLine::from(Span::styled(
             "no agents",

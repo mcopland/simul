@@ -51,15 +51,15 @@ Sidebar keys:
 | `/`            | Filter by text         |
 | `f`            | Cycle the state filter |
 
-States:
+Each agent row shows a state symbol, `window:window_name`, and time in the current state, with the branch on a second line. While the sidebar isn't focused, it highlights the agent in its own window, or nothing if that window has none. Focusing the sidebar keeps that row, or selects the first row if none was highlighted.
 
-| State     | Meaning                                |
-| --------- | -------------------------------------- |
-| `working` | The agent is running                   |
-| `blocked` | The agent is waiting for your approval |
-| `done`    | Finished, and you haven't looked yet   |
-| `idle`    | Waiting for input                      |
-| `unknown` | Not yet classified                     |
+| Symbol | State     | Meaning                                |
+| ------ | --------- | -------------------------------------- |
+| `◐`    | `working` | The agent is running                   |
+| `!`    | `blocked` | The agent is waiting for your approval |
+| `✓`    | `done`    | Finished, and you haven't looked yet   |
+| `○`    | `idle`    | Waiting for input                      |
+| `?`    | `unknown` | Not yet classified                     |
 
 Notifications fire when an agent becomes `blocked` or `done` in a pane you are not looking at.
 

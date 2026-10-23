@@ -107,10 +107,12 @@ fn sidebar_renders_agents() {
         .into_iter()
         .find(|s| s.1 != h.tmux(&["display-message", "-p", "-t", &agent, "#{window_id}"]))
         .unwrap();
+    // Renaming after the sidebar opens checks that window renames reach it.
+    h.tmux(&["rename-window", "-t", &agent, "agents"]);
     let mut screen = String::new();
     eventually("agent row rendered", || {
         screen = h.tmux(&["capture-pane", "-p", "-t", &side.0]);
-        screen.contains("C t:1")
+        screen.contains(" ! 1:agents")
     });
     assert!(screen.starts_with('t'), "session header first: {screen}");
     assert!(screen.contains("f:all"), "{screen}");
@@ -181,4 +183,24 @@ fn closing_sidebars_does_not_log_errors() {
     std::thread::sleep(std::time::Duration::from_millis(500));
     let log = std::fs::read_to_string(h.simul_sock.with_extension("log")).unwrap();
     assert!(!log.contains("Broken pipe"), "{log}");
+}
+
+#[test]
+fn each_sidebar_highlights_its_own_windows_agent() {
+    let mut h = Harness::new();
+    let agent = h.new_pane("sleep 600");
+    h.start_daemon();
+    h.hook_fixture(&agent, "UserPromptSubmit", "UserPromptSubmit");
+    toggle(&h);
+    let agent_window = h.tmux(&["display-message", "-p", "-t", &agent, "#{window_id}"]);
+    let reversed = |pane: &str| {
+        h.tmux(&["capture-pane", "-e", "-p", "-t", pane])
+            .contains("\x1b[7m")
+    };
+    for (pane, window, _) in sidebars(&h) {
+        let want = window == agent_window;
+        eventually(&format!("sidebar {pane} highlight = {want}"), || {
+            reversed(&pane) == want
+        });
+    }
 }
