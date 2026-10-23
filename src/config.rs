@@ -25,6 +25,10 @@ pub struct SidebarConfig {
 pub struct NotifyConfig {
     pub enabled: bool,
     pub dedupe_secs: u64,
+    /// macOS, D-Bus, or Windows toast notifications, on top of the tmux status message.
+    pub desktop: bool,
+    /// Ring the terminal bell, which many terminals turn into a system alert.
+    pub bell: bool,
 }
 
 impl Default for Config {
@@ -39,7 +43,7 @@ impl Default for Config {
 
 impl Default for SidebarConfig {
     fn default() -> SidebarConfig {
-        SidebarConfig { width: 40 }
+        SidebarConfig { width: 30 }
     }
 }
 
@@ -48,6 +52,8 @@ impl Default for NotifyConfig {
         NotifyConfig {
             enabled: true,
             dedupe_secs: 10,
+            desktop: false,
+            bell: false,
         }
     }
 }
@@ -87,8 +93,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = load_from(&dir.path().join("nope.toml")).unwrap();
         assert_eq!(cfg, Config::default());
-        assert_eq!(cfg.sidebar.width, 40);
+        assert_eq!(cfg.sidebar.width, 30);
         assert_eq!(cfg.notify.dedupe_secs, 10);
+        assert!(!cfg.notify.desktop, "system notifications are opt-in");
+        assert!(!cfg.notify.bell, "the terminal bell is opt-in");
         assert_eq!(cfg.blocked_threshold_ms, 1500);
     }
 

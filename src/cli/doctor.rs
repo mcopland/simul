@@ -93,6 +93,13 @@ fn gather() -> Vec<Check> {
 }
 
 fn test_notification() -> Check {
+    match crate::config::load() {
+        Ok(cfg) if !cfg.notify.desktop => {
+            return pass("notification", "desktop notifications off (notify.desktop)");
+        }
+        Ok(_) => {}
+        Err(e) => return fail("notification", format!("{e:#}")),
+    }
     let msg = Message {
         title: "simul".into(),
         body: "test notification from simul doctor".into(),

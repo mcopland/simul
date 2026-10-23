@@ -48,7 +48,7 @@ fn toggle_adds_and_removes_sidebars_in_every_window() {
         side.iter().map(|s| s.1.clone()).collect::<HashSet<_>>(),
         windows(&h)
     );
-    assert!(side.iter().all(|s| s.2 == 40), "{side:?}");
+    assert!(side.iter().all(|s| s.2 == 30), "{side:?}");
     eventually("sidebar process running", || {
         h.tmux(&[
             "display-message",

@@ -222,7 +222,7 @@ impl Daemon {
                     .admit(&t, viewed, now_ms(), cfg.dedupe_secs * 1000)
             {
                 let msg = notify::message(&t, self.store.get(&t.pane));
-                tokio::spawn(notify::deliver(self.opts.tmux.clone(), msg));
+                tokio::spawn(notify::deliver(self.opts.tmux.clone(), msg, cfg.clone()));
             }
         }
     }

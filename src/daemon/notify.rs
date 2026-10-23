@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, bail};
 
 use super::state::{PaneRecord, State, Transition};
+use crate::config::NotifyConfig;
 use crate::log;
 use crate::tmux::Tmux;
 
@@ -70,11 +71,14 @@ pub fn tmux_literal(s: &str) -> String {
     s.replace('#', "##")
 }
 
-pub async fn deliver(tmux: Tmux, msg: Message) {
-    if let Err(e) = desktop(&msg).await {
+/// Always shows a tmux status message; desktop notifications and the bell are opt-in.
+pub async fn deliver(tmux: Tmux, msg: Message, cfg: NotifyConfig) {
+    if cfg.desktop
+        && let Err(e) = desktop(&msg).await
+    {
         log!("desktop notification failed: {e:#}");
     }
-    if let Err(e) = alert_clients(&tmux, &msg).await {
+    if let Err(e) = alert_clients(&tmux, &msg, cfg.bell).await {
         log!("tmux notification failed: {e:#}");
     }
 }
@@ -170,8 +174,8 @@ async fn run(program: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// Shows the message on every attached terminal client and rings its bell.
-async fn alert_clients(tmux: &Tmux, msg: &Message) -> Result<()> {
+/// Shows the message on every attached terminal client, ringing its bell if asked.
+async fn alert_clients(tmux: &Tmux, msg: &Message, bell: bool) -> Result<()> {
     let clients = tmux
         .run_async(&["list-clients", "-F", "#{client_tty}\t#{client_flags}"])
         .await?;
@@ -190,7 +194,7 @@ async fn alert_clients(tmux: &Tmux, msg: &Message) -> Result<()> {
         {
             log!("{e:#}");
         }
-        if let Err(e) = ring_bell(tty) {
+        if bell && let Err(e) = ring_bell(tty) {
             log!("{e:#}");
         }
     }
