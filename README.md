@@ -63,6 +63,23 @@ Each agent row shows a state symbol, `window:window_name`, and time in the curre
 
 When an agent becomes `blocked` or `done` in a pane you are not looking at, simul shows a message in the tmux status line. Desktop notifications and the terminal bell are off by default; turn them on under `[notify]`.
 
+### tmux config that counts panes
+
+The sidebar is a pane, so `#{window_panes}` includes it. Sidebar panes carry the pane option `@simul-sidebar`, so this format counts only the other panes, one `x` each:
+
+```tmux
+#{P:#{?#{@simul-sidebar},,x}}
+```
+
+For example, to confirm before closing the last real pane:
+
+```tmux
+bind x if -F '#{==:#{P:#{?#{@simul-sidebar},,x}},x}' \
+    'confirm-before -p "Close #W? (y/n)" kill-pane' 'kill-pane'
+```
+
+After opening a sidebar, simul re-runs `window-layout-changed` hooks, so hooks that use this check see the sidebar's tag.
+
 ## Config
 
 `~/.config/simul/config.toml`, all keys optional:
