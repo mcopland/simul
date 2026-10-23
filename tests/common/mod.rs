@@ -47,6 +47,9 @@ impl Harness {
         // The daemon refuses socket directories other users can read.
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::create_dir_all(dir.path().join("config/simul")).unwrap();
+        // Test daemons see no attached client, so every blocked or done pane would pop a
+        // desktop notification on the developer's machine.
+        let config = format!("{config}\n[notify]\nenabled = false\n");
         std::fs::write(dir.path().join("config/simul/config.toml"), config).unwrap();
         let h = Harness {
             tmux_sock: dir.path().join("t.sock"),
