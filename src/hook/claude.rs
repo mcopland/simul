@@ -47,6 +47,12 @@ pub fn parse(event: &str, payload: &Value) -> Parsed {
         meta: Meta {
             session_id: str_field(payload, "session_id"),
             cwd: str_field(payload, "cwd"),
+            model: str_field(payload, "model"),
+            effort: payload
+                .pointer("/effort/level")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            transcript: str_field(payload, "transcript_path"),
         },
     }
 }
@@ -148,6 +154,22 @@ mod tests {
             assert_eq!(parsed.meta.cwd.as_deref(), Some("/home/user/src/scratch"));
             assert!(parsed.meta.session_id.is_some(), "{file}");
         }
+    }
+
+    #[test]
+    fn reads_model_effort_and_transcript() {
+        let start = parse("SessionStart", &hook("SessionStart")).meta;
+        assert_eq!(start.model.as_deref(), Some("claude-opus-5-5"));
+        assert!(
+            start
+                .transcript
+                .as_deref()
+                .is_some_and(|t| t.ends_with(".jsonl"))
+        );
+        let stop = parse("Stop", &super::super::slim_payload(&hook("Stop"))).meta;
+        assert_eq!(stop.effort.as_deref(), Some("high"));
+        assert_eq!(stop.model, None);
+        assert_eq!(parse("Stop", &json!({"effort": "high"})).meta.effort, None);
     }
 
     #[test]

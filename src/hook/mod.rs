@@ -81,6 +81,10 @@ pub enum AgentEvent {
 pub struct Meta {
     pub session_id: Option<String>,
     pub cwd: Option<String>,
+    /// Model id as the agent reports it, e.g. `claude-opus-5-5` or `auto`.
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub transcript: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,12 +112,15 @@ pub struct Envelope {
     pub payload: Value,
 }
 
-/// Keeps only top-level scalar fields so large tool inputs and outputs never cross the socket.
+/// Largest JSON size of a top-level field the shim forwards.
+const SLIM_MAX: usize = 512;
+
+/// Keeps small top-level fields so large tool inputs, outputs, and prompts never cross the socket.
 pub fn slim_payload(payload: &Value) -> Value {
     match payload {
         Value::Object(map) => Value::Object(
             map.iter()
-                .filter(|(_, v)| !(v.is_object() || v.is_array()))
+                .filter(|(_, v)| v.to_string().len() <= SLIM_MAX)
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
         ),
@@ -141,9 +148,16 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn slim_payload_drops_nested_values() {
-        let p = json!({"a": "x", "n": 1, "tool_input": {"big": "y"}, "list": [1]});
-        assert_eq!(slim_payload(&p), json!({"a": "x", "n": 1}));
+    fn slim_payload_keeps_small_values_and_drops_large_ones() {
+        let big = "y".repeat(2000);
+        let p = json!({
+            "a": "x", "n": 1, "effort": {"level": "high"},
+            "tool_input": {"content": big}, "prompt": big,
+        });
+        assert_eq!(
+            slim_payload(&p),
+            json!({"a": "x", "n": 1, "effort": {"level": "high"}})
+        );
         assert_eq!(slim_payload(&json!("str")), Value::Null);
     }
 

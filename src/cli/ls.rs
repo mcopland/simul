@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 
+use crate::claude_metrics::display_model;
 use crate::client;
 use crate::daemon::state::PaneRecord;
 use crate::paths;
@@ -41,21 +42,24 @@ pub fn render(status: &Status) -> String {
     let header = [
         "PANE",
         "STATE",
-        "AGENT",
+        "MODEL",
+        "EFFORT",
         "SESSION:WIN",
         "BRANCH",
         "AGE",
         "CWD",
     ]
     .map(String::from);
-    let rows: Vec<[String; 7]> = status
+    let dash = || "-".to_owned();
+    let rows: Vec<[String; 8]> = status
         .panes
         .iter()
         .map(|r| {
             [
                 r.pane.clone(),
                 r.state.name().to_owned(),
-                r.agent.tag().to_string(),
+                r.model.as_deref().map_or_else(dash, display_model),
+                r.effort.clone().unwrap_or_else(dash),
                 location(r),
                 r.branch.clone().unwrap_or_else(|| "-".into()),
                 fmt_age(status.now_ms.saturating_sub(r.since_ms)),
@@ -102,6 +106,7 @@ mod tests {
             "pane": pane, "agent": "claude", "state": state, "since_ms": 1_000,
             "last_event_ms": 1_000, "session_id": null, "cwd": "/w/repo",
             "branch": "main", "pending_tool": null, "session": "dev", "window": 3,
+            "model": "claude-opus-5-5", "effort": "high",
         });
         serde_json::from_value(json).unwrap()
     }
@@ -117,9 +122,16 @@ mod tests {
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 3);
         assert!(lines[0].starts_with("PANE "), "{out}");
+        assert!(
+            lines[0].contains(" MODEL ") && lines[0].contains(" EFFORT "),
+            "{out}"
+        );
+        assert!(!lines[0].contains("AGENT"), "{out}");
         assert_eq!(
             lines[1].split_whitespace().collect::<Vec<_>>(),
-            ["%1", "blocked", "C", "dev:3", "main", "3m", "/w/repo"]
+            [
+                "%1", "blocked", "Opus", "5.5", "high", "dev:3", "main", "3m", "/w/repo"
+            ]
         );
         let col = |l: &str| l.find("dev:3");
         assert_eq!(col(lines[1]), col(lines[2]));

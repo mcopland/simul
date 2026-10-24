@@ -11,6 +11,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use crate::claude_metrics::{Turn, last_turn};
 use crate::config::Config;
 use crate::hook::{Agent, AgentEvent, Envelope};
 use crate::log;
@@ -34,6 +35,7 @@ pub enum Cmd {
     Reconcile,
     Tick,
     Branch { cwd: String, branch: Option<String> },
+    Turn { pane: String, turn: Option<Turn> },
     Shutdown,
 }
 
@@ -60,6 +62,8 @@ struct Daemon {
     notify_gate: notify::Gate,
     /// Working directories whose branch has been looked up at least once.
     branch_fetched: HashSet<String>,
+    /// Panes whose transcript is being read.
+    turn_inflight: HashSet<String>,
 }
 
 pub async fn run(opts: Options) -> Result<()> {
@@ -93,6 +97,7 @@ pub async fn run(opts: Options) -> Result<()> {
         known_windows: HashSet::new(),
         notify_gate: notify::Gate::default(),
         branch_fetched: HashSet::new(),
+        turn_inflight: HashSet::new(),
     };
     d.install_tmux_hooks().await;
     d.reconcile().await;
@@ -151,6 +156,13 @@ impl Daemon {
                 self.reconcile().await;
             }
             Cmd::Tick => self.scrape().await,
+            Cmd::Turn { pane, turn } => {
+                self.turn_inflight.remove(&pane);
+                let turn = turn.unwrap_or_default();
+                if self.store.set_model(&pane, turn.model, turn.effort) {
+                    self.publish();
+                }
+            }
             Cmd::Branch { cwd, branch } => {
                 self.branch_inflight.remove(&cwd);
                 if self.store.set_branch(&cwd, branch) {
@@ -197,6 +209,13 @@ impl Daemon {
                 self.fetch_branch(cwd);
             }
         }
+        if let Some(rec) = self.store.get(&pane)
+            && rec.agent == Agent::Claude
+            && let Some(transcript) = rec.transcript.clone()
+            && (parsed.event == AgentEvent::Stop || rec.model.is_none())
+        {
+            self.read_turn(pane.clone(), transcript);
+        }
         match self.snapshot.panes.iter().find(|p| p.id == pane) {
             Some(info) => self.store.locate(info),
             None => self.schedule_reconcile(),
@@ -239,6 +258,30 @@ impl Daemon {
         for cwd in missing {
             self.fetch_branch(cwd);
         }
+    }
+
+    /// Reads the model and effort of the pane's last reply, which tracks `/model` switches.
+    fn read_turn(&mut self, pane: String, transcript: String) {
+        if !self.turn_inflight.insert(pane.clone()) {
+            return;
+        }
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let path = PathBuf::from(&transcript);
+            let turn = match tokio::task::spawn_blocking(move || last_turn(&path)).await {
+                Ok(Ok(turn)) => turn,
+                Ok(Err(e)) => {
+                    log!("{e:#}");
+                    None
+                }
+                Err(e) => {
+                    log!("transcript reader for {pane} panicked: {e}");
+                    None
+                }
+            };
+            // A closed channel means shutdown.
+            let _ = tx.send(Cmd::Turn { pane, turn }).await;
+        });
     }
 
     fn fetch_branch(&mut self, cwd: String) {

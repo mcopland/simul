@@ -185,3 +185,54 @@ fn recovered_panes_get_their_branch() {
     assert!(ok, "no branch for recovered pane");
     assert_eq!(branch.as_deref(), Some("feat/scan"));
 }
+
+#[test]
+fn model_and_effort_come_from_the_transcript_after_each_turn() {
+    let mut h = Harness::new();
+    h.start_daemon();
+    let pane = h.first_pane();
+    let transcript = h.dir.path().join("t.jsonl");
+    let reply = |model: &str, effort: &str| {
+        format!(
+            "{{\"type\":\"assistant\",\"isSidechain\":false,\"effort\":\"{effort}\",\"message\":{{\"model\":\"{model}\"}}}}\n"
+        )
+    };
+    std::fs::write(&transcript, reply("claude-opus-5-5", "high")).unwrap();
+    let payload = |event: &str| {
+        serde_json::json!({
+            "hook_event_name": event, "session_id": "s", "cwd": "/w",
+            "transcript_path": transcript, "effort": {"level": "high"},
+        })
+        .to_string()
+    };
+    h.hook(&pane, "SessionStart", &payload("SessionStart"));
+    h.hook(&pane, "Stop", &payload("Stop"));
+    let model = || {
+        h.ls()
+            .into_iter()
+            .find(|r| r["pane"] == pane.as_str())
+            .map(|r| {
+                (
+                    r["model"].as_str().map(str::to_owned),
+                    r["effort"].as_str().map(str::to_owned),
+                )
+            })
+    };
+    eventually("opus from transcript", || {
+        model() == Some((Some("claude-opus-5-5".into()), Some("high".into())))
+    });
+    // A /model switch shows up in the transcript; the next Stop picks it up.
+    let mut text = std::fs::read_to_string(&transcript).unwrap();
+    text.push_str(&reply("claude-sonnet-5-5", "low"));
+    std::fs::write(&transcript, text).unwrap();
+    h.hook(&pane, "Stop", &payload("Stop"));
+    eventually("sonnet after switch", || {
+        model() == Some((Some("claude-sonnet-5-5".into()), Some("low".into())))
+    });
+    let out = h.simul().arg("ls").output().unwrap();
+    let table = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        table.contains("Sonnet 5.5") && table.contains(" low "),
+        "{table}"
+    );
+}

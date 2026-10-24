@@ -39,6 +39,13 @@ pub struct PaneRecord {
     pub cwd: Option<String>,
     pub branch: Option<String>,
     pub pending_tool: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Transcript file, read after each turn for the current model.
+    #[serde(default)]
+    pub transcript: Option<String>,
     pub session: Option<String>,
     pub window: Option<u32>,
     #[serde(default)]
@@ -64,6 +71,9 @@ impl PaneRecord {
             cwd: None,
             branch: None,
             pending_tool: None,
+            model: None,
+            effort: None,
+            transcript: None,
             session: None,
             window: None,
             window_id: None,
@@ -147,6 +157,15 @@ impl Store {
         }
         if parsed.meta.cwd.is_some() {
             rec.cwd.clone_from(&parsed.meta.cwd);
+        }
+        for (field, new) in [
+            (&mut rec.model, &parsed.meta.model),
+            (&mut rec.effort, &parsed.meta.effort),
+            (&mut rec.transcript, &parsed.meta.transcript),
+        ] {
+            if new.is_some() {
+                field.clone_from(new);
+            }
         }
         let next = match &parsed.event {
             AgentEvent::SessionStart => Some(State::Idle),
@@ -250,6 +269,21 @@ impl Store {
         if let Some(rec) = self.panes.get_mut(&info.id) {
             place(rec, info);
         }
+    }
+
+    /// Records the model and effort a pane last ran with; `None` keeps the previous value.
+    pub fn set_model(&mut self, pane: &str, model: Option<String>, effort: Option<String>) -> bool {
+        let Some(rec) = self.panes.get_mut(pane) else {
+            return false;
+        };
+        let mut changed = false;
+        for (field, new) in [(&mut rec.model, model), (&mut rec.effort, effort)] {
+            if new.is_some() && *field != new {
+                *field = new;
+                changed = true;
+            }
+        }
+        changed
     }
 
     pub fn set_branch(&mut self, cwd: &str, branch: Option<String>) -> bool {
@@ -400,6 +434,9 @@ mod tests {
             meta: Meta {
                 session_id: Some("abc".into()),
                 cwd: Some("/w".into()),
+                model: Some("claude-opus-5-5".into()),
+                effort: Some("high".into()),
+                transcript: Some("/t.jsonl".into()),
             },
         };
         s.apply("%1", Agent::Claude, &p, 1, false);
@@ -407,6 +444,19 @@ mod tests {
         let rec = s.get("%1").unwrap();
         assert_eq!(rec.session_id.as_deref(), Some("abc"));
         assert_eq!(rec.cwd.as_deref(), Some("/w"));
+        assert_eq!(rec.model.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(rec.effort.as_deref(), Some("high"));
+        assert_eq!(rec.transcript.as_deref(), Some("/t.jsonl"));
+        assert!(s.set_model("%1", Some("claude-sonnet-5-5".into()), Some("low".into())));
+        assert!(!s.set_model("%1", Some("claude-sonnet-5-5".into()), Some("low".into())));
+        assert!(
+            !s.set_model("%1", None, None),
+            "unknown values keep the last known ones"
+        );
+        assert!(!s.set_model("%9", Some("x".into()), None));
+        let rec = s.get("%1").unwrap();
+        assert_eq!(rec.model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(rec.effort.as_deref(), Some("low"));
     }
 
     fn pane(id: &str, cmd: &str) -> PaneInfo {
@@ -609,8 +659,8 @@ mod tests {
         let p = Parsed {
             event: AgentEvent::SessionStart,
             meta: Meta {
-                session_id: None,
                 cwd: Some("/w".into()),
+                ..Meta::default()
             },
         };
         s.apply("%1", Agent::Claude, &p, 1, false);
