@@ -67,11 +67,11 @@ pub enum Line {
 /// Shapes, so states stay distinguishable without relying on color.
 pub fn symbol(state: State) -> char {
     match state {
-        State::Blocked => '!',
-        State::Done => '\u{2713}',
+        State::Blocked => '\u{2298}',
+        State::Done => '\u{25cf}',
         State::Working => '\u{25d0}',
         State::Idle => '\u{25cb}',
-        State::Unknown => '?',
+        State::Unknown => '\u{2205}',
     }
 }
 
@@ -389,7 +389,10 @@ mod tests {
             State::Unknown,
         ]
         .map(symbol);
-        assert_eq!(all, ['!', '\u{2713}', '\u{25d0}', '\u{25cb}', '?']);
+        assert_eq!(
+            all,
+            ['\u{2298}', '\u{25cf}', '\u{25d0}', '\u{25cb}', '\u{2205}']
+        );
     }
 
     #[test]

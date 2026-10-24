@@ -56,10 +56,10 @@ Each agent row shows a state symbol, `window:window_name`, and time in the curre
 | Symbol | State     | Meaning                                |
 | ------ | --------- | -------------------------------------- |
 | `◐`    | `working` | The agent is running                   |
-| `!`    | `blocked` | The agent is waiting for your approval |
-| `✓`    | `done`    | Finished, and you haven't looked yet   |
+| `⊘`    | `blocked` | The agent is waiting for your approval |
+| `●`    | `done`    | Finished, and you haven't looked yet   |
 | `○`    | `idle`    | Waiting for input                      |
-| `?`    | `unknown` | Not yet classified                     |
+| `∅`    | `unknown` | Not yet classified                     |
 
 When an agent becomes `blocked` or `done` in a pane you are not looking at, simul shows a message in the tmux status line. Desktop notifications and the terminal bell are off by default; turn them on under `[notify]`.
 

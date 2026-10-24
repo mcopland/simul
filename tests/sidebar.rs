@@ -112,7 +112,7 @@ fn sidebar_renders_agents() {
     let mut screen = String::new();
     eventually("agent row rendered", || {
         screen = h.tmux(&["capture-pane", "-p", "-t", &side.0]);
-        screen.contains(" ! 1:agents")
+        screen.contains(" \u{2298} 1:agents")
     });
     assert!(screen.starts_with('t'), "session header first: {screen}");
     assert!(screen.contains("f:all"), "{screen}");
