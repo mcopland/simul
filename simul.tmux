@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# TPM entry point: checks tmux, finds the simul binary, starts the daemon, and binds
-# @simul-key (default prefix + a) to toggle the sidebar.
+# TPM entry point: checks tmux, installs the prebuilt simul binary matching VERSION,
+# starts the daemon, and binds @simul-key (default prefix + a) to toggle the sidebar.
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 find_binary() {
 	local candidate
-	for candidate in "$CURRENT_DIR/bin/simul" "$CURRENT_DIR/target/release/simul"; do
+	for candidate in "$CURRENT_DIR/target/release/simul" "$CURRENT_DIR/bin/simul"; do
 		if [ -x "$candidate" ]; then
 			echo "$candidate"
 			return 0
@@ -31,10 +31,23 @@ main() {
 		tmux display-message "simul: needs tmux 3.3 or newer (found $(tmux -V))"
 		return 0
 	fi
-	local bin socket
+	local bin socket install_err=""
+	# A local cargo build means a dev checkout; leave it alone.
+	if [ ! -x "$CURRENT_DIR/target/release/simul" ]; then
+		# Only a failed install has an error worth showing; on success, stderr is
+		# just noise such as tar warnings.
+		if ! install_err=$("$CURRENT_DIR/scripts/install-binary.sh" 2>&1 >/dev/null); then
+			install_err=${install_err##*$'\n'}
+		else
+			install_err=""
+		fi
+	fi
 	if ! bin=$(find_binary); then
-		tmux display-message "simul: binary not found; run: cargo build --release --manifest-path '$CURRENT_DIR/Cargo.toml'"
+		tmux display-message "simul: binary not found${install_err:+ ($install_err)}; run: cargo build --release --manifest-path '$CURRENT_DIR/Cargo.toml'"
 		return 0
+	fi
+	if [ -n "$install_err" ]; then
+		tmux display-message "$install_err; using $bin"
 	fi
 	socket=$(tmux display-message -p '#{socket_path}')
 	tmux run-shell -b "'$bin' daemon --tmux-socket '$socket' >/dev/null 2>&1"
