@@ -185,52 +185,41 @@ fn render(f: &mut Frame, view: &mut View) {
             })
             .nth(i)
     });
-    let reversed = Style::new().add_modifier(Modifier::REVERSED);
+    let current = Style::new().add_modifier(Modifier::BOLD);
+    let muted = Style::new().fg(Color::DarkGray);
     let mut selected_line = None;
     let rendered: Vec<TextLine> = lines
         .iter()
         .enumerate()
         .map(|(i, line)| match line {
-            Line::Session { name, current } => {
-                let style = if *current {
-                    Style::new().add_modifier(Modifier::BOLD)
-                } else {
-                    Style::new()
-                };
-                TextLine::from(Span::styled(
-                    model::truncate(name, usize::from(list.width)),
-                    style,
-                ))
-            }
+            Line::Session { name, current: own } => TextLine::from(Span::styled(
+                model::truncate(name, usize::from(list.width)),
+                if *own { current } else { muted },
+            )),
             Line::Agent(row) => {
                 let selected = selected_pane == Some(row.pane.as_str());
                 if selected {
                     selected_line = Some(i);
                 }
-                let symbol = format!(" {} ", model::symbol(row.state));
-                let text = model::agent_text(row, width);
-                if selected {
-                    // One style across the row; a colored symbol would show as a
-                    // second highlight color.
-                    TextLine::from(Span::styled(format!("{symbol}{text}"), reversed))
-                } else {
-                    TextLine::from(vec![
-                        Span::styled(symbol, Style::new().fg(state_color(row.state))),
-                        Span::raw(text),
-                    ])
-                }
+                TextLine::from(vec![
+                    Span::styled(
+                        format!(" {} ", model::symbol(row.state)),
+                        Style::new().fg(state_color(row.state)),
+                    ),
+                    Span::styled(
+                        model::agent_text(row, width),
+                        if selected { current } else { muted },
+                    ),
+                ])
             }
-            Line::Branch { pane, branch } => {
-                let style = if selected_pane == Some(pane.as_str()) {
-                    reversed
+            Line::Branch { pane, branch } => TextLine::from(Span::styled(
+                format!("{:PREFIX$}{}", "", model::truncate(branch, width)),
+                if selected_pane == Some(pane.as_str()) {
+                    Style::new()
                 } else {
-                    Style::new().fg(Color::DarkGray)
-                };
-                TextLine::from(Span::styled(
-                    format!("{:PREFIX$}{:<width$}", "", model::truncate(branch, width)),
-                    style,
-                ))
-            }
+                    muted
+                },
+            )),
         })
         .collect();
     let height = usize::from(list.height);

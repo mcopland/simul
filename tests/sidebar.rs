@@ -189,56 +189,54 @@ fn closing_sidebars_does_not_log_errors() {
 fn each_sidebar_highlights_its_own_windows_agent() {
     let mut h = Harness::new();
     let agent = h.new_pane("sleep 600");
+    h.tmux(&["rename-window", "-t", &agent, "agents"]);
     h.start_daemon();
     h.hook_fixture(&agent, "UserPromptSubmit", "UserPromptSubmit");
     toggle(&h);
     let agent_window = h.tmux(&["display-message", "-p", "-t", &agent, "#{window_id}"]);
-    let reversed = |pane: &str| {
-        h.tmux(&["capture-pane", "-e", "-p", "-t", pane])
-            .contains("\x1b[7m")
-    };
     for (pane, window, _) in sidebars(&h) {
         let want = window == agent_window;
         eventually(&format!("sidebar {pane} highlight = {want}"), || {
-            reversed(&pane) == want
+            let screen = h.tmux(&["capture-pane", "-e", "-p", "-t", &pane]);
+            style_of(&screen, "1:agents").is_some_and(|s| s.bold == want)
         });
     }
 }
 
 #[test]
-fn highlight_is_one_solid_style() {
+fn selected_row_is_bold_without_a_block() {
     let mut h = Harness::new();
-    let agent = h.new_pane("sleep 600");
+    let mine = h.new_pane("sleep 600");
+    let other = h.new_pane("sleep 600");
+    h.tmux(&["rename-window", "-t", &mine, "mine"]);
+    h.tmux(&["rename-window", "-t", &other, "other"]);
     h.start_daemon();
-    h.hook_fixture(&agent, "UserPromptSubmit", "UserPromptSubmit");
+    h.hook_fixture(&mine, "UserPromptSubmit", "UserPromptSubmit");
+    h.hook_fixture(&other, "UserPromptSubmit", "UserPromptSubmit");
     toggle(&h);
-    let agent_window = h.tmux(&["display-message", "-p", "-t", &agent, "#{window_id}"]);
-    let (pane, _, width) = sidebars(&h)
+    let mine_window = h.tmux(&["display-message", "-p", "-t", &mine, "#{window_id}"]);
+    let (pane, _, _) = sidebars(&h)
         .into_iter()
-        .find(|s| s.1 == agent_window)
+        .find(|s| s.1 == mine_window)
         .unwrap();
-    let mut line = String::new();
-    eventually("highlighted row", || {
-        let screen = h.tmux(&["capture-pane", "-e", "-p", "-t", &pane]);
-        line = screen
-            .lines()
-            .find(|l| l.contains("\x1b[7m"))
-            .unwrap_or_default()
-            .to_owned();
-        !line.is_empty()
+    let mut screen = String::new();
+    eventually("selected row bold", || {
+        screen = h.tmux(&["capture-pane", "-e", "-p", "-t", &pane]);
+        style_of(&screen, "other").is_some() && style_of(&screen, "mine").is_some_and(|s| s.bold)
     });
+    assert!(!screen.contains("\x1b[7m"), "no reverse video: {screen:?}");
+    let label = style_of(&screen, "mine").unwrap();
+    assert_eq!(label.fg, None, "selected label in default fg: {screen:?}");
+    let row = screen.lines().find(|l| l.contains("mine")).unwrap();
+    let symbol = style_of(row, "\u{25d0}").unwrap();
     assert!(
-        !line.contains("\x1b[38;"),
-        "no per-cell colors inside the highlight: {line:?}"
+        symbol.fg.is_some() && !symbol.muted(),
+        "selected symbol keeps its state color: {row:?}"
     );
-    let visible: String = line
-        .split('\x1b')
-        .map(|seg| seg.split_once('m').map_or(seg, |(_, t)| t))
-        .collect();
-    assert_eq!(
-        visible.chars().count(),
-        width as usize,
-        "highlight spans the pane: {visible:?}"
+    let rest = style_of(&screen, "other").unwrap();
+    assert!(
+        !rest.bold && rest.muted(),
+        "other agents are muted: {screen:?}"
     );
 }
 
@@ -261,46 +259,87 @@ fn only_the_current_session_header_is_bold() {
         screen = h.tmux(&["capture-pane", "-e", "-p", "-t", &pane]);
         header(&screen, "u").is_some()
     });
-    assert_eq!(
-        header(&screen, "t"),
-        Some(true),
-        "own session bold: {screen:?}"
-    );
-    assert_eq!(
-        header(&screen, "u"),
-        Some(false),
-        "other session plain: {screen:?}"
+    let own = header(&screen, "t").unwrap();
+    assert!(own.bold && !own.muted(), "own session bold: {screen:?}");
+    let rest = header(&screen, "u").unwrap();
+    assert!(
+        !rest.bold && rest.muted(),
+        "other session muted: {screen:?}"
     );
 }
 
-/// Whether the header line for `session` is bold, if present.
-fn header(screen: &str, session: &str) -> Option<bool> {
-    screen.lines().find_map(|line| {
-        let mut visible = String::new();
-        let mut bold = false;
-        let mut text_bold = false;
-        let mut rest = line;
-        while let Some(start) = rest.find("\x1b[") {
-            if !rest[..start].trim().is_empty() {
-                text_bold = bold;
-            }
-            visible.push_str(&rest[..start]);
-            let after = &rest[start + 2..];
-            let end = after.find('m')?;
-            for param in after[..end].split(';') {
-                match param {
-                    "1" => bold = true,
-                    "0" | "" | "22" => bold = false,
-                    _ => {}
+/// Text attributes of a run of cells in `capture-pane -e` output.
+#[derive(Clone, Debug, Default)]
+struct Sgr {
+    bold: bool,
+    /// The foreground SGR parameters, e.g. "31" or "38;5;8"; `None` is the default.
+    fg: Option<String>,
+}
+
+impl Sgr {
+    fn muted(&self) -> bool {
+        matches!(self.fg.as_deref(), Some("90" | "38;5;8"))
+    }
+
+    fn apply(&mut self, params: &str) {
+        let mut it = params.split(';');
+        while let Some(p) = it.next() {
+            match p {
+                "" | "0" => *self = Sgr::default(),
+                "1" => self.bold = true,
+                "22" => self.bold = false,
+                "39" => self.fg = None,
+                "38" => {
+                    let fg: Vec<&str> = match it.next() {
+                        Some("5") => vec!["38", "5", it.next().unwrap_or_default()],
+                        Some("2") => ["38", "2"].into_iter().chain(it.by_ref().take(3)).collect(),
+                        _ => continue,
+                    };
+                    self.fg = Some(fg.join(";"));
                 }
+                _ if matches!(p.parse::<u8>(), Ok(30..=37 | 90..=97)) => {
+                    self.fg = Some(p.to_owned());
+                }
+                _ => {}
             }
-            rest = &after[end + 1..];
         }
-        if !rest.trim().is_empty() {
-            text_bold = bold;
+    }
+}
+
+/// Each line's runs of visible text with the attributes they are drawn in.
+fn runs(line: &str) -> Vec<(String, Sgr)> {
+    let mut out = Vec::new();
+    let mut sgr = Sgr::default();
+    let mut rest = line;
+    while let Some(start) = rest.find("\x1b[") {
+        out.push((rest[..start].to_owned(), sgr.clone()));
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('m') else { break };
+        sgr.apply(&after[..end]);
+        rest = &after[end + 1..];
+    }
+    out.push((rest.to_owned(), sgr));
+    out
+}
+
+/// Attributes of the first run of text containing `needle`.
+fn style_of(screen: &str, needle: &str) -> Option<Sgr> {
+    screen
+        .lines()
+        .flat_map(runs)
+        .find_map(|(text, sgr)| text.contains(needle).then_some(sgr))
+}
+
+/// Attributes of the header line for `session`, if present.
+fn header(screen: &str, session: &str) -> Option<Sgr> {
+    screen.lines().find_map(|line| {
+        let runs = runs(line);
+        let visible: String = runs.iter().map(|r| r.0.as_str()).collect();
+        if visible.trim() != session {
+            return None;
         }
-        visible.push_str(rest);
-        (visible.trim() == session).then_some(text_bold)
+        runs.into_iter()
+            .find_map(|(text, sgr)| (!text.trim().is_empty()).then_some(sgr))
     })
 }
 
