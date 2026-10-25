@@ -103,7 +103,7 @@ pub fn agent_text(row: &Row, width: usize) -> String {
     format!("{label:<room$} {}", row.age)
 }
 
-/// Groups agents by session, the sidebar's own session first, then the rest by name.
+/// Groups agents by session, sessions by name so rows don't jump as focus moves.
 pub fn lines(
     status: &Status,
     own_session: Option<&str>,
@@ -121,7 +121,6 @@ pub fn lines(
         let session = r.session.as_deref();
         (
             session.is_none(),
-            session != own_session,
             session.map(str::to_owned),
             r.window,
             r.pane
@@ -338,14 +337,14 @@ mod tests {
     }
 
     fn status() -> Status {
-        let mut no_branch = rec("%5", State::Idle, "beta", 1, true);
+        let mut no_branch = rec("%5", State::Idle, "web", 1, true);
         no_branch.branch = None;
         Status {
             now_ms: 125_000,
             sidebar: true,
             panes: vec![
                 no_branch,
-                rec("%1", State::Blocked, "alpha", 2, true),
+                rec("%1", State::Blocked, "ops", 2, true),
                 rec("%2", State::Done, "me", 3, true),
                 rec("%3", State::Working, "me", 1, true),
                 rec("%4", State::Idle, "me", 3, false),
@@ -430,6 +429,19 @@ mod tests {
             matches!(last, Line::Agent(r) if r.pane == "%5"),
             "no branch, no second line"
         );
+    }
+
+    #[test]
+    fn sessions_stay_alphabetical_wherever_the_sidebar_is() {
+        let out = lines(&status(), Some("web"), StateFilter::All, "");
+        let sessions: Vec<(&str, bool)> = out
+            .iter()
+            .filter_map(|l| match l {
+                Line::Session { name, current } => Some((name.as_str(), *current)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sessions, [("me", false), ("ops", false), ("web", true)]);
     }
 
     #[test]
@@ -550,11 +562,11 @@ mod tests {
         app.on_focus(true);
         app.on_key(key('/'));
         assert!(app.editing);
-        for c in "alp".chars() {
+        for c in "ops".chars() {
             app.on_key(key(c));
         }
         app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        assert_eq!(app.text, "al");
+        assert_eq!(app.text, "op");
         app.on_key(enter());
         assert!(!app.editing);
         assert_eq!(panes(&app.lines()), ["%1"]);
