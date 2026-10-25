@@ -8,18 +8,21 @@ Status: early development. See `fixtures/CALIBRATION.md` for verified agent beha
 
 - tmux 3.3 or newer, with `set -g focus-events on` (without it, simul cannot tell whether you are looking at a pane)
 - macOS, Linux, or WSL
-- A Rust toolchain to build (prebuilt releases are planned)
+- `curl`, `tar`, and `sha256sum` or `shasum`, to download and verify the prebuilt binary (macOS and Linux on x86_64 or arm64; WSL uses the Linux build)
 
 ## Install
 
-```sh
-cargo build --release
-ln -s "$PWD/target/release/simul" ~/.cargo/bin/simul  # or any directory on your PATH
+With TPM, add this to `tmux.conf` and press `prefix + I`:
+
+```tmux
+set -g @plugin 'mcopland/simul'
 ```
 
-The symlink puts `simul` on your PATH, and rebuilds update it in place.
+When tmux loads the plugin, it downloads the release binary matching the plugin's `VERSION` into `~/.tmux/plugins/simul/bin/simul` and checks its sha256. Then it starts the daemon. Link the binary onto your PATH:
 
-With TPM, add `set -g @plugin 'mcopland/simul'` to `tmux.conf`. Without TPM, add `run-shell /path/to/simul/simul.tmux`. Either one starts the daemon when tmux loads.
+```sh
+ln -s ~/.tmux/plugins/simul/bin/simul ~/.local/bin/simul  # or any directory on your PATH
+```
 
 Then install the agent hooks:
 
@@ -28,11 +31,22 @@ simul install-hooks claude            # ~/.claude/settings.json
 simul install-hooks claude --project  # ./.claude/settings.local.json
 ```
 
-Hooks record the path you ran `simul` from, so run it through a path that won't move, such as the symlink above. Start new agent sessions to pick up the hooks.
+Hooks record the path you ran `simul` from, so run it through a path that won't move, such as the symlink above. Plugin updates replace the binary at the same path. Start new agent sessions to pick up the hooks.
 
 The merge keeps your existing hooks. If the settings file is a symlink, simul writes through it and leaves the link in place. Each run replaces simul's previous entries, which are tagged `#simul-managed`, and saves a `.simul-bak` copy first.
 
-Check the setup with `simul doctor`. After a rebuild, run `pkill -f 'simul daemon'`. The next hook event or tmux reload starts the new binary, and toggling the sidebar off and on restarts it too.
+Check the setup with `simul doctor`. After a TPM update (`prefix + U`), reload tmux (`tmux source ~/.tmux.conf`) to download the new binary, then run `pkill -f 'simul daemon'`. After a rebuild, just run the `pkill`. The next hook event or tmux reload starts the new binary, and toggling the sidebar off and on restarts it too.
+
+### Build from source
+
+Without TPM, or on a platform with no prebuilt binary, build with a Rust toolchain:
+
+```sh
+cargo build --release
+ln -s "$PWD/target/release/simul" ~/.cargo/bin/simul  # or any directory on your PATH
+```
+
+Then add `run-shell /path/to/simul/simul.tmux` to `tmux.conf`. When `target/release/simul` exists, the plugin uses it and skips the download, and rebuilds update the symlink in place.
 
 ## Use
 
