@@ -236,3 +236,38 @@ fn model_and_effort_come_from_the_transcript_after_each_turn() {
         "{table}"
     );
 }
+
+/// Writes the live status file Claude Code keeps for a session, owned by this test process.
+fn write_session(h: &Harness, pane: &str, status: &str) {
+    let dir = h.dir.path().join("claude-config/sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    let window = h.tmux(&["display-message", "-p", "-t", pane, "#{window_id}"]);
+    let pid = std::process::id();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let body = format!(
+        r#"{{"pid":{pid},"tmux":"t:{window}.{pane}","status":"{status}","statusUpdatedAt":{now}}}"#
+    );
+    // Rename so the daemon never reads a half-written file.
+    let tmp = dir.join(format!("{pid}.json.tmp"));
+    std::fs::write(&tmp, body).unwrap();
+    std::fs::rename(&tmp, dir.join(format!("{pid}.json"))).unwrap();
+}
+
+#[test]
+fn live_session_file_drives_state_without_hooks() {
+    let mut h = Harness::new();
+    let pane = h.fake_claude_pane("done");
+    write_session(&h, &pane, "busy");
+    h.start_daemon();
+    h.wait_state(&pane, Some("working"));
+    write_session(&h, &pane, "waiting");
+    h.wait_state(&pane, Some("blocked"));
+    // Esc fires no hook; only the session file says the turn is over.
+    h.hook_fixture(&pane, "UserPromptSubmit", "UserPromptSubmit");
+    h.wait_state(&pane, Some("working"));
+    write_session(&h, &pane, "idle");
+    h.wait_state(&pane, Some("idle"));
+}

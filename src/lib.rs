@@ -1,4 +1,5 @@
 pub mod claude_metrics;
+pub mod claude_sessions;
 pub mod cli;
 pub mod client;
 pub mod config;

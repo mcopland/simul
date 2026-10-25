@@ -7,6 +7,7 @@ pub const EVENTS: &[&str] = &[
     "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
+    "PermissionRequest",
     "Notification",
     "Stop",
     "SessionEnd",
@@ -26,7 +27,11 @@ fn is_version(s: &str) -> bool {
 }
 
 pub fn parse(event: &str, payload: &Value) -> Parsed {
+    // Subagents fire tool hooks from the parent's pane, even after its turn has ended. Their
+    // permission prompts still show in that pane, so those count.
+    let subagent = str_field(payload, "agent_id").is_some_and(|id| !id.is_empty());
     let event = match event {
+        "PreToolUse" | "PostToolUse" if subagent => AgentEvent::NoChange,
         // Compaction restarts the session mid-turn; the agent is still busy.
         "SessionStart" if str_field(payload, "source").as_deref() == Some("compact") => {
             AgentEvent::NoChange
@@ -37,6 +42,7 @@ pub fn parse(event: &str, payload: &Value) -> Parsed {
             tool: str_field(payload, "tool_name"),
         },
         "PostToolUse" => AgentEvent::PostTool,
+        "PermissionRequest" => AgentEvent::PermissionPrompt,
         "Notification" => notification(payload),
         "Stop" => AgentEvent::Stop,
         "SessionEnd" => AgentEvent::SessionEnd,
@@ -59,7 +65,7 @@ pub fn parse(event: &str, payload: &Value) -> Parsed {
 
 fn notification(payload: &Value) -> AgentEvent {
     match str_field(payload, "notification_type").as_deref() {
-        Some("permission_prompt") => AgentEvent::PermissionPrompt,
+        Some("permission_prompt" | "elicitation_dialog") => AgentEvent::PermissionPrompt,
         Some("idle_prompt") => AgentEvent::IdlePrompt,
         Some(_) => AgentEvent::NoChange,
         None => match str_field(payload, "message") {
@@ -76,7 +82,10 @@ const SCRAPE_LINES: usize = 15;
 pub fn classify_screen(screen: &str) -> Screen {
     let lines = bottom_lines(screen, SCRAPE_LINES);
     let has = |needle: &str| lines.iter().any(|l| l.contains(needle));
-    if (has("Do you want to") && has("Esc to cancel")) || lines.iter().any(|l| is_selector(l)) {
+    let dialog =
+        (has("Do you want to") && has("Esc to cancel")) || lines.iter().any(|l| is_selector(l));
+    // Dialogs replace the input box, so with it on screen a "selector" is echoed prompt text.
+    if dialog && !has_input_box(&lines) {
         Screen::Blocked
     } else if lines.iter().any(|l| is_spinner(l)) {
         Screen::Working
@@ -93,6 +102,15 @@ fn is_selector(line: &str) -> bool {
         .strip_prefix("\u{276f} ")
         .and_then(|rest| rest.split_once(". "))
         .is_some_and(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The prompt line directly under a `\u{2500}` rule, which may carry a session name.
+fn has_input_box(lines: &[&str]) -> bool {
+    lines.windows(2).any(|w| {
+        w[0].trim_start().starts_with('\u{2500}')
+            && w[1].trim_start().starts_with('\u{276f}')
+            && !is_selector(w[1])
+    })
 }
 
 /// Matches `<glyph> <Verb>\u{2026} (<n>s ...`.
@@ -195,6 +213,47 @@ mod tests {
     }
 
     #[test]
+    fn subagent_events_leave_the_pane_alone() {
+        let mut p = hook("PreToolUse");
+        p["agent_id"] = json!("a1b2");
+        p["agent_type"] = json!("Explore");
+        let parsed = parse("PreToolUse", &super::super::slim_payload(&p));
+        assert_eq!(parsed.event, AgentEvent::NoChange);
+        assert_eq!(parsed.meta.cwd.as_deref(), Some("/home/user/src/scratch"));
+        // A subagent's permission prompt still shows in the parent pane and needs the user.
+        assert_eq!(
+            parse("PermissionRequest", &p).event,
+            AgentEvent::PermissionPrompt
+        );
+        let mut n = hook("Notification-permission_prompt");
+        n["agent_id"] = json!("a1b2");
+        assert_eq!(
+            parse("Notification", &n).event,
+            AgentEvent::PermissionPrompt
+        );
+        p["agent_id"] = json!("");
+        assert!(matches!(
+            parse("PreToolUse", &p).event,
+            AgentEvent::PreTool { .. }
+        ));
+    }
+
+    #[test]
+    fn permission_request_and_questions_block() {
+        assert!(EVENTS.contains(&"PermissionRequest"));
+        let p = json!({"tool_name": "Bash"});
+        assert_eq!(
+            parse("PermissionRequest", &p).event,
+            AgentEvent::PermissionPrompt
+        );
+        let p = json!({"notification_type": "elicitation_dialog"});
+        assert_eq!(
+            parse("Notification", &p).event,
+            AgentEvent::PermissionPrompt
+        );
+    }
+
+    #[test]
     fn compaction_session_start_keeps_state() {
         let p = json!({"source": "compact", "session_id": "s"});
         assert_eq!(parse("SessionStart", &p).event, AgentEvent::NoChange);
@@ -208,6 +267,16 @@ mod tests {
         assert_eq!(classify_screen(plan_exit), Screen::Blocked);
         let idle_with_text = "\u{276f} hello\n";
         assert_eq!(classify_screen(idle_with_text), Screen::Idle);
+    }
+
+    #[test]
+    fn echoed_list_prompt_while_thinking_is_working() {
+        let screen = fixture("screens/echoed-list-prompt.txt").replace(
+            "probe\n\n",
+            "probe\n\n\u{2722} Pondering\u{2026} (2s \u{b7} thinking with high effort)\n",
+        );
+        assert!(screen.contains("Pondering"));
+        assert_eq!(classify_screen(&screen), Screen::Working);
     }
 
     #[test]
@@ -226,6 +295,8 @@ mod tests {
             ("done", Screen::Idle),
             ("idle", Screen::Idle),
             ("trust", Screen::Idle),
+            // A submitted numbered list echoes as `\u{276f} 1. ...`, which is not a selector.
+            ("echoed-list-prompt", Screen::Idle),
         ];
         for (name, want) in cases {
             let screen = fixture(&format!("screens/{name}.txt"));

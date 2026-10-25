@@ -96,6 +96,7 @@ impl Harness {
         let mut c = Command::new(BIN);
         c.env("SIMUL_SOCKET", &self.simul_sock)
             .env("XDG_CONFIG_HOME", self.dir.path().join("config"))
+            .env("CLAUDE_CONFIG_DIR", self.dir.path().join("claude-config"))
             .env("TMUX", self.tmux_env())
             .env_remove("TMUX_PANE");
         c

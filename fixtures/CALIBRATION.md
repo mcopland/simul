@@ -30,6 +30,22 @@ Because deny and interrupt emit no hook, the daemon screen-scrapes Claude panes 
 - the spinner gives `working`
 - neither gives `idle`
 
+### Live session file
+
+Recorded 2026-10-25, Claude Code 2.1.304 to 2.1.310. Claude Code keeps `~/.claude/sessions/<pid>.json` (under `$CLAUDE_CONFIG_DIR` if set) for each running session and removes it on exit. The file is undocumented; [tmux-agent-sidebar](https://github.com/OlgierdOp/tmux-agent-sidebar) uses it the same way.
+
+| Field | Meaning |
+| --- | --- |
+| `status` | `busy`, `waiting`, or `idle`. It updates after Esc, a denied prompt, or an interrupt, where no hook fires. |
+| `statusUpdatedAt` | Unix ms of the last status change. |
+| `tmux` | `<session>:<window id>.<pane id>`, e.g. `dev:@54.%475`. Absent outside tmux and on background sessions. |
+| `kind` | `interactive` or `bg`. |
+| `parkedJobId` / `jobId` | A pane whose conversation runs in a background session carries `parkedJobId`. The `bg` file with the same `jobId` holds the live status. |
+
+The daemon reads these files every tick. A status counts only when it changed and is newer than the pane's last hook. Panes with a file are not screen-scraped. Not yet observed on screen: that `waiting` covers permission prompts and questions.
+
+Subagent hooks carry `agent_id` and fire with the parent's `$TMUX_PANE`, even after the parent's `Stop`. They are ignored for state.
+
 ## Kiro CLI
 
 Deferred, unverified. Kiro is not installed on the home machine, and work fixtures must not enter this public repo.
@@ -38,4 +54,5 @@ Deferred, unverified. Kiro is not installed on the home machine, and work fixtur
 
 - `claude/hooks/<Event>.json`: one payload per event, plus both Notification variants.
 - `claude/session.jsonl`: the full ordered session as shim envelopes. Sequence: start, approve a Write, deny a Write with `3`, deny with `Escape`, interrupt a reply, two Bash runs, idle notification, `/exit`.
-- `claude/screens/*.txt`: `capture-pane -p` output for each signature above.
+- `claude/screens/*.txt`: `capture-pane -p` output for each signature above. `echoed-list-prompt.txt` is a submitted numbered list, which must not read as a selector.
+- `claude/sessions/*.json`: sanitized live session files, including a parked pane and its background session.

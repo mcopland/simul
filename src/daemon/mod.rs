@@ -12,6 +12,7 @@ use anyhow::Result;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::claude_metrics::{Turn, last_turn};
+use crate::claude_sessions;
 use crate::config::Config;
 use crate::hook::{Agent, AgentEvent, Envelope};
 use crate::log;
@@ -64,6 +65,10 @@ struct Daemon {
     branch_fetched: HashSet<String>,
     /// Panes whose transcript is being read.
     turn_inflight: HashSet<String>,
+    /// Where Claude Code keeps live session status; `None` without `$HOME`.
+    sessions_dir: Option<PathBuf>,
+    /// Last failure reading `sessions_dir`, so a persistent one is logged once.
+    live_error: Option<String>,
 }
 
 pub async fn run(opts: Options) -> Result<()> {
@@ -98,6 +103,8 @@ pub async fn run(opts: Options) -> Result<()> {
         notify_gate: notify::Gate::default(),
         branch_fetched: HashSet::new(),
         turn_inflight: HashSet::new(),
+        sessions_dir: claude_sessions::sessions_dir(crate::paths::env_var),
+        live_error: None,
     };
     d.install_tmux_hooks().await;
     d.reconcile().await;
@@ -155,7 +162,10 @@ impl Daemon {
                 self.reconcile_pending = false;
                 self.reconcile().await;
             }
-            Cmd::Tick => self.scrape().await,
+            Cmd::Tick => {
+                self.read_live().await;
+                self.scrape().await;
+            }
             Cmd::Turn { pane, turn } => {
                 self.turn_inflight.remove(&pane);
                 let turn = turn.unwrap_or_default();
@@ -340,6 +350,38 @@ impl Daemon {
         self.maintain_sidebars().await;
         self.on_transitions(transitions, "viewed");
         self.publish();
+    }
+
+    /// Applies Claude's own session status; it covers Esc, denials, and interrupts, which fire no hook.
+    async fn read_live(&mut self) {
+        let Some(dir) = self.sessions_dir.clone() else {
+            return;
+        };
+        let read = tokio::task::spawn_blocking(move || {
+            claude_sessions::read(&dir, claude_sessions::pid_alive)
+        })
+        .await;
+        // On failure every pane loses its live status, so the screen scrape takes over.
+        let (live, error) = match read {
+            Ok(Ok(found)) => {
+                let error = (!found.skipped.is_empty()).then(|| found.skipped.join("; "));
+                (found.live, error)
+            }
+            Ok(Err(e)) => (Vec::new(), Some(format!("{e:#}"))),
+            Err(e) => (
+                Vec::new(),
+                Some(format!("Claude session reader panicked: {e}")),
+            ),
+        };
+        if error.is_some() && error != self.live_error {
+            log!("{}", error.as_deref().unwrap_or_default());
+        }
+        self.live_error = error;
+        let changed = self.store.apply_live(&live, now_ms());
+        if !changed.is_empty() {
+            self.on_transitions(changed, "session");
+            self.publish();
+        }
     }
 
     async fn scrape(&mut self) {

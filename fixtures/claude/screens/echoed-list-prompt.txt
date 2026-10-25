@@ -1,0 +1,18 @@
+  Two things for you to decide:
+
+  1. Approach: is a dedicated Haiku search agent in place of Explore the right call? I recommend it.
+  2. Name: it should fit the theme. I'd suggest probe, but the choice is yours.
+
+  Settled: the full design except exploration. Open: the search agent's approach and name. Next: your
+  answers, then a final confirmation before I build.
+
+✻ Baked for 23s · done 9:52 PM
+
+❯ 1. Yes
+  2. probe
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  repo main | 3% | Opus 5.5 · high
+  ⏵⏵ auto mode on (shift+tab to cycle)

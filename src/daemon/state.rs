@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::claude_sessions::{Live, LiveStatus};
 use crate::hook::{Agent, AgentEvent, Parsed, Screen};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -57,6 +58,9 @@ pub struct PaneRecord {
     pub active: bool,
     #[serde(skip)]
     idle_scrapes: u8,
+    /// Status time of the agent's own live session file, while it has one.
+    #[serde(skip)]
+    live_ms: Option<u64>,
 }
 
 impl PaneRecord {
@@ -80,6 +84,7 @@ impl PaneRecord {
             window_name: None,
             active: false,
             idle_scrapes: 0,
+            live_ms: None,
         }
     }
 }
@@ -114,6 +119,9 @@ pub struct Snapshot {
     /// Panes the user is looking at right now.
     pub viewed: HashSet<String>,
 }
+
+/// How much later than Claude's own clock a hook can reach the daemon (shim start plus socket).
+const HOOK_LAG_MS: u64 = 1000;
 
 /// Consecutive idle scrapes required before demoting a busy pane, to ride out spinner redraws.
 const IDLE_SCRAPES_TO_DEMOTE: u8 = 2;
@@ -150,8 +158,11 @@ impl Store {
             .entry(pane.to_owned())
             .or_insert_with(|| PaneRecord::new(pane, agent, State::Unknown, now));
         rec.agent = agent;
-        rec.last_event_ms = now;
-        rec.idle_scrapes = 0;
+        // A hook that changes nothing (e.g. a subagent's) must not outrank the live status.
+        if parsed.event != AgentEvent::NoChange {
+            rec.last_event_ms = now;
+            rec.idle_scrapes = 0;
+        }
         if parsed.meta.session_id.is_some() {
             rec.session_id.clone_from(&parsed.meta.session_id);
         }
@@ -231,10 +242,43 @@ impl Store {
         added
     }
 
-    /// Panes whose state should be checked against the screen: busy or unknown, with no recent hook.
+    /// Applies each pane's live session status when it changed since the last call and is newer
+    /// than the pane's last hook.
+    pub fn apply_live(&mut self, live: &[Live], now: u64) -> Vec<Transition> {
+        let mut out = Vec::new();
+        for rec in self.panes.values_mut() {
+            let Some(l) = live
+                .iter()
+                .filter(|l| l.pane == rec.pane && rec.session.as_deref() == Some(&l.session))
+                .max_by_key(|l| l.updated_ms)
+            else {
+                rec.live_ms = None;
+                continue;
+            };
+            if rec.live_ms.replace(l.updated_ms) == Some(l.updated_ms)
+                || l.updated_ms + HOOK_LAG_MS < rec.last_event_ms
+            {
+                continue;
+            }
+            let next = match l.status {
+                LiveStatus::Busy => State::Working,
+                LiveStatus::Waiting => State::Blocked,
+                // Only the Stop hook can tell a finished turn from an interrupted one.
+                LiveStatus::Idle if rec.state == State::Done => continue,
+                LiveStatus::Idle => State::Idle,
+            };
+            let from = Some(rec.state);
+            out.extend(set_state(rec, next, now, from));
+        }
+        out
+    }
+
+    /// Panes whose state should be checked against the screen: busy or unknown, with no recent hook
+    /// and no live session file.
     pub fn needs_scrape(&self, now: u64, threshold_ms: u64) -> Vec<(String, Agent)> {
         self.panes
             .values()
+            .filter(|r| r.live_ms.is_none())
             .filter(|r| match r.state {
                 State::Working | State::Blocked => {
                     now.saturating_sub(r.last_event_ms) >= threshold_ms
@@ -330,6 +374,7 @@ fn set_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claude_sessions::{Live, LiveStatus};
     use crate::hook::{Envelope, Meta};
 
     fn ev(event: AgentEvent) -> Parsed {
@@ -401,6 +446,17 @@ mod tests {
         s.apply("%1", Agent::Claude, &ev(AgentEvent::PromptSubmit), 1, true);
         s.apply("%1", Agent::Claude, &ev(AgentEvent::Stop), 2, true);
         assert_eq!(state(&s, "%1"), Some(State::Idle));
+    }
+
+    #[test]
+    fn subagent_tool_use_after_stop_keeps_done() {
+        let mut s = Store::default();
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::PromptSubmit), 1, false);
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::Stop), 2, false);
+        let sub = serde_json::json!({"tool_name": "Read", "agent_id": "a1"});
+        let parsed = Agent::Claude.parse("PreToolUse", &sub);
+        assert_eq!(s.apply("%1", Agent::Claude, &parsed, 3, false), None);
+        assert_eq!(state(&s, "%1"), Some(State::Done));
     }
 
     #[test]
@@ -668,6 +724,128 @@ mod tests {
         assert!(!s.set_branch("/w", Some("main".into())));
         assert!(!s.set_branch("/other", Some("x".into())));
         assert_eq!(s.get("%1").unwrap().branch.as_deref(), Some("main"));
+    }
+
+    fn live(status: LiveStatus, updated_ms: u64) -> Live {
+        Live {
+            pane: "%1".into(),
+            session: "main".into(),
+            status,
+            updated_ms,
+        }
+    }
+
+    /// A pane placed in session `main` whose last hook arrived at `at`.
+    fn placed(event: AgentEvent, at: u64) -> Store {
+        let mut s = Store::default();
+        s.apply("%1", Agent::Claude, &ev(event), at, false);
+        s.locate(&pane("%1", "claude"));
+        s
+    }
+
+    #[test]
+    fn live_status_maps_to_states() {
+        let mut s = placed(AgentEvent::SessionStart, 1);
+        let t = s.apply_live(&[live(LiveStatus::Busy, 10)], 11);
+        assert_eq!(t.iter().map(|t| t.to).collect::<Vec<_>>(), [State::Working]);
+        s.apply_live(&[live(LiveStatus::Waiting, 20)], 21);
+        assert_eq!(state(&s, "%1"), Some(State::Blocked));
+        s.apply_live(&[live(LiveStatus::Idle, 30)], 31);
+        assert_eq!(state(&s, "%1"), Some(State::Idle));
+        assert_eq!(s.get("%1").unwrap().since_ms, 31);
+    }
+
+    #[test]
+    fn unchanged_live_status_does_not_override_hooks() {
+        let mut s = placed(AgentEvent::SessionStart, 1);
+        s.apply_live(&[live(LiveStatus::Idle, 5)], 6);
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::PromptSubmit), 7, false);
+        assert!(s.apply_live(&[live(LiveStatus::Idle, 5)], 8).is_empty());
+        assert_eq!(state(&s, "%1"), Some(State::Working));
+    }
+
+    #[test]
+    fn live_status_older_than_last_hook_is_ignored() {
+        let mut s = placed(AgentEvent::PromptSubmit, 5000);
+        assert!(
+            s.apply_live(&[live(LiveStatus::Idle, 3000)], 5001)
+                .is_empty()
+        );
+        assert_eq!(state(&s, "%1"), Some(State::Working));
+    }
+
+    #[test]
+    fn live_status_just_before_a_late_hook_still_counts() {
+        // Esc right after a prompt: the hook reaches the daemon after Claude wrote `idle`.
+        let mut s = placed(AgentEvent::PromptSubmit, 5300);
+        s.apply_live(&[live(LiveStatus::Idle, 5200)], 5301);
+        assert_eq!(state(&s, "%1"), Some(State::Idle));
+    }
+
+    #[test]
+    fn newest_live_entry_for_a_pane_wins() {
+        let mut s = placed(AgentEvent::SessionStart, 1);
+        // A crashed Claude's file can outlive it next to the new one's.
+        s.apply_live(
+            &[live(LiveStatus::Busy, 10), live(LiveStatus::Waiting, 20)],
+            21,
+        );
+        assert_eq!(state(&s, "%1"), Some(State::Blocked));
+        s.apply_live(
+            &[live(LiveStatus::Waiting, 20), live(LiveStatus::Busy, 10)],
+            22,
+        );
+        assert_eq!(state(&s, "%1"), Some(State::Blocked));
+    }
+
+    #[test]
+    fn live_idle_keeps_unseen_done() {
+        let mut s = placed(AgentEvent::PromptSubmit, 1);
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::Stop), 2, false);
+        assert!(s.apply_live(&[live(LiveStatus::Idle, 3)], 4).is_empty());
+        assert_eq!(state(&s, "%1"), Some(State::Done));
+    }
+
+    #[test]
+    fn live_status_from_another_session_is_ignored() {
+        let mut s = placed(AgentEvent::SessionStart, 1);
+        let mut other = live(LiveStatus::Busy, 10);
+        other.session = "elsewhere".into();
+        assert!(s.apply_live(&[other], 11).is_empty());
+        assert_eq!(state(&s, "%1"), Some(State::Idle));
+    }
+
+    #[test]
+    fn live_panes_are_not_scraped_until_their_file_goes() {
+        let mut s = placed(AgentEvent::PromptSubmit, 1000);
+        s.apply_live(&[live(LiveStatus::Busy, 1001)], 1002);
+        assert!(s.needs_scrape(9000, 1500).is_empty());
+        s.apply_live(&[], 9001);
+        assert_eq!(
+            s.needs_scrape(9000, 1500),
+            vec![("%1".to_string(), Agent::Claude)]
+        );
+    }
+
+    #[test]
+    fn live_status_resolves_recovered_panes() {
+        let mut s = Store::default();
+        let snap = Snapshot {
+            panes: vec![pane("%1", "claude")],
+            viewed: HashSet::new(),
+        };
+        s.recover(&snap, 1);
+        s.apply_live(&[live(LiveStatus::Busy, 0)], 2);
+        assert_eq!(state(&s, "%1"), Some(State::Working));
+    }
+
+    #[test]
+    fn no_change_hooks_do_not_count_as_news() {
+        let mut s = placed(AgentEvent::PromptSubmit, 1);
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::NoChange), 9, false);
+        assert_eq!(s.get("%1").unwrap().last_event_ms, 1);
+        s.apply_live(&[live(LiveStatus::Idle, 5)], 10);
+        assert_eq!(state(&s, "%1"), Some(State::Idle));
     }
 
     /// Replays the recorded calibration session and checks the state after each event.
