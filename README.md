@@ -51,7 +51,7 @@ Sidebar keys:
 | `/`            | Filter by text         |
 | `f`            | Cycle the state filter |
 
-Each agent row shows a state symbol, `window:window_name`, and time in the current state, with the branch on a second line. While the sidebar isn't focused, it highlights the agent in its own window, or nothing if that window has none. Like tmux's current window, the highlighted agent and the sidebar's own session are bold and everything else is dimmed; state symbols keep their colors. Focusing the sidebar keeps that row, or selects the first row if none was highlighted.
+Each agent row shows a state symbol, `window:window_name`, and time in the current state, with its work directory (home as `~`, cut from the left when narrow) and branch on the lines below. While the sidebar isn't focused, it highlights the agent in its own window, or nothing if that window has none. Like tmux's current window, the highlighted agent and the sidebar's own session are bold and everything else is dimmed; state symbols keep their colors. Focusing the sidebar keeps that row, or selects the first row if none was highlighted.
 
 | Symbol | State     | Meaning                                |
 | ------ | --------- | -------------------------------------- |

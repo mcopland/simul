@@ -79,6 +79,7 @@ struct View {
     app: App,
     error: Option<String>,
     offset: usize,
+    home: Option<String>,
 }
 
 fn ui_loop(
@@ -91,6 +92,7 @@ fn ui_loop(
         app: App::default(),
         error: None,
         offset: 0,
+        home: env_var("HOME"),
     };
     let mut session_checked: Option<Instant> = None;
     loop {
@@ -168,7 +170,7 @@ fn state_color(state: State) -> Color {
     }
 }
 
-/// Width of the ` <symbol> ` prefix, which the branch line indents to match.
+/// Width of the ` <symbol> ` prefix, which the lines under an agent indent to match.
 const PREFIX: usize = 3;
 
 fn render(f: &mut Frame, view: &mut View) {
@@ -189,6 +191,13 @@ fn render(f: &mut Frame, view: &mut View) {
     // Matches the session name in tmux's status-left.
     let own_session = Style::new().fg(Color::Rgb(0xf6, 0xc1, 0x77));
     let muted = Style::new().fg(Color::DarkGray);
+    let detail = |pane: &str| {
+        if selected_pane == Some(pane) {
+            Style::new()
+        } else {
+            muted
+        }
+    };
     let mut selected_line = None;
     let rendered: Vec<TextLine> = lines
         .iter()
@@ -214,24 +223,28 @@ fn render(f: &mut Frame, view: &mut View) {
                     ),
                 ])
             }
+            Line::Cwd { pane, cwd } => TextLine::from(Span::styled(
+                format!(
+                    "{:PREFIX$}{}",
+                    "",
+                    model::short_path(cwd, view.home.as_deref(), width)
+                ),
+                detail(pane),
+            )),
             Line::Branch { pane, branch } => TextLine::from(Span::styled(
                 format!("{:PREFIX$}{}", "", model::truncate(branch, width)),
-                if selected_pane == Some(pane.as_str()) {
-                    Style::new()
-                } else {
-                    muted
-                },
+                detail(pane),
             )),
         })
         .collect();
     let height = usize::from(list.height);
     if let Some(line) = selected_line {
-        // Keep both lines of a selected agent in view.
-        let last = if matches!(lines.get(line + 1), Some(Line::Branch { .. })) {
-            line + 1
-        } else {
-            line
-        };
+        // Keep all lines of a selected agent in view.
+        let last = line
+            + lines[line + 1..]
+                .iter()
+                .take_while(|l| matches!(l, Line::Cwd { .. } | Line::Branch { .. }))
+                .count();
         if line < view.offset {
             view.offset = line;
         } else if height > 0 && last >= view.offset + height {
