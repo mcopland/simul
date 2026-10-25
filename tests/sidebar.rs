@@ -241,7 +241,7 @@ fn selected_row_is_bold_without_a_block() {
 }
 
 #[test]
-fn only_the_current_session_header_is_bold() {
+fn current_session_header_is_gold_like_status_left() {
     let mut h = Harness::new();
     let agent = h.new_pane("sleep 600");
     h.tmux(&["new-session", "-d", "-s", "u", "sleep 600"]);
@@ -260,7 +260,10 @@ fn only_the_current_session_header_is_bold() {
         header(&screen, "u").is_some()
     });
     let own = header(&screen, "t").unwrap();
-    assert!(own.bold && !own.muted(), "own session bold: {screen:?}");
+    assert!(
+        !own.bold && own.fg.as_deref() == Some("38;2;246;193;119"),
+        "own session gold, not bold: {screen:?}"
+    );
     let rest = header(&screen, "u").unwrap();
     assert!(
         !rest.bold && rest.muted(),

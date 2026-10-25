@@ -186,6 +186,8 @@ fn render(f: &mut Frame, view: &mut View) {
             .nth(i)
     });
     let current = Style::new().add_modifier(Modifier::BOLD);
+    // Matches the session name in tmux's status-left.
+    let own_session = Style::new().fg(Color::Rgb(0xf6, 0xc1, 0x77));
     let muted = Style::new().fg(Color::DarkGray);
     let mut selected_line = None;
     let rendered: Vec<TextLine> = lines
@@ -194,7 +196,7 @@ fn render(f: &mut Frame, view: &mut View) {
         .map(|(i, line)| match line {
             Line::Session { name, current: own } => TextLine::from(Span::styled(
                 model::truncate(name, usize::from(list.width)),
-                if *own { current } else { muted },
+                if *own { own_session } else { muted },
             )),
             Line::Agent(row) => {
                 let selected = selected_pane == Some(row.pane.as_str());
