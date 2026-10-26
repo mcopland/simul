@@ -84,7 +84,8 @@ fn gather() -> Vec<Check> {
     checks.push(check_claude_hooks_file(&claude_settings_paths()));
     checks.push(check_kiro_hooks_file(
         install_hooks::kiro_hook_file(env_var).as_deref(),
-        Path::new(install_hooks::KIRO_EXCLUDE),
+        Path::new(install_hooks::KIRO_PROJECT_FILE),
+        on_path("kiro-cli", env_var("PATH").as_deref()),
     ));
     checks.push(test_notification());
     if let (true, Ok(sock)) = (daemon_up, &socket) {
@@ -159,23 +160,33 @@ fn claude_settings_paths() -> Vec<PathBuf> {
 }
 
 fn check_claude_hooks_file(paths: &[PathBuf]) -> Check {
+    check_hook_files("claude hooks", "claude", paths, check_claude_hooks)
+}
+
+/// Passes on the first file whose hooks check out; otherwise lists every file's problem.
+fn check_hook_files<'a>(
+    name: &'static str,
+    agent: &str,
+    paths: impl IntoIterator<Item = &'a PathBuf>,
+    check: fn(&Value) -> std::result::Result<(), String>,
+) -> Check {
     let mut problems = Vec::new();
-    for path in paths.iter().filter(|p| p.exists()) {
+    for path in paths.into_iter().filter(|p| p.exists()) {
         let parsed = std::fs::read_to_string(path)
             .map_err(anyhow::Error::from)
             .and_then(|t| serde_json::from_str::<Value>(&t).map_err(anyhow::Error::from));
         match parsed {
-            Ok(v) => match check_claude_hooks(&v) {
-                Ok(()) => return pass("claude hooks", format!("installed in {}", path.display())),
+            Ok(v) => match check(&v) {
+                Ok(()) => return pass(name, format!("installed in {}", path.display())),
                 Err(why) => problems.push(format!("{}: {why}", path.display())),
             },
             Err(e) => problems.push(format!("{}: {e}", path.display())),
         }
     }
     if problems.is_empty() {
-        problems.push("not installed; run `simul install-hooks claude`".into());
+        problems.push(format!("not installed; run `simul install-hooks {agent}`"));
     }
-    fail("claude hooks", problems.join("; "))
+    fail(name, problems.join("; "))
 }
 
 /// Every Claude event has a simul hook whose binary exists.
@@ -217,29 +228,30 @@ pub fn check_kiro_hooks(file: &Value) -> std::result::Result<(), String> {
     check_installed(&install_hooks::kiro_managed(file), kiro::EVENTS, "kiro")
 }
 
-/// Checks the global and project Kiro hook files; skipped when Kiro has never run here.
-fn check_kiro_hooks_file(global: Option<&Path>, project: &Path) -> Check {
-    let kiro_home = global.and_then(Path::parent).and_then(Path::parent);
-    if !kiro_home.is_some_and(Path::exists) && !project.exists() {
-        return pass("kiro hooks", "skipped: Kiro not set up here (no ~/.kiro)");
+/// Checks the global and project Kiro hook files; skipped when Kiro CLI isn't installed.
+fn check_kiro_hooks_file(global: Option<&Path>, project: &Path, cli_installed: bool) -> Check {
+    let paths: Vec<PathBuf> = global
+        .into_iter()
+        .chain([project])
+        .map(Path::to_path_buf)
+        .collect();
+    // ~/.kiro alone proves nothing: Kiro IDE creates it too, and only the CLI runs these hooks.
+    if !cli_installed && !paths.iter().any(|p| p.exists()) {
+        return pass("kiro hooks", "skipped: kiro-cli not on PATH");
     }
-    let mut problems = Vec::new();
-    for path in global.into_iter().chain([project]).filter(|p| p.exists()) {
-        let parsed = std::fs::read_to_string(path)
-            .map_err(anyhow::Error::from)
-            .and_then(|t| serde_json::from_str::<Value>(&t).map_err(anyhow::Error::from));
-        match parsed {
-            Ok(v) => match check_kiro_hooks(&v) {
-                Ok(()) => return pass("kiro hooks", format!("installed in {}", path.display())),
-                Err(why) => problems.push(format!("{}: {why}", path.display())),
-            },
-            Err(e) => problems.push(format!("{}: {e}", path.display())),
-        }
-    }
-    if problems.is_empty() {
-        problems.push("not installed; run `simul install-hooks kiro`".into());
-    }
-    fail("kiro hooks", problems.join("; "))
+    check_hook_files("kiro hooks", "kiro", &paths, check_kiro_hooks)
+}
+
+/// Whether an executable `name` is in one of the directories of a `$PATH` value.
+fn on_path(name: &str, path: Option<&str>) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.into_iter()
+        .flat_map(|p| p.split(':'))
+        .filter(|dir| !dir.is_empty())
+        .any(|dir| {
+            std::fs::metadata(Path::new(dir).join(name))
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
 }
 
 /// The first word of a command produced by `tmux::shell_quote`.
@@ -331,16 +343,17 @@ mod tests {
     }
 
     #[test]
-    fn kiro_hooks_file_is_skipped_until_kiro_exists() {
+    fn kiro_hooks_file_is_skipped_until_kiro_cli_exists() {
         let dir = tempfile::tempdir().unwrap();
         let global = dir.path().join(".kiro/hooks/simul.json");
         let project = dir.path().join("repo/.kiro/hooks/simul.json");
-        let check = check_kiro_hooks_file(Some(&global), &project);
-        assert!(check.ok && check.detail.contains("skipped"), "{check:?}");
-        assert!(check_kiro_hooks_file(None, &project).ok);
-
+        // Kiro IDE also creates ~/.kiro; only the CLI runs these hooks.
         std::fs::create_dir(dir.path().join(".kiro")).unwrap();
-        let check = check_kiro_hooks_file(Some(&global), &project);
+        let check = check_kiro_hooks_file(Some(&global), &project, false);
+        assert!(check.ok && check.detail.contains("skipped"), "{check:?}");
+        assert!(check_kiro_hooks_file(None, &project, false).ok);
+
+        let check = check_kiro_hooks_file(Some(&global), &project, true);
         assert!(
             !check.ok && check.detail.contains("install-hooks kiro"),
             "{check:?}"
@@ -348,18 +361,44 @@ mod tests {
 
         let exe = std::env::current_exe().unwrap();
         install_hooks::install_kiro(&project, &exe).unwrap();
-        let check = check_kiro_hooks_file(Some(&global), &project);
+        let check = check_kiro_hooks_file(Some(&global), &project, false);
         assert!(check.ok && check.detail.contains("repo/.kiro"), "{check:?}");
 
         std::fs::create_dir_all(global.parent().unwrap()).unwrap();
         std::fs::write(&global, "{ not json").unwrap();
-        let check = check_kiro_hooks_file(Some(&global), &project);
+        let check = check_kiro_hooks_file(Some(&global), &project, true);
         assert!(check.ok, "one good file is enough: {check:?}");
         std::fs::remove_file(&project).unwrap();
-        let check = check_kiro_hooks_file(Some(&global), &project);
+        let check = check_kiro_hooks_file(Some(&global), &project, false);
         assert!(
             !check.ok && check.detail.contains("simul.json"),
             "{check:?}"
         );
+    }
+
+    #[test]
+    fn on_path_finds_executables_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("kiro-cli");
+        std::fs::write(&bin, "").unwrap();
+        let path = format!("/nonexistent:{}", dir.path().display());
+        assert!(!on_path("kiro-cli", Some(&path)), "not executable");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(on_path("kiro-cli", Some(&path)));
+        assert!(!on_path("kiro-cli", Some("/nonexistent")));
+        assert!(!on_path("kiro-cli", None));
+    }
+
+    #[test]
+    fn disabled_kiro_hook_is_reported_missing() {
+        let exe = std::env::current_exe().unwrap();
+        let mut file = install_hooks::kiro_hooks(&exe);
+        for h in file["hooks"].as_array_mut().unwrap() {
+            if h["trigger"] == "Stop" {
+                h["enabled"] = json!(false);
+            }
+        }
+        assert!(check_kiro_hooks(&file).unwrap_err().contains("Stop"));
     }
 }

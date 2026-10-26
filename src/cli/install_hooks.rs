@@ -10,8 +10,11 @@ use crate::tmux::shell_quote;
 /// Trailing shell comment that identifies hooks simul owns, so reinstalling replaces them.
 pub const MARKER: &str = "#simul-managed";
 
-/// Keeps a project install out of git; unanchored so it matches below the repo root too.
-pub const KIRO_EXCLUDE: &str = ".kiro/hooks/simul.json";
+/// Where `install-hooks kiro --project` writes, relative to the current directory.
+pub const KIRO_PROJECT_FILE: &str = ".kiro/hooks/simul.json";
+
+/// Keeps project installs out of git; a bare `.kiro/hooks/...` would only match at the repo root.
+pub const KIRO_EXCLUDE_PATTERN: &str = "**/.kiro/hooks/simul.json";
 
 pub fn run(agent: &str, project: bool, settings: Option<PathBuf>) -> Result<()> {
     match agent {
@@ -25,7 +28,7 @@ fn run_kiro(project: bool, file: Option<PathBuf>) -> Result<()> {
     let path = match (file, project) {
         (Some(p), _) => p,
         // Local, not shared: the hook embeds this machine's absolute binary path.
-        (None, true) => PathBuf::from(KIRO_EXCLUDE),
+        (None, true) => PathBuf::from(KIRO_PROJECT_FILE),
         (None, false) => kiro_hook_file(env_var)
             .context("cannot locate ~/.kiro/hooks: $KIRO_HOME and $HOME unset")?,
     };
@@ -37,14 +40,22 @@ fn run_kiro(project: bool, file: Option<PathBuf>) -> Result<()> {
         written.display()
     );
     if project {
-        match git_exclude_file(Path::new("."))? {
-            Some(exclude) => {
-                if add_exclude(&exclude, KIRO_EXCLUDE)? {
-                    println!("added {KIRO_EXCLUDE} to {}", exclude.display());
-                }
+        exclude_project_hooks().with_context(|| {
+            format!("hooks are installed, but {KIRO_PROJECT_FILE} is not excluded from git")
+        })?;
+    }
+    Ok(())
+}
+
+fn exclude_project_hooks() -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read the current directory")?;
+    match git_exclude_file(&cwd)? {
+        Some(exclude) => {
+            if add_exclude(&exclude, KIRO_EXCLUDE_PATTERN)? {
+                println!("added {KIRO_EXCLUDE_PATTERN} to {}", exclude.display());
             }
-            None => println!("not in a git repo; {KIRO_EXCLUDE} is not excluded from anything"),
         }
+        None => println!("not in a git repo; {KIRO_PROJECT_FILE} is not excluded from anything"),
     }
     Ok(())
 }
@@ -169,7 +180,9 @@ pub fn kiro_hooks(exe: &Path) -> Value {
                 "name": format!("simul-{event}"),
                 "trigger": event,
                 "action": {"type": "command", "command": hook_command(exe, "kiro", event)},
-                "timeout": 1,
+                // The unit is undocumented. 500 is safe either way: as ms it still outlasts the
+                // shim's 200 ms budget, and as seconds the shim exits long before it.
+                "timeout": 500,
                 "enabled": true,
             })
         })
@@ -183,6 +196,7 @@ pub fn kiro_managed(file: &Value) -> Vec<(String, String)> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
+        .filter(|h| h.get("enabled").and_then(Value::as_bool) != Some(false))
         .filter_map(|h| {
             let trigger = h.get("trigger").and_then(Value::as_str)?;
             let command = h.pointer("/action/command").and_then(Value::as_str)?;
@@ -193,8 +207,35 @@ pub fn kiro_managed(file: &Value) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Writes simul's Kiro hook file, replacing any earlier one.
+/// Writes simul's Kiro hook file, replacing an earlier one but never a file with other hooks.
 pub fn install_kiro(path: &Path, exe: &Path) -> Result<PathBuf> {
+    if path.exists() {
+        let old = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let old: Value = serde_json::from_str(&old).with_context(|| {
+            format!(
+                "refusing to replace {}: not a JSON hook file",
+                path.display()
+            )
+        })?;
+        let hooks = old.get("hooks").and_then(Value::as_array);
+        let total = hooks.map_or(0, Vec::len);
+        let ours = hooks
+            .into_iter()
+            .flatten()
+            .filter(|h| {
+                h.pointer("/action/command")
+                    .and_then(Value::as_str)
+                    .is_some_and(|c| c.ends_with(MARKER))
+            })
+            .count();
+        if ours < total {
+            bail!(
+                "refusing to replace {}: it holds hooks simul does not manage",
+                path.display()
+            );
+        }
+    }
     let mut text =
         serde_json::to_string_pretty(&kiro_hooks(exe)).context("failed to encode Kiro hooks")?;
     text.push('\n');
@@ -204,22 +245,25 @@ pub fn install_kiro(path: &Path, exe: &Path) -> Result<PathBuf> {
 /// The exclude file of the git repo containing `dir`; `None` outside a repo.
 pub fn git_exclude_file(dir: &Path) -> Result<Option<PathBuf>> {
     let out = std::process::Command::new("git")
-        .args([
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-path",
-            "info/exclude",
-        ])
+        .args(["rev-parse", "--git-path", "info/exclude"])
         .current_dir(dir)
-        .stderr(std::process::Stdio::null())
         .output()
         .with_context(|| format!("failed to run git in {}", dir.display()))?;
     if !out.status.success() {
-        return Ok(None);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr.contains("not a git repository") {
+            return Ok(None);
+        }
+        bail!(
+            "git rev-parse --git-path info/exclude failed in {}: {}",
+            dir.display(),
+            stderr.trim()
+        );
     }
     let path = String::from_utf8(out.stdout)
         .with_context(|| format!("git printed a non-UTF-8 exclude path in {}", dir.display()))?;
-    Ok(Some(PathBuf::from(path.trim_end_matches('\n'))))
+    // Relative to `dir` unless the repo is elsewhere (worktrees, $GIT_DIR).
+    Ok(Some(dir.join(path.trim_end_matches('\n'))))
 }
 
 /// Appends `entry` to an exclude file unless a line already equals it; true if it was added.
@@ -455,7 +499,7 @@ mod tests {
                 hook["action"]["command"],
                 hook_command(Path::new(EXE), "kiro", event)
             );
-            assert_eq!(hook["timeout"], 1);
+            assert_eq!(hook["timeout"], 500);
             assert_eq!(hook["enabled"], true);
             assert!(hook.get("matcher").is_none(), "every tool must match");
         }
@@ -471,6 +515,24 @@ mod tests {
         ]});
         assert!(kiro_managed(&other).is_empty());
         assert!(kiro_managed(&json!([])).is_empty());
+        let mut off = kiro_hooks(Path::new(EXE));
+        off["hooks"][4]["enabled"] = json!(false);
+        let m = kiro_managed(&off);
+        assert_eq!(m.len(), kiro::EVENTS.len() - 1);
+        assert!(m.iter().all(|(t, _)| t != "Stop"), "{m:?}");
+    }
+
+    #[test]
+    fn install_kiro_refuses_files_with_other_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mine.json");
+        let mine = r#"{"version": "v1", "hooks": [{"name": "fmt", "trigger": "Stop", "action": {"type": "command", "command": "/u/fmt.sh"}}]}"#;
+        for text in [mine, "{ not json"] {
+            std::fs::write(&path, text).unwrap();
+            let err = format!("{:#}", install_kiro(&path, Path::new(EXE)).unwrap_err());
+            assert!(err.contains("mine.json"), "{err}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+        }
     }
 
     #[test]
@@ -532,16 +594,36 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("info/exclude");
         assert!(
-            add_exclude(&file, KIRO_EXCLUDE).unwrap(),
+            add_exclude(&file, KIRO_PROJECT_FILE).unwrap(),
             "creates the file"
         );
-        assert!(!add_exclude(&file, KIRO_EXCLUDE).unwrap());
+        assert!(!add_exclude(&file, KIRO_PROJECT_FILE).unwrap());
         std::fs::write(&file, "# ignore\n*.log").unwrap();
-        assert!(add_exclude(&file, KIRO_EXCLUDE).unwrap());
+        assert!(add_exclude(&file, KIRO_PROJECT_FILE).unwrap());
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
-            format!("# ignore\n*.log\n{KIRO_EXCLUDE}\n")
+            format!("# ignore\n*.log\n{KIRO_PROJECT_FILE}\n")
         );
+    }
+
+    #[test]
+    fn exclude_pattern_ignores_project_files_at_any_depth() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(git(&["init", "-q"]));
+        let exclude = git_exclude_file(dir.path()).unwrap().unwrap();
+        add_exclude(&exclude, KIRO_EXCLUDE_PATTERN).unwrap();
+        for rel in [KIRO_PROJECT_FILE, "sub/dir/.kiro/hooks/simul.json"] {
+            assert!(git(&["check-ignore", "-q", rel]), "{rel} not ignored");
+        }
+        assert!(!git(&["check-ignore", "-q", ".kiro/hooks/team.json"]));
     }
 
     #[test]
@@ -557,10 +639,13 @@ mod tests {
         let sub = dir.path().join("sub");
         std::fs::create_dir(&sub).unwrap();
         let found = git_exclude_file(&sub).unwrap().unwrap();
+        assert!(found.is_absolute(), "{}", found.display());
         assert_eq!(
-            found.canonicalize().unwrap_or(found.clone()),
+            found.canonicalize().unwrap(),
             dir.path().canonicalize().unwrap().join(".git/info/exclude")
         );
+        let err = git_exclude_file(&dir.path().join("missing")).unwrap_err();
+        assert!(format!("{err:#}").contains("missing"), "{err:#}");
     }
 
     #[test]
