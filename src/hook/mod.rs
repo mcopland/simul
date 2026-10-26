@@ -110,6 +110,8 @@ pub enum Screen {
     Blocked,
     Working,
     Idle,
+    /// No approval prompt is showing, and nothing else about the pane is known.
+    NoPrompt,
     Unknown,
 }
 

@@ -56,6 +56,7 @@ pub struct PaneRecord {
     /// Whether this is the active pane of its window.
     #[serde(default)]
     pub active: bool,
+    /// Consecutive scrapes suggesting a busy pane has settled (idle, or no prompt left).
     #[serde(skip)]
     idle_scrapes: u8,
     /// Status time of the agent's own live session file, while it has one.
@@ -292,7 +293,7 @@ impl Store {
 
     pub fn apply_screen(&mut self, pane: &str, screen: Screen, now: u64) -> Option<Transition> {
         let rec = self.panes.get_mut(pane)?;
-        if screen != Screen::Idle {
+        if !matches!(screen, Screen::Idle | Screen::NoPrompt) {
             rec.idle_scrapes = 0;
         }
         let next = match (rec.state, screen) {
@@ -304,6 +305,12 @@ impl Store {
                 rec.idle_scrapes += 1;
                 (rec.idle_scrapes >= IDLE_SCRAPES_TO_DEMOTE).then_some(State::Idle)
             }
+            // The prompt was answered or dismissed; the turn's next hook says what happened.
+            (State::Blocked, Screen::NoPrompt) => {
+                rec.idle_scrapes += 1;
+                (rec.idle_scrapes >= IDLE_SCRAPES_TO_DEMOTE).then_some(State::Working)
+            }
+            (State::Working | State::Unknown, Screen::NoPrompt) => None,
         };
         let from = Some(rec.state);
         set_state(rec, next?, now, from)
@@ -648,6 +655,51 @@ mod tests {
             Some(State::Idle)
         );
         assert_eq!(s.apply_screen("%1", Screen::Working, 6), None);
+    }
+
+    #[test]
+    fn missing_prompt_clears_blocked_after_a_streak() {
+        let mut s = Store::default();
+        s.apply(
+            "%1",
+            Agent::Kiro,
+            &ev(AgentEvent::PreTool { tool: None }),
+            1,
+            false,
+        );
+        assert_eq!(
+            s.apply_screen("%1", Screen::Blocked, 2).map(|t| t.to),
+            Some(State::Blocked)
+        );
+        // Approved, denied, or interrupted: none of these sends a Kiro hook.
+        assert_eq!(s.apply_screen("%1", Screen::NoPrompt, 3), None);
+        s.apply_screen("%1", Screen::Blocked, 4);
+        assert_eq!(
+            s.apply_screen("%1", Screen::NoPrompt, 5),
+            None,
+            "streak restarts"
+        );
+        assert_eq!(
+            s.apply_screen("%1", Screen::NoPrompt, 6).map(|t| t.to),
+            Some(State::Working)
+        );
+    }
+
+    #[test]
+    fn missing_prompt_tells_nothing_about_other_states() {
+        let mut s = Store::default();
+        s.apply("%1", Agent::Kiro, &ev(AgentEvent::PromptSubmit), 1, false);
+        let snap = Snapshot {
+            panes: vec![pane("%2", "kiro-cli")],
+            viewed: HashSet::new(),
+        };
+        s.recover(&snap, 1);
+        for at in 2..6 {
+            assert_eq!(s.apply_screen("%1", Screen::NoPrompt, at), None);
+            assert_eq!(s.apply_screen("%2", Screen::NoPrompt, at), None);
+        }
+        assert_eq!(state(&s, "%1"), Some(State::Working));
+        assert_eq!(state(&s, "%2"), Some(State::Unknown));
     }
 
     #[test]
