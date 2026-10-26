@@ -48,7 +48,43 @@ Subagent hooks carry `agent_id` and fire with the parent's `$TMUX_PANE`, even af
 
 ## Kiro CLI
 
-Deferred, unverified. Kiro is not installed on the home machine, and work fixtures must not enter this public repo.
+**Unverified.** Kiro is not installed on the home machine, and work fixtures must not enter this public repo. Support was built on 2026-10-25 from public sources. Every `fixtures/kiro/` file is **synthetic**, hand-written to match these sources:
+
+- Kiro docs: [CLI V3 hooks migration](https://kiro.dev/docs/cli/v3/hooks-migration/), [2.x reference](https://kiro.dev/docs/cli/2x-reference/)
+- Captured payloads and field reports: [stablyai/orca#31577](https://github.com/stablyai/orca/issues/31577), [manaflow-ai/cmux#23685](https://github.com/manaflow-ai/cmux/pull/23685), [yangzichao/JustSessions#185](https://github.com/yangzichao/JustSessions/issues/185)
+- Approval prompt text and keys: [kirodotdev/KiroCrew#23454](https://github.com/kirodotdev/KiroCrew/pull/23454), [OrchestratorInc/agent-orchestrator#6601](https://github.com/OrchestratorInc/agent-orchestrator/pull/6601)
+
+### What the sources say
+
+| Question | Reported answer |
+| --- | --- |
+| Hook location | V3 engine: standalone `~/.kiro/hooks/*.json` (`$KIRO_HOME/hooks`) and `.kiro/hooks/*.json`, run together. V2 engine (the default in kiro-cli 2.x): only `hooks` inside an agent profile, so the built-in default agent runs none. |
+| File schema | `{"version": "v1", "hooks": [{name, trigger, matcher?, action: {type: "command", command}, timeout, enabled}]}` |
+| Triggers | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Stop`, and `SessionEnd` (fires on `/quit`). V2 names: `agentSpawn`, `userPromptSubmit`, `preToolUse`, `postToolUse`, `stop`. No permission or notification trigger. |
+| Payload | `session_id`, `hook_event_name`, `cwd`; plus `prompt`, or `tool_name`, `tool_input`, `tool_response`. `Stop` has nothing more. |
+| `$TMUX_PANE` reaches hooks | Yes. The hook's parent is not the `kiro-cli` process under V3. |
+| `pane_current_command` | `kiro-cli` (it runs `kiro-cli-chat` and a TUI under it). |
+| Hook stdout and exit codes | `SessionStart` and `UserPromptSubmit` stdout enters the model's context. `Stop` exiting 1 makes Kiro continue. The shim prints nothing and exits 0. |
+| Interrupts | Esc or Ctrl-C fires no `Stop`. |
+| Approval prompt | Classic: `Allow this action? Use 't' to trust (always allow) this tool for the session. [y/n/t]:`, answered at the `>` prompt below it. `y` approves, `n` denies, `t` trusts the tool for the session. A newer TUI may show a Yes/Trust/No bar instead. |
+
+### Known gaps
+
+- **Esc leaves a pane `working`.** Neither a hook nor the screen corrects it until the next turn ends. Kiro writes `~/.local/share/kiro-cli/run/turn-markers/<pid>-<ms>.json` while a turn runs, and removes it at the end. That could play the role Claude's session files play, once the pid can be mapped to a pane.
+- **Only `blocked` is scraped.** Kiro's idle and working screens are unrecorded, so the classifier returns `unknown` for them, and recovered Kiro panes stay `unknown` until their first hook.
+- **A denied approval** keeps the pane `blocked` until Kiro's next hook.
+
+### To check at work
+
+Record results here, sanitized, without work fixtures:
+
+- [ ] `kiro-cli --version`, and whether it runs the V3 engine by default or needs `--v3`
+- [ ] Kiro loads `~/.kiro/hooks/simul.json` with no validation error, including the `SessionEnd` trigger
+- [ ] the `timeout` unit (seconds is assumed; `1` must not kill the hook)
+- [ ] hook commands run through a shell (the quoted path and the `#simul-managed` comment depend on it)
+- [ ] `$TMUX_PANE` in hooks, and `pane_current_command` for a running session
+- [ ] the approval screen (classic `[y/n/t]` or a TUI dialog); add a pattern to `[kiro] approval_patterns` if it's the dialog
+- [ ] the approve, deny, and interrupt keys, for Phase 4
 
 ## Files
 
@@ -56,3 +92,4 @@ Deferred, unverified. Kiro is not installed on the home machine, and work fixtur
 - `claude/session.jsonl`: the full ordered session as shim envelopes. Sequence: start, approve a Write, deny a Write with `3`, deny with `Escape`, interrupt a reply, two Bash runs, idle notification, `/exit`.
 - `claude/screens/*.txt`: `capture-pane -p` output for each signature above. `echoed-list-prompt.txt` is a submitted numbered list, which must not read as a selector.
 - `claude/sessions/*.json`: sanitized live session files, including a parked pane and its background session.
+- `kiro/hooks/<Event>.json`, `kiro/session.jsonl`, `kiro/screens/*.txt`: synthetic, see above. `session.jsonl` includes an Esc after `PreToolUse` that sends no hook. `screens/answered.txt` is a prompt already answered with `y`; `prose-mentions-prompt.txt` quotes the prompt in prose. Neither may read as blocked.

@@ -1,6 +1,6 @@
 # simul
 
-A tmux plugin that tracks the state of coding agents (Claude Code today, Kiro CLI planned), shows them in a sidebar, and notifies you when one is blocked or done.
+A tmux plugin that tracks the state of coding agents (Claude Code and Kiro CLI), shows them in a sidebar, and notifies you when one is blocked or done.
 
 Status: early development. See `fixtures/CALIBRATION.md` for verified agent behavior.
 
@@ -29,11 +29,15 @@ Then install the agent hooks:
 ```sh
 simul install-hooks claude            # ~/.claude/settings.json
 simul install-hooks claude --project  # ./.claude/settings.local.json
+simul install-hooks kiro              # ~/.kiro/hooks/simul.json ($KIRO_HOME/hooks if set)
+simul install-hooks kiro --project    # ./.kiro/hooks/simul.json, added to .git/info/exclude
 ```
 
 Hooks record the path you ran `simul` from, so run it through a path that won't move, such as the symlink above. Plugin updates replace the binary at the same path. Start new agent sessions to pick up the hooks.
 
-The merge keeps your existing hooks. If the settings file is a symlink, simul writes through it and leaves the link in place. Each run replaces simul's previous entries, which are tagged `#simul-managed`, and saves a `.simul-bak` copy first.
+For Claude, the merge keeps your existing hooks. If the settings file is a symlink, simul writes through it and leaves the link in place. Each run replaces simul's previous entries, which are tagged `#simul-managed`, and saves a `.simul-bak` copy first.
+
+For Kiro, simul owns the whole `simul.json` hook file and rewrites it on each run. It uses the standalone hook files of Kiro CLI's V3 engine; the V2 engine reads hooks only from agent profiles, which simul does not edit. Kiro support is built from Kiro's public docs and has not yet been checked against a live Kiro session; see `fixtures/CALIBRATION.md`.
 
 Check the setup with `simul doctor`. After a TPM update (`prefix + U`), reload tmux (`tmux source ~/.tmux.conf`) to download the new binary, then run `pkill -f 'simul daemon'`. After a rebuild, just run the `pkill`. The next hook event or tmux reload starts the new binary, and toggling the sidebar off and on restarts it too.
 
@@ -109,7 +113,12 @@ enabled = true   # tmux status-line messages
 dedupe_secs = 10
 desktop = false  # macOS, Linux D-Bus, or WSL toast notifications
 bell = false     # ring the terminal bell
+
+[kiro]
+approval_patterns = []  # extra text that marks Kiro's approval prompt on screen
 ```
+
+Kiro has no hook for approval prompts, so simul reads the bottom of a busy Kiro pane. It recognizes the classic `Allow this action? ... [y/n/t]:` prompt. If your Kiro shows a different approval dialog, add a line of text unique to it to `approval_patterns`.
 
 The daemon log is next to its socket: `$XDG_RUNTIME_DIR/simul/<hash>.log`, or `/tmp/simul-$UID/<hash>.log`.
 
