@@ -887,4 +887,38 @@ mod tests {
             ]
         );
     }
+
+    /// Replays the synthetic Kiro session (see `fixtures/CALIBRATION.md`).
+    #[test]
+    fn replays_kiro_session() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/kiro/session.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut s = Store::default();
+        let mut seen = Vec::new();
+        for (i, line) in text.lines().enumerate() {
+            let env: Envelope = serde_json::from_str(line).unwrap();
+            let agent = Agent::from_name(&env.agent).unwrap();
+            assert_eq!(agent, Agent::Kiro);
+            let pane = env.pane.clone().unwrap();
+            let parsed = agent.parse(&env.event, &crate::hook::slim_payload(&env.payload));
+            s.apply(&pane, agent, &parsed, i as u64, false);
+            seen.push(state(&s, &pane).map_or("gone", State::name));
+        }
+        assert_eq!(
+            seen,
+            vec![
+                "idle",    // SessionStart
+                "working", // prompt
+                "working", // PreToolUse fs_write
+                "working", // PostToolUse
+                "done",    // Stop
+                "working", // prompt
+                "working", // PreToolUse, then Esc (no hook)
+                "working", // next prompt
+                "done",    // Stop
+                "gone",    // SessionEnd
+            ]
+        );
+    }
 }

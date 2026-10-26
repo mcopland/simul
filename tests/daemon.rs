@@ -37,6 +37,35 @@ fn hook_events_drive_ls() {
 }
 
 #[test]
+fn kiro_hook_events_drive_ls() {
+    let mut h = Harness::new();
+    h.start_daemon();
+    let pane = h.first_pane();
+    let kiro = |event: &str| h.agent_hook_fixture("kiro", &pane, event, event);
+
+    kiro("SessionStart");
+    h.wait_state(&pane, Some("idle"));
+    kiro("UserPromptSubmit");
+    h.wait_state(&pane, Some("working"));
+    kiro("PreToolUse");
+    kiro("PostToolUse");
+    kiro("Stop");
+    h.wait_state(&pane, Some("done"));
+
+    let rec = h
+        .ls()
+        .into_iter()
+        .find(|r| r["pane"] == pane.as_str())
+        .unwrap();
+    assert_eq!(rec["agent"], "kiro");
+    assert_eq!(rec["session_id"], "sess_01jf3k9q7w2m5n8p4r6t0v2x4z");
+    assert_eq!(rec["cwd"], "/home/user/src/scratch");
+
+    kiro("SessionEnd");
+    h.wait_state(&pane, None);
+}
+
+#[test]
 fn hook_is_silent_and_exits_zero_without_daemon() {
     let h = Harness::new();
     let run = |args: &[&str]| {

@@ -1,4 +1,5 @@
 pub mod claude;
+pub mod kiro;
 pub mod shim;
 
 use serde::{Deserialize, Serialize};
@@ -8,12 +9,14 @@ use serde_json::Value;
 #[serde(rename_all = "lowercase")]
 pub enum Agent {
     Claude,
+    Kiro,
 }
 
 impl Agent {
     pub fn from_name(name: &str) -> Option<Agent> {
         match name {
             "claude" => Some(Agent::Claude),
+            "kiro" => Some(Agent::Kiro),
             _ => None,
         }
     }
@@ -21,40 +24,46 @@ impl Agent {
     pub fn name(self) -> &'static str {
         match self {
             Agent::Claude => "claude",
+            Agent::Kiro => "kiro",
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Agent::Claude => "Claude",
+            Agent::Kiro => "Kiro",
         }
     }
 
     pub fn tag(self) -> char {
         match self {
             Agent::Claude => 'C',
+            Agent::Kiro => 'K',
         }
     }
 
     pub fn all() -> &'static [Agent] {
-        &[Agent::Claude]
+        &[Agent::Claude, Agent::Kiro]
     }
 
     pub fn matches_process(self, pane_current_command: &str) -> bool {
         match self {
             Agent::Claude => claude::matches_process(pane_current_command),
+            Agent::Kiro => kiro::matches_process(pane_current_command),
         }
     }
 
     pub fn parse(self, event: &str, payload: &Value) -> Parsed {
         match self {
             Agent::Claude => claude::parse(event, payload),
+            Agent::Kiro => kiro::parse(event, payload),
         }
     }
 
     pub fn classify_screen(self, screen: &str) -> Screen {
         match self {
             Agent::Claude => claude::classify_screen(screen),
+            Agent::Kiro => kiro::classify_screen(screen),
         }
     }
 }

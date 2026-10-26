@@ -143,9 +143,13 @@ impl Harness {
     }
 
     pub fn hook(&self, pane: &str, event: &str, payload: &str) -> Output {
+        self.hook_as("claude", pane, event, payload)
+    }
+
+    pub fn hook_as(&self, agent: &str, pane: &str, event: &str, payload: &str) -> Output {
         let mut child = self
             .simul()
-            .args(["hook", "claude", event])
+            .args(["hook", agent, event])
             .env("TMUX_PANE", pane)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -165,9 +169,14 @@ impl Harness {
     }
 
     pub fn hook_fixture(&self, pane: &str, event: &str, file: &str) {
+        self.agent_hook_fixture("claude", pane, event, file);
+    }
+
+    /// Sends `fixtures/<agent>/hooks/<file>.json` as `agent`'s `event` hook.
+    pub fn agent_hook_fixture(&self, agent: &str, pane: &str, event: &str, file: &str) {
         let payload =
-            std::fs::read_to_string(fixture(&format!("claude/hooks/{file}.json"))).unwrap();
-        self.hook(pane, event, &payload);
+            std::fs::read_to_string(fixture(&format!("{agent}/hooks/{file}.json"))).unwrap();
+        self.hook_as(agent, pane, event, &payload);
     }
 
     pub fn ls(&self) -> Vec<Value> {
@@ -207,14 +216,20 @@ impl Harness {
 
     /// Like `fake_claude_pane`, with the pane's working directory set to `cwd`.
     pub fn fake_claude_pane_in(&self, screen: &str, cwd: &Path) -> String {
-        let fake = self.dir.path().join("claude");
+        self.fake_agent_pane("claude", "claude", screen, cwd)
+    }
+
+    /// A pane whose foreground process is named `process`, showing
+    /// `fixtures/<agent>/screens/<screen>.txt`.
+    pub fn fake_agent_pane(&self, agent: &str, process: &str, screen: &str, cwd: &Path) -> String {
+        let fake = self.dir.path().join(process);
         if !fake.exists() {
             std::fs::copy(fake_agent_bin(), &fake).unwrap();
         }
         let cmd = format!(
             "exec '{}' '{}'",
             fake.display(),
-            fixture(&format!("claude/screens/{screen}.txt")).display()
+            fixture(&format!("{agent}/screens/{screen}.txt")).display()
         );
         let pane = self.tmux(&[
             "new-window",
@@ -228,14 +243,14 @@ impl Harness {
             &cwd.to_string_lossy(),
             &cmd,
         ]);
-        eventually("fake claude running", || {
+        eventually(&format!("fake {process} running"), || {
             self.tmux(&[
                 "display-message",
                 "-p",
                 "-t",
                 &pane,
                 "#{pane_current_command}",
-            ]) == "claude"
+            ]) == process
         });
         pane
     }

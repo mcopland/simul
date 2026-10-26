@@ -1,0 +1,6 @@
+{
+  "session_id": "sess_01jf3k9q7w2m5n8p4r6t0v2x4z",
+  "hook_event_name": "UserPromptSubmit",
+  "cwd": "/home/user/src/scratch",
+  "prompt": "Create hello.txt containing hi"
+}

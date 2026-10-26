@@ -1,0 +1,12 @@
+{
+  "session_id": "sess_01jf3k9q7w2m5n8p4r6t0v2x4z",
+  "hook_event_name": "PostToolUse",
+  "cwd": "/home/user/src/scratch",
+  "tool_name": "fs_write",
+  "tool_input": {
+    "command": "create",
+    "path": "/home/user/src/scratch/hello.txt",
+    "file_text": "hi\n"
+  },
+  "tool_response": "Successfully created /home/user/src/scratch/hello.txt"
+}
