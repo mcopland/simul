@@ -5,6 +5,8 @@ pub mod shim;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::config::Config;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Agent {
@@ -60,10 +62,10 @@ impl Agent {
         }
     }
 
-    pub fn classify_screen(self, screen: &str) -> Screen {
+    pub fn classify_screen(self, screen: &str, config: &Config) -> Screen {
         match self {
             Agent::Claude => claude::classify_screen(screen),
-            Agent::Kiro => kiro::classify_screen(screen),
+            Agent::Kiro => kiro::classify_screen(screen, &config.kiro.approval_patterns),
         }
     }
 }

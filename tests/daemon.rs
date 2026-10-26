@@ -168,6 +168,29 @@ fn screen_scrape_detects_approval_before_notification() {
 }
 
 #[test]
+fn kiro_scrape_detects_approval() {
+    let mut h = Harness::new();
+    h.start_daemon();
+    let cwd = h.dir.path().to_path_buf();
+    let pane = h.fake_agent_pane("kiro", "kiro-cli", "approval", &cwd);
+    h.agent_hook_fixture("kiro", &pane, "PreToolUse", "PreToolUse");
+    // Kiro has no permission hook; only the screen shows the prompt.
+    h.wait_state(&pane, Some("blocked"));
+}
+
+#[test]
+fn kiro_approval_patterns_come_from_config() {
+    let mut h = Harness::with_config(
+        "blocked_threshold_ms = 100\n[kiro]\napproval_patterns = [\"Creating:\"]\n",
+    );
+    h.start_daemon();
+    let cwd = h.dir.path().to_path_buf();
+    let pane = h.fake_agent_pane("kiro", "kiro-cli", "answered", &cwd);
+    h.agent_hook_fixture("kiro", &pane, "PreToolUse", "PreToolUse");
+    h.wait_state(&pane, Some("blocked"));
+}
+
+#[test]
 fn ls_table_lists_agents() {
     let mut h = Harness::new();
     h.start_daemon();

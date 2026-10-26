@@ -1,12 +1,13 @@
 use anyhow::Result;
 
+use crate::config::Config;
 use crate::hook::{Agent, Screen};
 use crate::tmux::Tmux;
 
 /// Captures the visible pane and classifies it with the agent's recorded screen signatures.
-pub async fn screen(tmux: &Tmux, pane: &str, agent: Agent) -> Result<Screen> {
+pub async fn screen(tmux: &Tmux, pane: &str, agent: Agent, config: &Config) -> Result<Screen> {
     let text = tmux
         .run_async(&["capture-pane", "-p", "-J", "-t", pane])
         .await?;
-    Ok(agent.classify_screen(&text))
+    Ok(agent.classify_screen(&text, config))
 }

@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::{AgentEvent, Meta, Parsed, Screen, str_field};
+use super::{AgentEvent, Meta, Parsed, Screen, bottom_lines, str_field};
 
 /// Kiro CLI V3 triggers, as installed into its standalone hook file.
 pub const EVENTS: &[&str] = &[
@@ -40,8 +40,47 @@ pub fn parse(event: &str, payload: &Value) -> Parsed {
     }
 }
 
-pub fn classify_screen(_screen: &str) -> Screen {
-    Screen::Unknown
+const SCRAPE_LINES: usize = 15;
+
+/// Non-blank lines checked for the approval prompt: the prompt line, the input line, and one spare.
+const PROMPT_WINDOW: usize = 3;
+
+/// Only `blocked` is inferred: Kiro's idle and working screens are not recorded yet, and
+/// `Unknown` leaves those states to the hooks. See `fixtures/CALIBRATION.md`.
+pub fn classify_screen(screen: &str, approval_patterns: &[String]) -> Screen {
+    let lines = bottom_lines(screen, SCRAPE_LINES);
+    let configured = approval_patterns
+        .iter()
+        .filter(|p| !p.is_empty())
+        .any(|p| lines.iter().any(|l| l.contains(p.as_str())));
+    let newest_first: Vec<&str> = lines
+        .iter()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(PROMPT_WINDOW)
+        .copied()
+        .collect();
+    // An answer typed at the prompt (`> y`) means the tool is already running.
+    let waiting = newest_first
+        .iter()
+        .position(|l| is_approval(l))
+        .is_some_and(|i| newest_first[..i].iter().all(|l| is_bare_prompt(l)));
+    if configured || waiting {
+        Screen::Blocked
+    } else {
+        Screen::Unknown
+    }
+}
+
+/// The classic prompt: `Allow this action? Use 't' to trust ... [y/n/t]:`.
+fn is_approval(line: &str) -> bool {
+    let line = line.trim();
+    line.contains("Allow this action?") && line.ends_with("[y/n/t]:")
+}
+
+/// An empty input prompt: `>`, `!>` when tools are trusted, or `[agent] >`.
+fn is_bare_prompt(line: &str) -> bool {
+    line.trim_end().ends_with('>')
 }
 
 #[cfg(test)]
@@ -51,13 +90,67 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
 
-    fn hook(name: &str) -> Value {
+    fn fixture(rel: &str) -> String {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures/kiro/hooks")
-            .join(format!("{name}.json"));
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        serde_json::from_str(&text).unwrap()
+            .join("fixtures/kiro")
+            .join(rel);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+    }
+
+    fn hook(name: &str) -> Value {
+        serde_json::from_str(&fixture(&format!("hooks/{name}.json"))).unwrap()
+    }
+
+    #[test]
+    fn classifies_fixture_screens() {
+        let cases = [
+            ("approval", Screen::Blocked),
+            // The user typed `y`; the tool is running now.
+            ("answered", Screen::Unknown),
+            ("prose-mentions-prompt", Screen::Unknown),
+        ];
+        for (name, want) in cases {
+            let screen = fixture(&format!("screens/{name}.txt"));
+            assert_eq!(classify_screen(&screen, &[]), want, "{name}");
+        }
+        assert_eq!(classify_screen("", &[]), Screen::Unknown);
+    }
+
+    #[test]
+    fn approval_with_trusted_prompt_or_agent_name_is_blocked() {
+        let line = "Allow this action? Use 't' to trust (always allow) the 'search' tool for the session. [y/n/t]:";
+        for prompt in ["!>", "[dev] >", ""] {
+            let screen = format!("output\n\n{line}\n\n{prompt}\n");
+            assert_eq!(classify_screen(&screen, &[]), Screen::Blocked, "{prompt:?}");
+        }
+    }
+
+    #[test]
+    fn approval_scrolled_away_is_not_blocked() {
+        let screen = format!(
+            "{}\n\n> \nmore\nlines\nof output\n",
+            fixture("screens/approval.txt").trim_end()
+        );
+        assert_eq!(classify_screen(&screen, &[]), Screen::Unknown);
+    }
+
+    #[test]
+    fn configured_patterns_mark_blocked() {
+        let screen = "Run shell command?\n  Yes   Trust   No\n";
+        assert_eq!(classify_screen(screen, &[]), Screen::Unknown);
+        let pats = ["Yes   Trust   No".to_string()];
+        assert_eq!(classify_screen(screen, &pats), Screen::Blocked);
+        let old = format!("  Yes   Trust   No\n{}", "line\n".repeat(20));
+        assert_eq!(
+            classify_screen(&old, &pats),
+            Screen::Unknown,
+            "only the bottom lines count"
+        );
+        assert_eq!(
+            classify_screen(screen, &[String::new()]),
+            Screen::Unknown,
+            "empty pattern matches nothing"
+        );
     }
 
     #[test]

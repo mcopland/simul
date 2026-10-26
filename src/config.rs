@@ -12,6 +12,7 @@ pub struct Config {
     pub blocked_threshold_ms: u64,
     pub sidebar: SidebarConfig,
     pub notify: NotifyConfig,
+    pub kiro: KiroConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -31,12 +32,20 @@ pub struct NotifyConfig {
     pub bell: bool,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct KiroConfig {
+    /// Extra text that marks Kiro's approval prompt, matched in the bottom lines of its pane.
+    pub approval_patterns: Vec<String>,
+}
+
 impl Default for Config {
     fn default() -> Config {
         Config {
             blocked_threshold_ms: 1500,
             sidebar: SidebarConfig::default(),
             notify: NotifyConfig::default(),
+            kiro: KiroConfig::default(),
         }
     }
 }
@@ -98,6 +107,20 @@ mod tests {
         assert!(!cfg.notify.desktop, "system notifications are opt-in");
         assert!(!cfg.notify.bell, "the terminal bell is opt-in");
         assert_eq!(cfg.blocked_threshold_ms, 1500);
+        assert!(cfg.kiro.approval_patterns.is_empty());
+    }
+
+    #[test]
+    fn kiro_approval_patterns_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[kiro]\napproval_patterns = [\"Yes  Trust  No\"]\n").unwrap();
+        let cfg = load_from(&path).unwrap();
+        assert_eq!(
+            cfg.kiro.approval_patterns,
+            vec!["Yes  Trust  No".to_string()]
+        );
+        assert_eq!(cfg.sidebar, SidebarConfig::default());
     }
 
     #[test]

@@ -390,7 +390,7 @@ impl Daemon {
             .needs_scrape(now_ms(), self.opts.config.blocked_threshold_ms);
         let mut changed = Vec::new();
         for (pane, agent) in due {
-            match scan::screen(&self.opts.tmux, &pane, agent).await {
+            match scan::screen(&self.opts.tmux, &pane, agent, &self.opts.config).await {
                 Ok(screen) => changed.extend(self.store.apply_screen(&pane, screen, now_ms())),
                 Err(e) => log!("scrape of {pane} failed: {e:#}"),
             }

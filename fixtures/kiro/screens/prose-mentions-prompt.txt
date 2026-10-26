@@ -1,0 +1,9 @@
+> How does Kiro ask before running a tool?
+
+Kiro prints the tool call, then asks "Allow this action? ... [y/n/t]:".
+Answer y to run it once, t to trust the tool for the session, or n to
+skip it. Read-only commands such as ls and cat need no approval: No
+approval is required.
+
+Most prompts end with [y/n/t]:
+> 
