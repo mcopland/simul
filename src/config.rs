@@ -36,6 +36,7 @@ pub struct NotifyConfig {
 #[serde(default)]
 pub struct KiroConfig {
     /// Extra text that marks Kiro's approval prompt, matched in the bottom lines of its pane.
+    /// It should vanish once answered, or the pane stays blocked.
     pub approval_patterns: Vec<String>,
 }
 

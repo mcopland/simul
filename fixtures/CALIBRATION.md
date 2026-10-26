@@ -80,7 +80,7 @@ Record results here, sanitized, without work fixtures:
 
 - [ ] `kiro-cli --version`, and whether it runs the V3 engine by default or needs `--v3`
 - [ ] Kiro loads `~/.kiro/hooks/simul.json` with no validation error, including the `SessionEnd` trigger
-- [ ] the `timeout` unit (seconds is assumed; `1` must not kill the hook)
+- [ ] the `timeout` unit (simul writes `500`, which outlasts the shim's 200 ms budget whether it means ms or seconds)
 - [ ] hook commands run through a shell (the quoted path and the `#simul-managed` comment depend on it)
 - [ ] `$TMUX_PANE` in hooks, and `pane_current_command` for a running session
 - [ ] the approval screen (classic `[y/n/t]` or a TUI dialog); add a pattern to `[kiro] approval_patterns` if it's the dialog

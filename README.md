@@ -118,7 +118,7 @@ bell = false     # ring the terminal bell
 approval_patterns = []  # extra text that marks Kiro's approval prompt on screen
 ```
 
-Kiro has no hook for approval prompts, so simul reads the bottom of a busy Kiro pane. It recognizes the classic `Allow this action? ... [y/n/t]:` prompt. If your Kiro shows a different approval dialog, add a line of text unique to it to `approval_patterns`.
+Kiro has no hook for approval prompts, so simul reads the bottom of a busy Kiro pane. It recognizes the classic `Allow this action? ... [y/n/t]:` prompt. If your Kiro shows a different approval dialog, add a line of text unique to it to `approval_patterns`. Pick text that disappears once you answer: a pattern still in the bottom 15 lines keeps the pane `blocked`.
 
 The daemon log is next to its socket: `$XDG_RUNTIME_DIR/simul/<hash>.log`, or `/tmp/simul-$UID/<hash>.log`.
 
