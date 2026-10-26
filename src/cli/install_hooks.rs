@@ -3,17 +3,53 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use crate::hook::claude;
+use crate::hook::{claude, kiro};
 use crate::paths::env_var;
 use crate::tmux::shell_quote;
 
 /// Trailing shell comment that identifies hooks simul owns, so reinstalling replaces them.
 pub const MARKER: &str = "#simul-managed";
 
+/// Keeps a project install out of git; unanchored so it matches below the repo root too.
+pub const KIRO_EXCLUDE: &str = ".kiro/hooks/simul.json";
+
 pub fn run(agent: &str, project: bool, settings: Option<PathBuf>) -> Result<()> {
-    if agent != "claude" {
-        bail!("install-hooks: {agent} is not supported yet (only claude)");
+    match agent {
+        "claude" => run_claude(project, settings),
+        "kiro" => run_kiro(project, settings),
+        _ => bail!("install-hooks: unknown agent {agent} (expected claude or kiro)"),
     }
+}
+
+fn run_kiro(project: bool, file: Option<PathBuf>) -> Result<()> {
+    let path = match (file, project) {
+        (Some(p), _) => p,
+        // Local, not shared: the hook embeds this machine's absolute binary path.
+        (None, true) => PathBuf::from(KIRO_EXCLUDE),
+        (None, false) => kiro_hook_file(env_var)
+            .context("cannot locate ~/.kiro/hooks: $KIRO_HOME and $HOME unset")?,
+    };
+    let exe = std::env::current_exe().context("failed to locate the simul binary")?;
+    let written = install_kiro(&path, &exe)?;
+    println!(
+        "installed {} Kiro hooks into {}",
+        kiro::EVENTS.len(),
+        written.display()
+    );
+    if project {
+        match git_exclude_file(Path::new("."))? {
+            Some(exclude) => {
+                if add_exclude(&exclude, KIRO_EXCLUDE)? {
+                    println!("added {KIRO_EXCLUDE} to {}", exclude.display());
+                }
+            }
+            None => println!("not in a git repo; {KIRO_EXCLUDE} is not excluded from anything"),
+        }
+    }
+    Ok(())
+}
+
+fn run_claude(project: bool, settings: Option<PathBuf>) -> Result<()> {
     let path = match (settings, project) {
         (Some(p), _) => p,
         // Local, not shared: the hook embeds this machine's absolute binary path.
@@ -32,9 +68,9 @@ pub fn run(agent: &str, project: bool, settings: Option<PathBuf>) -> Result<()> 
     Ok(())
 }
 
-pub fn hook_command(exe: &Path, event: &str) -> String {
+pub fn hook_command(exe: &Path, agent: &str, event: &str) -> String {
     format!(
-        "{} hook claude {event} {MARKER}",
+        "{} hook {agent} {event} {MARKER}",
         shell_quote(&exe.to_string_lossy())
     )
 }
@@ -84,7 +120,7 @@ pub fn merge(mut settings: Value, exe: &Path) -> Result<Value> {
     for event in claude::EVENTS {
         let group = json!({"hooks": [{
             "type": "command",
-            "command": hook_command(exe, event),
+            "command": hook_command(exe, "claude", event),
             "timeout": 1,
         }]});
         match hooks.entry(*event).or_insert_with(|| json!([])) {
@@ -116,35 +152,135 @@ pub fn managed(settings: &Value) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Kiro's global hook file: `$KIRO_HOME/hooks/simul.json`, else `~/.kiro/hooks/simul.json`.
+pub fn kiro_hook_file(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    let home = env("KIRO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env("HOME").map(|h| PathBuf::from(h).join(".kiro")))?;
+    Some(home.join("hooks/simul.json"))
+}
+
+/// The whole simul-owned Kiro hook file, one command hook per V3 trigger.
+pub fn kiro_hooks(exe: &Path) -> Value {
+    let hooks: Vec<Value> = kiro::EVENTS
+        .iter()
+        .map(|event| {
+            json!({
+                "name": format!("simul-{event}"),
+                "trigger": event,
+                "action": {"type": "command", "command": hook_command(exe, "kiro", event)},
+                "timeout": 1,
+                "enabled": true,
+            })
+        })
+        .collect();
+    json!({"version": "v1", "hooks": hooks})
+}
+
+/// `(trigger, command)` of simul-managed hooks in a Kiro hook file.
+pub fn kiro_managed(file: &Value) -> Vec<(String, String)> {
+    file.get("hooks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|h| {
+            let trigger = h.get("trigger").and_then(Value::as_str)?;
+            let command = h.pointer("/action/command").and_then(Value::as_str)?;
+            command
+                .ends_with(MARKER)
+                .then(|| (trigger.to_owned(), command.to_owned()))
+        })
+        .collect()
+}
+
+/// Writes simul's Kiro hook file, replacing any earlier one.
+pub fn install_kiro(path: &Path, exe: &Path) -> Result<PathBuf> {
+    let mut text =
+        serde_json::to_string_pretty(&kiro_hooks(exe)).context("failed to encode Kiro hooks")?;
+    text.push('\n');
+    replace_file(path, &text, false)
+}
+
+/// The exclude file of the git repo containing `dir`; `None` outside a repo.
+pub fn git_exclude_file(dir: &Path) -> Result<Option<PathBuf>> {
+    let out = std::process::Command::new("git")
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "info/exclude",
+        ])
+        .current_dir(dir)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .with_context(|| format!("failed to run git in {}", dir.display()))?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let path = String::from_utf8(out.stdout)
+        .with_context(|| format!("git printed a non-UTF-8 exclude path in {}", dir.display()))?;
+    Ok(Some(PathBuf::from(path.trim_end_matches('\n'))))
+}
+
+/// Appends `entry` to an exclude file unless a line already equals it; true if it was added.
+pub fn add_exclude(file: &Path, entry: &str) -> Result<bool> {
+    let text = match std::fs::read_to_string(file) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("failed to read {}", file.display())),
+    };
+    if text.lines().any(|l| l.trim() == entry) {
+        return Ok(false);
+    }
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("failed to create {}", dir.display()))?;
+    }
+    let sep = if text.is_empty() || text.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    std::fs::write(file, format!("{text}{sep}{entry}\n"))
+        .with_context(|| format!("failed to write {}", file.display()))?;
+    Ok(true)
+}
+
 /// Merges hooks into the settings file, writing through a symlink rather than replacing it.
 pub fn install(path: &Path, exe: &Path) -> Result<PathBuf> {
-    let (real, settings) = if path.exists() {
+    let settings = if path.exists() {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        serde_json::from_str(&text)
+            .with_context(|| format!("invalid JSON in {}", path.display()))?
+    } else {
+        json!({})
+    };
+    let merged =
+        merge(settings, exe).with_context(|| format!("cannot merge into {}", path.display()))?;
+    let mut text = serde_json::to_string_pretty(&merged).context("failed to encode settings")?;
+    text.push('\n');
+    replace_file(path, &text, true)
+}
+
+/// Atomically replaces the file behind `path` (following symlinks) with `text`, optionally keeping
+/// the old content as `<name>.simul-bak`. Returns the file actually written.
+fn replace_file(path: &Path, text: &str, backup: bool) -> Result<PathBuf> {
+    let real = if path.exists() {
         let real = path
             .canonicalize()
             .with_context(|| format!("failed to resolve {}", path.display()))?;
-        let text = std::fs::read_to_string(&real)
-            .with_context(|| format!("failed to read {}", real.display()))?;
-        let settings: Value = serde_json::from_str(&text)
-            .with_context(|| format!("invalid JSON in {}", real.display()))?;
-        let backup = real.with_file_name(format!(
-            "{}.simul-bak",
-            real.file_name()
-                .map_or_else(Default::default, |n| n.to_string_lossy())
-        ));
-        std::fs::write(&backup, &text)
-            .with_context(|| format!("failed to write backup {}", backup.display()))?;
-        (real, settings)
+        if backup {
+            write_backup(&real)?;
+        }
+        real
     } else {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("failed to create {}", dir.display()))?;
         }
-        (path.to_path_buf(), json!({}))
+        path.to_path_buf()
     };
-    let merged =
-        merge(settings, exe).with_context(|| format!("cannot merge into {}", real.display()))?;
-    let mut text = serde_json::to_string_pretty(&merged).context("failed to encode settings")?;
-    text.push('\n');
     let tmp = real.with_extension("simul-tmp");
     std::fs::write(&tmp, text).with_context(|| format!("failed to write {}", tmp.display()))?;
     if let Ok(meta) = std::fs::metadata(&real) {
@@ -154,6 +290,17 @@ pub fn install(path: &Path, exe: &Path) -> Result<PathBuf> {
     std::fs::rename(&tmp, &real)
         .with_context(|| format!("failed to replace {}", real.display()))?;
     Ok(real)
+}
+
+fn write_backup(real: &Path) -> Result<()> {
+    let old = std::fs::read(real).with_context(|| format!("failed to read {}", real.display()))?;
+    let backup = real.with_file_name(format!(
+        "{}.simul-bak",
+        real.file_name()
+            .map_or_else(Default::default, |n| n.to_string_lossy())
+    ));
+    std::fs::write(&backup, old)
+        .with_context(|| format!("failed to write backup {}", backup.display()))
 }
 
 #[cfg(test)]
@@ -180,8 +327,12 @@ mod tests {
     #[test]
     fn command_is_quoted_and_marked() {
         assert_eq!(
-            hook_command(Path::new("/a b/simul"), "Stop"),
+            hook_command(Path::new("/a b/simul"), "claude", "Stop"),
             "'/a b/simul' hook claude Stop #simul-managed"
+        );
+        assert_eq!(
+            hook_command(Path::new("/s"), "kiro", "Stop"),
+            "'/s' hook kiro Stop #simul-managed"
         );
     }
 
@@ -284,6 +435,132 @@ mod tests {
         let backup = dir.path().join("dotfiles-settings.json.simul-bak");
         let b: Value = serde_json::from_str(&std::fs::read_to_string(backup).unwrap()).unwrap();
         assert_eq!(b, user_settings());
+    }
+
+    fn read_json(path: &Path) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn kiro_file_has_one_hook_per_trigger() {
+        let file = kiro_hooks(Path::new(EXE));
+        assert_eq!(file["version"], "v1");
+        let hooks = file["hooks"].as_array().unwrap();
+        assert_eq!(hooks.len(), kiro::EVENTS.len());
+        for (hook, event) in hooks.iter().zip(kiro::EVENTS) {
+            assert_eq!(hook["name"], format!("simul-{event}"));
+            assert_eq!(hook["trigger"], *event);
+            assert_eq!(hook["action"]["type"], "command");
+            assert_eq!(
+                hook["action"]["command"],
+                hook_command(Path::new(EXE), "kiro", event)
+            );
+            assert_eq!(hook["timeout"], 1);
+            assert_eq!(hook["enabled"], true);
+            assert!(hook.get("matcher").is_none(), "every tool must match");
+        }
+    }
+
+    #[test]
+    fn kiro_managed_lists_only_simul_hooks() {
+        let m = kiro_managed(&kiro_hooks(Path::new(EXE)));
+        assert_eq!(m.len(), kiro::EVENTS.len());
+        assert_eq!(m[0].0, "SessionStart");
+        let other = json!({"version": "v1", "hooks": [
+            {"trigger": "Stop", "action": {"type": "command", "command": "/u/x.sh"}}
+        ]});
+        assert!(kiro_managed(&other).is_empty());
+        assert!(kiro_managed(&json!([])).is_empty());
+    }
+
+    #[test]
+    fn kiro_hook_file_prefers_kiro_home() {
+        let env = |vars: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                vars.iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        assert_eq!(
+            kiro_hook_file(env(&[("KIRO_HOME", "/k"), ("HOME", "/h")])),
+            Some(PathBuf::from("/k/hooks/simul.json"))
+        );
+        assert_eq!(
+            kiro_hook_file(env(&[("HOME", "/h")])),
+            Some(PathBuf::from("/h/.kiro/hooks/simul.json"))
+        );
+        assert_eq!(kiro_hook_file(env(&[])), None);
+    }
+
+    #[test]
+    fn install_kiro_creates_dirs_and_replaces_old_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".kiro/hooks/simul.json");
+        install_kiro(&path, Path::new("/old/simul")).unwrap();
+        assert_eq!(read_json(&path), kiro_hooks(Path::new("/old/simul")));
+        install_kiro(&path, Path::new(EXE)).unwrap();
+        assert_eq!(read_json(&path), kiro_hooks(Path::new(EXE)));
+        // simul owns the whole file, so a backup would only litter the hooks dir.
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["simul.json"]);
+    }
+
+    #[test]
+    fn install_kiro_writes_through_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("dotfiles-simul.json");
+        std::fs::write(&real, "{}").unwrap();
+        let link = dir.path().join("simul.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let written = install_kiro(&link, Path::new(EXE)).unwrap();
+        assert_eq!(written, real.canonicalize().unwrap());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(read_json(&real), kiro_hooks(Path::new(EXE)));
+    }
+
+    #[test]
+    fn add_exclude_appends_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("info/exclude");
+        assert!(
+            add_exclude(&file, KIRO_EXCLUDE).unwrap(),
+            "creates the file"
+        );
+        assert!(!add_exclude(&file, KIRO_EXCLUDE).unwrap());
+        std::fs::write(&file, "# ignore\n*.log").unwrap();
+        assert!(add_exclude(&file, KIRO_EXCLUDE).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            format!("# ignore\n*.log\n{KIRO_EXCLUDE}\n")
+        );
+    }
+
+    #[test]
+    fn git_exclude_file_finds_the_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(git_exclude_file(dir.path()).unwrap(), None);
+        let ok = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        let found = git_exclude_file(&sub).unwrap().unwrap();
+        assert_eq!(
+            found.canonicalize().unwrap_or(found.clone()),
+            dir.path().canonicalize().unwrap().join(".git/info/exclude")
+        );
     }
 
     #[test]

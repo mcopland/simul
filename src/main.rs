@@ -24,10 +24,11 @@ enum Command {
     InstallHooks {
         #[arg(value_parser = ["claude", "kiro"])]
         agent: String,
-        /// Install into ./.claude/settings.local.json instead of ~/.claude/settings.json.
+        /// Install for this directory only: ./.claude/settings.local.json for Claude,
+        /// ./.kiro/hooks/simul.json (excluded from git) for Kiro.
         #[arg(long)]
         project: bool,
-        /// Install into this settings file.
+        /// Install into this file (Claude settings, or the Kiro hook file).
         #[arg(long, conflicts_with = "project")]
         settings: Option<PathBuf>,
     },

@@ -6,7 +6,7 @@ use serde_json::Value;
 use super::install_hooks;
 use crate::client;
 use crate::daemon::notify::{self, Message};
-use crate::hook::claude;
+use crate::hook::{claude, kiro};
 use crate::paths::{self, env_var};
 use crate::protocol::{Ack, Request, Status};
 use crate::tmux::{self, Tmux};
@@ -82,6 +82,10 @@ fn gather() -> Vec<Check> {
         }
     };
     checks.push(check_claude_hooks_file(&claude_settings_paths()));
+    checks.push(check_kiro_hooks_file(
+        install_hooks::kiro_hook_file(env_var).as_deref(),
+        Path::new(install_hooks::KIRO_EXCLUDE),
+    ));
     checks.push(test_notification());
     if let (true, Ok(sock)) = (daemon_up, &socket) {
         checks.push(match client::request::<Status>(sock, &Request::List) {
@@ -176,22 +180,29 @@ fn check_claude_hooks_file(paths: &[PathBuf]) -> Check {
 
 /// Every Claude event has a simul hook whose binary exists.
 pub fn check_claude_hooks(settings: &Value) -> std::result::Result<(), String> {
-    let installed = install_hooks::managed(settings);
+    check_installed(&install_hooks::managed(settings), claude::EVENTS, "claude")
+}
+
+fn check_installed(
+    installed: &[(String, String)],
+    events: &[&str],
+    agent: &str,
+) -> std::result::Result<(), String> {
     if installed.is_empty() {
-        return Err("no simul hooks; run `simul install-hooks claude`".into());
+        return Err(format!("no simul hooks; run `simul install-hooks {agent}`"));
     }
-    let missing: Vec<&str> = claude::EVENTS
+    let missing: Vec<&str> = events
         .iter()
         .copied()
         .filter(|e| !installed.iter().any(|(ev, _)| ev == e))
         .collect();
     if !missing.is_empty() {
         return Err(format!(
-            "missing {}; rerun `simul install-hooks claude`",
+            "missing {}; rerun `simul install-hooks {agent}`",
             missing.join(", ")
         ));
     }
-    for (_, cmd) in &installed {
+    for (_, cmd) in installed {
         match first_word(cmd) {
             Some(exe) if Path::new(&exe).exists() => {}
             Some(exe) => return Err(format!("hook binary {exe} does not exist")),
@@ -199,6 +210,36 @@ pub fn check_claude_hooks(settings: &Value) -> std::result::Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Every Kiro trigger has a simul hook whose binary exists.
+pub fn check_kiro_hooks(file: &Value) -> std::result::Result<(), String> {
+    check_installed(&install_hooks::kiro_managed(file), kiro::EVENTS, "kiro")
+}
+
+/// Checks the global and project Kiro hook files; skipped when Kiro has never run here.
+fn check_kiro_hooks_file(global: Option<&Path>, project: &Path) -> Check {
+    let kiro_home = global.and_then(Path::parent).and_then(Path::parent);
+    if !kiro_home.is_some_and(Path::exists) && !project.exists() {
+        return pass("kiro hooks", "skipped: Kiro not set up here (no ~/.kiro)");
+    }
+    let mut problems = Vec::new();
+    for path in global.into_iter().chain([project]).filter(|p| p.exists()) {
+        let parsed = std::fs::read_to_string(path)
+            .map_err(anyhow::Error::from)
+            .and_then(|t| serde_json::from_str::<Value>(&t).map_err(anyhow::Error::from));
+        match parsed {
+            Ok(v) => match check_kiro_hooks(&v) {
+                Ok(()) => return pass("kiro hooks", format!("installed in {}", path.display())),
+                Err(why) => problems.push(format!("{}: {why}", path.display())),
+            },
+            Err(e) => problems.push(format!("{}: {e}", path.display())),
+        }
+    }
+    if problems.is_empty() {
+        problems.push("not installed; run `simul install-hooks kiro`".into());
+    }
+    fail("kiro hooks", problems.join("; "))
 }
 
 /// The first word of a command produced by `tmux::shell_quote`.
@@ -263,5 +304,62 @@ mod tests {
         let mut partial = good.clone();
         partial["hooks"].as_object_mut().unwrap().remove("Stop");
         assert!(check_claude_hooks(&partial).unwrap_err().contains("Stop"));
+    }
+
+    #[test]
+    fn kiro_hooks_check() {
+        let exe = std::env::current_exe().unwrap();
+        let good = install_hooks::kiro_hooks(&exe);
+        assert_eq!(check_kiro_hooks(&good), Ok(()));
+        let gone = install_hooks::kiro_hooks(Path::new("/nonexistent/simul"));
+        assert!(
+            check_kiro_hooks(&gone)
+                .unwrap_err()
+                .contains("does not exist")
+        );
+        assert!(
+            check_kiro_hooks(&json!({}))
+                .unwrap_err()
+                .contains("install-hooks kiro")
+        );
+        let mut partial = good.clone();
+        partial["hooks"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|h| h["trigger"] != "Stop");
+        assert!(check_kiro_hooks(&partial).unwrap_err().contains("Stop"));
+    }
+
+    #[test]
+    fn kiro_hooks_file_is_skipped_until_kiro_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join(".kiro/hooks/simul.json");
+        let project = dir.path().join("repo/.kiro/hooks/simul.json");
+        let check = check_kiro_hooks_file(Some(&global), &project);
+        assert!(check.ok && check.detail.contains("skipped"), "{check:?}");
+        assert!(check_kiro_hooks_file(None, &project).ok);
+
+        std::fs::create_dir(dir.path().join(".kiro")).unwrap();
+        let check = check_kiro_hooks_file(Some(&global), &project);
+        assert!(
+            !check.ok && check.detail.contains("install-hooks kiro"),
+            "{check:?}"
+        );
+
+        let exe = std::env::current_exe().unwrap();
+        install_hooks::install_kiro(&project, &exe).unwrap();
+        let check = check_kiro_hooks_file(Some(&global), &project);
+        assert!(check.ok && check.detail.contains("repo/.kiro"), "{check:?}");
+
+        std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+        std::fs::write(&global, "{ not json").unwrap();
+        let check = check_kiro_hooks_file(Some(&global), &project);
+        assert!(check.ok, "one good file is enough: {check:?}");
+        std::fs::remove_file(&project).unwrap();
+        let check = check_kiro_hooks_file(Some(&global), &project);
+        assert!(
+            !check.ok && check.detail.contains("simul.json"),
+            "{check:?}"
+        );
     }
 }
