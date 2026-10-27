@@ -57,11 +57,6 @@ pub enum Line {
         current: bool,
     },
     Agent(Row),
-    /// Line under an agent, naming its work directory.
-    Cwd {
-        pane: String,
-        cwd: String,
-    },
     /// Line under an agent, naming its branch.
     Branch {
         pane: String,
@@ -98,25 +93,6 @@ pub fn truncate(s: &str, max: usize) -> String {
     }
     let mut out: String = s.chars().take(max - 1).collect();
     out.push('\u{2026}');
-    out
-}
-
-/// `path` with `home` shown as `~`, cut to at most `max` columns from the left so
-/// the innermost directories stay visible.
-pub fn short_path(path: &str, home: Option<&str>, max: usize) -> String {
-    let path = match home.and_then(|h| path.strip_prefix(h)) {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{rest}"),
-        _ => path.to_owned(),
-    };
-    let len = path.chars().count();
-    if len <= max {
-        return path;
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let mut out = String::from('\u{2026}');
-    out.extend(path.chars().skip(len - (max - 1)));
     out
 }
 
@@ -173,12 +149,6 @@ pub fn lines(
             window_id: r.window_id.clone(),
             active: r.active,
         }));
-        if let Some(cwd) = &r.cwd {
-            out.push(Line::Cwd {
-                pane: r.pane.clone(),
-                cwd: cwd.clone(),
-            });
-        }
         if let Some(branch) = &r.branch {
             out.push(Line::Branch {
                 pane: r.pane.clone(),
@@ -342,7 +312,7 @@ impl App {
         let lines = self.lines();
         let pane = match lines.get(index) {
             Some(Line::Agent(row)) => row.pane.clone(),
-            Some(Line::Cwd { pane, .. } | Line::Branch { pane, .. }) => pane.clone(),
+            Some(Line::Branch { pane, .. }) => pane.clone(),
             _ => return Action::None,
         };
         self.selected = self.agents().iter().position(|r| r.pane == pane);
@@ -425,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn rows_have_window_label_cwd_and_branch_lines() {
+    fn rows_have_window_label_and_branch_lines() {
         let out = lines(&status(), Some("me"), StateFilter::All, "");
         assert_eq!(
             out[0],
@@ -449,13 +419,6 @@ mod tests {
         assert_eq!(row.branch.as_deref(), Some("br-%3"));
         assert_eq!(
             out[2],
-            Line::Cwd {
-                pane: "%3".into(),
-                cwd: "/w/repo".into()
-            }
-        );
-        assert_eq!(
-            out[3],
             Line::Branch {
                 pane: "%3".into(),
                 branch: "br-%3".into()
@@ -463,37 +426,15 @@ mod tests {
         );
         let last = out.last().unwrap();
         assert!(
-            matches!(last, Line::Cwd { pane, .. } if pane == "%5"),
+            matches!(last, Line::Agent(r) if r.pane == "%5"),
             "no branch, no branch line"
         );
     }
 
     #[test]
-    fn no_cwd_no_cwd_line() {
-        let mut s = status();
-        for r in &mut s.panes {
-            r.cwd = None;
-        }
-        let out = lines(&s, Some("me"), StateFilter::All, "");
-        assert!(
-            !out.iter().any(|l| matches!(l, Line::Cwd { .. })),
-            "{out:?}"
-        );
-        assert!(matches!(out[2], Line::Branch { .. }), "{out:?}");
-    }
-
-    #[test]
-    fn short_path_abbreviates_home_and_keeps_the_tail() {
-        let home = Some("/Users/me");
-        assert_eq!(short_path("/Users/me/dev/simul", home, 20), "~/dev/simul");
-        assert_eq!(short_path("/Users/me", home, 20), "~");
-        assert_eq!(short_path("/Users/meow/x", home, 20), "/Users/meow/x");
-        assert_eq!(short_path("/Users/me/x", None, 20), "/Users/me/x");
-        assert_eq!(
-            short_path("/Users/me/dev/simul", home, 8),
-            "\u{2026}v/simul"
-        );
-        assert_eq!(short_path("/Users/me/dev/simul", home, 0), "");
+    fn cwd_still_matches_the_text_filter() {
+        let out = lines(&status(), Some("me"), StateFilter::All, "/w/repo");
+        assert_eq!(panes(&out).len(), 5);
     }
 
     #[test]
@@ -653,13 +594,12 @@ mod tests {
     }
 
     #[test]
-    fn click_on_agent_cwd_or_branch_line_jumps() {
+    fn click_on_agent_or_branch_line_jumps() {
         let mut app = app_in("@me9");
         assert_eq!(app.on_click(0), Action::None, "session header");
-        assert_eq!(app.on_click(4), Action::Jump("%2".into()));
+        assert_eq!(app.on_click(3), Action::Jump("%2".into()));
         assert_eq!(app.selected, Some(1));
-        assert_eq!(app.on_click(5), Action::Jump("%2".into()), "cwd line");
-        assert_eq!(app.on_click(6), Action::Jump("%2".into()), "branch line");
+        assert_eq!(app.on_click(4), Action::Jump("%2".into()), "branch line");
         assert_eq!(app.on_click(99), Action::None);
     }
 

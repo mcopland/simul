@@ -79,7 +79,6 @@ struct View {
     app: App,
     error: Option<String>,
     offset: usize,
-    home: Option<String>,
 }
 
 fn ui_loop(
@@ -92,7 +91,6 @@ fn ui_loop(
         app: App::default(),
         error: None,
         offset: 0,
-        home: env_var("HOME"),
     };
     let mut session_checked: Option<Instant> = None;
     loop {
@@ -223,14 +221,6 @@ fn render(f: &mut Frame, view: &mut View) {
                     ),
                 ])
             }
-            Line::Cwd { pane, cwd } => TextLine::from(Span::styled(
-                format!(
-                    "{:PREFIX$}{}",
-                    "",
-                    model::short_path(cwd, view.home.as_deref(), width)
-                ),
-                detail(pane),
-            )),
             Line::Branch { pane, branch } => TextLine::from(Span::styled(
                 format!("{:PREFIX$}{}", "", model::truncate(branch, width)),
                 detail(pane),
@@ -243,7 +233,7 @@ fn render(f: &mut Frame, view: &mut View) {
         let last = line
             + lines[line + 1..]
                 .iter()
-                .take_while(|l| matches!(l, Line::Cwd { .. } | Line::Branch { .. }))
+                .take_while(|l| matches!(l, Line::Branch { .. }))
                 .count();
         if line < view.offset {
             view.offset = line;
