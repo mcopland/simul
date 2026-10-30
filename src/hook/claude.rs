@@ -65,7 +65,9 @@ pub fn parse(event: &str, payload: &Value) -> Parsed {
 
 fn notification(payload: &Value) -> AgentEvent {
     match str_field(payload, "notification_type").as_deref() {
-        Some("permission_prompt" | "elicitation_dialog") => AgentEvent::PermissionPrompt,
+        Some("permission_prompt" | "elicitation_dialog" | "elicitation_url_dialog") => {
+            AgentEvent::PermissionPrompt
+        }
         Some("idle_prompt") => AgentEvent::IdlePrompt,
         Some(_) => AgentEvent::NoChange,
         None => match str_field(payload, "message") {
@@ -246,11 +248,14 @@ mod tests {
             parse("PermissionRequest", &p).event,
             AgentEvent::PermissionPrompt
         );
-        let p = json!({"notification_type": "elicitation_dialog"});
-        assert_eq!(
-            parse("Notification", &p).event,
-            AgentEvent::PermissionPrompt
-        );
+        for kind in ["elicitation_dialog", "elicitation_url_dialog"] {
+            let p = json!({ "notification_type": kind });
+            assert_eq!(
+                parse("Notification", &p).event,
+                AgentEvent::PermissionPrompt,
+                "{kind}"
+            );
+        }
     }
 
     #[test]
