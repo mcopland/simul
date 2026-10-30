@@ -5,6 +5,7 @@ use std::process::Output;
 use anyhow::{Context, Result, bail};
 
 use crate::daemon::state::{PaneInfo, Snapshot};
+use crate::protocol::{PaneSummary, WindowInfo};
 
 pub const PANES_FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_id}\t#{pane_active}\t#{window_active}\t#{pane_current_command}\t#{pane_current_path}\t#{@simul-sidebar}\t#{window_panes}\t#{window_name}";
 pub const CLIENTS_FORMAT: &str = "#{client_session}\t#{client_flags}\t#{client_tty}";
@@ -132,6 +133,36 @@ pub fn parse_snapshot(panes: &str, clients: &str, focus_events: bool) -> Snapsho
     snap
 }
 
+/// One entry per window with its non-sidebar panes, both in snapshot (tmux) order.
+pub fn windows(snap: &Snapshot) -> Vec<WindowInfo> {
+    let mut out: Vec<WindowInfo> = Vec::new();
+    for p in &snap.panes {
+        let i = match out.iter().position(|w| w.id == p.window_id) {
+            Some(i) => i,
+            None => {
+                out.push(WindowInfo {
+                    id: p.window_id.clone(),
+                    session: p.session.clone(),
+                    index: p.window,
+                    name: p.window_name.clone(),
+                    panes: Vec::new(),
+                });
+                out.len() - 1
+            }
+        };
+        if !p.is_sidebar {
+            out[i].panes.push(PaneSummary {
+                id: p.id.clone(),
+                command: p.current_command.clone(),
+                active: p.active,
+                cwd: p.path.clone(),
+                git: None,
+            });
+        }
+    }
+    out
+}
+
 /// Parses `tmux -V` output such as `tmux 3.3a` or `tmux next-3.4`.
 pub fn parse_version(output: &str) -> Option<(u32, u32)> {
     let word = output.split_whitespace().nth(1)?;
@@ -230,6 +261,47 @@ mod tests {
         let snap = parse_snapshot(panes, "b\tattached,focused\t/dev/ttys1\n", true);
         assert_eq!(snap.panes.len(), 1);
         assert_eq!(snap.viewed, HashSet::from(["%1".to_string()]));
+    }
+
+    #[test]
+    fn lists_each_window_once_with_its_panes() {
+        let pane = |id: &str, command: &str, active, cwd: &str| PaneSummary {
+            id: id.into(),
+            command: command.into(),
+            active,
+            cwd: cwd.into(),
+            git: None,
+        };
+        let w = windows(&parse_snapshot(PANES, "", true));
+        assert_eq!(
+            w,
+            [
+                WindowInfo {
+                    id: "@1".into(),
+                    session: "main".into(),
+                    index: 1,
+                    name: "api".into(),
+                    panes: vec![
+                        pane("%1", "2.1.307", true, "/w/a"),
+                        pane("%2", "zsh", false, "/w/a"),
+                    ],
+                },
+                WindowInfo {
+                    id: "@2".into(),
+                    session: "main".into(),
+                    index: 2,
+                    name: "web".into(),
+                    panes: vec![pane("%3", "claude", true, "/w/b")],
+                },
+                WindowInfo {
+                    id: "@3".into(),
+                    session: "work".into(),
+                    index: 1,
+                    name: "my\ttabbed name".into(),
+                    panes: vec![pane("%4", "claude", true, "/w/c")],
+                },
+            ]
+        );
     }
 
     #[test]

@@ -57,11 +57,15 @@ impl Harness {
             dir,
             daemon: None,
         };
+        // Outside any repo, so the sidebar's pane rows don't depend on this checkout's state.
+        let cwd = h.dir.path().to_str().unwrap().to_owned();
         h.tmux(&[
             "-f",
             "/dev/null",
             "new-session",
             "-d",
+            "-c",
+            &cwd,
             "-s",
             "t",
             "-x",

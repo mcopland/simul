@@ -70,6 +70,7 @@ pub fn triggers_reconcile(name: &str) -> bool {
             | "%client-detached"
             | "%window-renamed"
             | "%unlinked-window-renamed"
+            | "%session-renamed"
     )
 }
 
@@ -180,6 +181,7 @@ mod tests {
             "%client-detached",
             "%window-renamed",
             "%unlinked-window-renamed",
+            "%session-renamed",
         ] {
             assert!(triggers_reconcile(name), "{name}");
         }

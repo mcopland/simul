@@ -25,6 +25,48 @@ pub struct Status {
     pub now_ms: u64,
     pub sidebar: bool,
     pub panes: Vec<PaneRecord>,
+    /// Every tmux window, agent or not; absent from daemons before 0.2.
+    #[serde(default)]
+    pub windows: Vec<WindowInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowInfo {
+    pub id: String,
+    pub session: String,
+    pub index: u32,
+    pub name: String,
+    /// Non-sidebar panes in tmux's order; absent from daemons before 0.2.
+    #[serde(default)]
+    pub panes: Vec<PaneSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneSummary {
+    pub id: String,
+    pub command: String,
+    /// Whether this is the active pane of its window.
+    pub active: bool,
+    #[serde(default)]
+    pub cwd: String,
+    /// The repo state at `cwd`; `None` outside git or before the daemon has looked.
+    #[serde(default)]
+    pub git: Option<GitStatus>,
+}
+
+/// What `git status` reports, as counts of entries.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitStatus {
+    /// `None` on a detached HEAD.
+    pub branch: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+    pub conflicted: u32,
+    pub staged: u32,
+    pub deleted: u32,
+    pub modified: u32,
+    pub untracked: u32,
+    pub stashed: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +89,17 @@ pub fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn status_without_windows_parses() {
+        let s: Status =
+            serde_json::from_value(json!({"now_ms": 1, "sidebar": false, "panes": []})).unwrap();
+        assert!(s.windows.is_empty());
+        let w: WindowInfo =
+            serde_json::from_value(json!({"id": "@1", "session": "s", "index": 1, "name": "n"}))
+                .unwrap();
+        assert!(w.panes.is_empty());
+    }
 
     #[test]
     fn wire_format_is_tagged() {

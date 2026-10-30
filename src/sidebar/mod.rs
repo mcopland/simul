@@ -18,7 +18,7 @@ use crate::protocol::{Status, now_ms};
 use crate::tmux::Tmux;
 use model::{Action, App, Line};
 
-const SESSION_REFRESH: Duration = Duration::from_secs(5);
+const LOCATION_REFRESH: Duration = Duration::from_secs(5);
 const RECONNECT: Duration = Duration::from_secs(1);
 
 enum Update {
@@ -88,11 +88,14 @@ fn ui_loop(
     own_pane: Option<&str>,
 ) -> Result<()> {
     let mut view = View {
-        app: App::default(),
+        app: App {
+            home: crate::paths::env_var("HOME").unwrap_or_default(),
+            ..App::default()
+        },
         error: None,
         offset: 0,
     };
-    let mut session_checked: Option<Instant> = None;
+    let mut location_checked: Option<Instant> = None;
     loop {
         while let Ok(update) = rx.try_recv() {
             match update {
@@ -103,17 +106,14 @@ fn ui_loop(
                 Update::Disconnected(e) => view.error = Some(format!("daemon unavailable: {e}")),
             }
         }
-        if session_checked.is_none_or(|t| t.elapsed() >= SESSION_REFRESH) {
-            session_checked = Some(Instant::now());
+        if location_checked.is_none_or(|t| t.elapsed() >= LOCATION_REFRESH) {
+            location_checked = Some(Instant::now());
             if let Some(pane) = own_pane {
-                let where_ = "#{session_name}\t#{window_id}";
-                match tmux.run(&["display-message", "-p", "-t", pane, where_]) {
-                    Ok(out) => match out.trim_end().split_once('\t') {
-                        Some((session, window)) => {
-                            view.app.set_location(session.to_owned(), window.to_owned());
-                        }
-                        None => view.error = Some(format!("unexpected tmux reply: {out:?}")),
-                    },
+                match tmux.run(&["display-message", "-p", "-t", pane, "#{window_id}"]) {
+                    Ok(out) if !out.trim().is_empty() => {
+                        view.app.set_location(out.trim().to_owned());
+                    }
+                    Ok(_) => view.error = Some(format!("tmux reported no window for {pane}")),
                     Err(e) => view.error = Some(format!("{e:#}")),
                 }
             }
@@ -143,18 +143,19 @@ fn ui_loop(
             }
             _ => Action::None,
         };
-        if let Action::Jump(pane) = action
-            && let Err(e) = jump(tmux, &pane)
+        if let Action::Jump(target) = action
+            && let Err(e) = jump(tmux, &target)
         {
             view.error = Some(format!("{e:#}"));
         }
     }
 }
 
-fn jump(tmux: &Tmux, pane: &str) -> Result<()> {
-    tmux.run(&["switch-client", "-t", pane])?;
-    tmux.run(&["select-window", "-t", pane])?;
-    tmux.run(&["select-pane", "-t", pane])?;
+/// `target` is a pane or a window; for a window, its active pane is selected.
+fn jump(tmux: &Tmux, target: &str) -> Result<()> {
+    tmux.run(&["switch-client", "-t", target])?;
+    tmux.run(&["select-window", "-t", target])?;
+    tmux.run(&["select-pane", "-t", target])?;
     Ok(())
 }
 
@@ -169,26 +170,25 @@ fn state_color(state: State) -> Color {
     }
 }
 
-/// Width of the ` <symbol> ` prefix, which the lines under an agent indent to match.
-const PREFIX: usize = 3;
+/// Indents: window headers sit under their session, agents under their window.
+const WINDOW_INDENT: usize = 1;
+const AGENT_INDENT: usize = 3;
+/// Where an agent's text starts after ` <symbol> `; the lines under it indent to match.
+const DETAIL_INDENT: usize = AGENT_INDENT + 2;
 
 fn render(f: &mut Frame, view: &mut View) {
     let [list, footer] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
-    let width = usize::from(list.width).saturating_sub(PREFIX);
+    let width = usize::from(list.width).saturating_sub(DETAIL_INDENT);
     let lines = view.app.lines();
-    let selected_pane = view.app.selected.and_then(|i| {
-        lines
-            .iter()
-            .filter_map(|l| match l {
-                Line::Agent(r) => Some(r.pane.as_str()),
-                _ => None,
-            })
-            .nth(i)
+    let selected_line = view.app.selected.and_then(|n| model::line_of(&lines, n));
+    let selected_pane = selected_line.and_then(|i| match &lines[i] {
+        Line::Agent(r) => Some(r.pane.as_str()),
+        _ => None,
     });
     let current = Style::new().add_modifier(Modifier::BOLD);
     // Matches the session name in tmux's status-left.
-    let own_session = Style::new().fg(Color::Rgb(0xf6, 0xc1, 0x77));
+    let session = Style::new().fg(Color::Rgb(0xf6, 0xc1, 0x77));
     let muted = Style::new().fg(Color::DarkGray);
     let detail = |pane: &str| {
         if selected_pane == Some(pane) {
@@ -197,50 +197,58 @@ fn render(f: &mut Frame, view: &mut View) {
             muted
         }
     };
-    let mut selected_line = None;
     let rendered: Vec<TextLine> = lines
         .iter()
         .enumerate()
         .map(|(i, line)| match line {
-            Line::Session { name, current: own } => TextLine::from(Span::styled(
+            Line::Session { name } => TextLine::from(Span::styled(
                 model::truncate(name, usize::from(list.width)),
-                if *own { own_session } else { muted },
+                session,
             )),
-            Line::Agent(row) => {
-                let selected = selected_pane == Some(row.pane.as_str());
-                if selected {
-                    selected_line = Some(i);
-                }
-                TextLine::from(vec![
-                    Span::styled(
-                        format!(" {} ", model::symbol(row.state)),
-                        Style::new().fg(state_color(row.state)),
-                    ),
-                    Span::styled(
-                        model::agent_text(row, width),
-                        if selected { current } else { muted },
-                    ),
-                ])
-            }
-            Line::Branch { pane, branch } => TextLine::from(Span::styled(
-                format!("{:PREFIX$}{}", "", model::truncate(branch, width)),
+            // Like tmux's current window, the sidebar's own window stays bold.
+            Line::Window { id, label } => TextLine::from(Span::styled(
+                format!(
+                    "{:WINDOW_INDENT$}{}",
+                    "",
+                    model::truncate(label, usize::from(list.width).saturating_sub(WINDOW_INDENT))
+                ),
+                if selected_line == Some(i) || view.app.own_window.as_deref() == Some(id) {
+                    current
+                } else {
+                    muted
+                },
+            )),
+            Line::Agent(row) => TextLine::from(vec![
+                Span::styled(
+                    format!("{:AGENT_INDENT$}{} ", "", model::symbol(row.state)),
+                    Style::new().fg(state_color(row.state)),
+                ),
+                Span::styled(
+                    model::agent_text(row, width),
+                    if selected_line == Some(i) {
+                        current
+                    } else {
+                        muted
+                    },
+                ),
+            ]),
+            Line::Place { pane, text } => TextLine::from(Span::styled(
+                format!("{:DETAIL_INDENT$}{}", "", model::truncate(text, width)),
                 detail(pane),
+            )),
+            Line::Pane { place, .. } => TextLine::from(Span::styled(
+                format!("{:DETAIL_INDENT$}{}", "", model::truncate(place, width)),
+                if selected_line == Some(i) {
+                    current
+                } else {
+                    muted
+                },
             )),
         })
         .collect();
     let height = usize::from(list.height);
     if let Some(line) = selected_line {
-        // Keep all lines of a selected agent in view.
-        let last = line
-            + lines[line + 1..]
-                .iter()
-                .take_while(|l| matches!(l, Line::Branch { .. }))
-                .count();
-        if line < view.offset {
-            view.offset = line;
-        } else if height > 0 && last >= view.offset + height {
-            view.offset = last + 1 - height;
-        }
+        view.offset = model::scroll(&lines, line, view.offset, height);
     }
     view.offset = view.offset.min(rendered.len().saturating_sub(1));
     let body = if rendered.is_empty() {

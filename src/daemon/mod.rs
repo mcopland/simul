@@ -4,9 +4,9 @@ pub mod scan;
 pub mod server;
 pub mod state;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -16,12 +16,14 @@ use crate::claude_sessions;
 use crate::config::Config;
 use crate::hook::{Agent, AgentEvent, Envelope};
 use crate::log;
-use crate::protocol::{Status, now_ms};
-use crate::tmux::{Tmux, shell_quote, tmux_double_quote};
+use crate::protocol::{GitStatus, Status, WindowInfo, now_ms};
+use crate::tmux::{self, Tmux, shell_quote, tmux_double_quote};
 use state::{Snapshot, Store, Transition};
 
 const RECONCILE_DEBOUNCE: Duration = Duration::from_millis(50);
 const TICK: Duration = Duration::from_secs(1);
+/// How long a pane directory's git status stays fresh while the sidebar shows it.
+const GIT_REFRESH: Duration = Duration::from_secs(5);
 /// Index in tmux hook arrays, so simul's entries never replace the user's.
 const HOOK_INDEX: u32 = 7463;
 /// Global tmux option holding the status-format[0] hidden while the sidebar is on.
@@ -45,11 +47,19 @@ pub enum Cmd {
     Refresh,
     Toggle(oneshot::Sender<bool>),
     Resized,
-    TmuxNotification { name: String },
+    TmuxNotification {
+        name: String,
+    },
     Reconcile,
     Tick,
-    Branch { cwd: String, branch: Option<String> },
-    Turn { pane: String, turn: Option<Turn> },
+    Git {
+        cwd: String,
+        status: Option<GitStatus>,
+    },
+    Turn {
+        pane: String,
+        turn: Option<Turn>,
+    },
     Shutdown,
 }
 
@@ -64,18 +74,20 @@ struct Daemon {
     opts: Options,
     store: Store,
     snapshot: Snapshot,
+    /// The snapshot's windows as published, rebuilt at each reconcile.
+    windows: Vec<WindowInfo>,
     recovered: bool,
     focus_events: bool,
     tx: mpsc::Sender<Cmd>,
     updates: broadcast::Sender<Status>,
     reconcile_pending: bool,
-    branch_inflight: HashSet<String>,
+    git_inflight: HashSet<String>,
     sidebar_on: bool,
     /// Windows seen at the last reconcile; only windows new since then get a sidebar.
     known_windows: HashSet<String>,
     notify_gate: notify::Gate,
-    /// Working directories whose branch has been looked up at least once.
-    branch_fetched: HashSet<String>,
+    /// Git status by working directory, with when it was read; `None` outside a repo.
+    git: HashMap<String, (Instant, Option<GitStatus>)>,
     /// Panes whose transcript is being read.
     turn_inflight: HashSet<String>,
     /// Where Claude Code keeps live session status; `None` without `$HOME`.
@@ -105,16 +117,17 @@ pub async fn run(opts: Options) -> Result<()> {
         opts,
         store: Store::default(),
         snapshot: Snapshot::default(),
+        windows: Vec::new(),
         recovered: false,
         focus_events: false,
         tx,
         updates,
         reconcile_pending: false,
-        branch_inflight: HashSet::new(),
+        git_inflight: HashSet::new(),
         sidebar_on: false,
         known_windows: HashSet::new(),
         notify_gate: notify::Gate::default(),
-        branch_fetched: HashSet::new(),
+        git: HashMap::new(),
         turn_inflight: HashSet::new(),
         sessions_dir: claude_sessions::sessions_dir(crate::paths::env_var),
         live_error: None,
@@ -178,6 +191,11 @@ impl Daemon {
             Cmd::Tick => {
                 self.read_live().await;
                 self.scrape().await;
+                // tmux sends no notification when a pane changes directory, which pane rows
+                // show.
+                if self.sidebar_on {
+                    self.schedule_reconcile();
+                }
             }
             Cmd::Turn { pane, turn } => {
                 self.turn_inflight.remove(&pane);
@@ -186,9 +204,12 @@ impl Daemon {
                     self.publish();
                 }
             }
-            Cmd::Branch { cwd, branch } => {
-                self.branch_inflight.remove(&cwd);
-                if self.store.set_branch(&cwd, branch) {
+            Cmd::Git { cwd, status } => {
+                self.git_inflight.remove(&cwd);
+                let branch = status.as_ref().and_then(|s| s.branch.clone());
+                let changed = self.git.get(&cwd).is_none_or(|(_, old)| *old != status);
+                self.git.insert(cwd.clone(), (Instant::now(), status));
+                if self.store.set_branch(&cwd, branch) || changed {
                     self.publish();
                 }
             }
@@ -206,6 +227,7 @@ impl Daemon {
             now_ms: now_ms(),
             sidebar: self.sidebar_on,
             panes: self.store.records(),
+            windows: self.windows_with_git(),
         }
     }
 
@@ -227,9 +249,9 @@ impl Daemon {
         let transition = self.store.apply(&pane, agent, &parsed, now_ms(), viewed);
         if let Some(cwd) = self.store.get(&pane).and_then(|r| r.cwd.clone()) {
             let refresh = matches!(parsed.event, AgentEvent::SessionStart | AgentEvent::Stop)
-                || !self.branch_fetched.contains(&cwd);
+                || !self.git.contains_key(&cwd);
             if refresh {
-                self.fetch_branch(cwd);
+                self.fetch_git(cwd);
             }
         }
         if let Some(rec) = self.store.get(&pane)
@@ -239,12 +261,21 @@ impl Daemon {
         {
             self.read_turn(pane.clone(), transcript);
         }
-        match self.snapshot.panes.iter().find(|p| p.id == pane) {
-            Some(info) => self.store.locate(info),
-            None => self.schedule_reconcile(),
-        }
+        let located = match self.snapshot.panes.iter().find(|p| p.id == pane) {
+            Some(info) => {
+                self.store.locate(info);
+                true
+            }
+            None => {
+                self.schedule_reconcile();
+                false
+            }
+        };
         self.on_transitions(transition.into_iter().collect(), &env.event);
-        self.publish();
+        // Unplaced, the pane would show under a placeholder header; the reconcile publishes it.
+        if located {
+            self.publish();
+        }
     }
 
     fn on_transitions(&mut self, transitions: Vec<Transition>, cause: &str) {
@@ -269,17 +300,47 @@ impl Daemon {
         }
     }
 
-    /// Panes found by the startup scan send no hook until used, so look their branch up here.
-    fn fetch_missing_branches(&mut self) {
-        let missing: HashSet<String> = self
+    /// The published windows, each pane with the git status of its directory.
+    fn windows_with_git(&self) -> Vec<WindowInfo> {
+        let mut windows = self.windows.clone();
+        for p in windows.iter_mut().flat_map(|w| &mut w.panes) {
+            p.git = self.git.get(&p.cwd).and_then(|(_, s)| s.clone());
+        }
+        windows
+    }
+
+    /// Looks up agents' directories once, since panes found by the startup scan send no hook
+    /// until used, and while the sidebar shows them, every pane's directory as it goes stale.
+    fn refresh_git(&mut self) {
+        let agents: HashSet<String> = self
             .store
             .records()
             .into_iter()
             .filter_map(|r| r.cwd)
-            .filter(|cwd| !self.branch_fetched.contains(cwd))
             .collect();
-        for cwd in missing {
-            self.fetch_branch(cwd);
+        let panes: HashSet<String> = if self.sidebar_on {
+            self.windows
+                .iter()
+                .flat_map(|w| &w.panes)
+                .map(|p| p.cwd.clone())
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        self.git
+            .retain(|cwd, _| agents.contains(cwd) || panes.contains(cwd));
+        let stale: Vec<String> = agents
+            .iter()
+            .filter(|cwd| !self.git.contains_key(*cwd))
+            .chain(panes.iter().filter(|cwd| {
+                self.git
+                    .get(*cwd)
+                    .is_none_or(|(at, _)| at.elapsed() >= GIT_REFRESH)
+            }))
+            .cloned()
+            .collect();
+        for cwd in stale {
+            self.fetch_git(cwd);
         }
     }
 
@@ -307,22 +368,21 @@ impl Daemon {
         });
     }
 
-    fn fetch_branch(&mut self, cwd: String) {
-        if !self.branch_inflight.insert(cwd.clone()) {
+    fn fetch_git(&mut self, cwd: String) {
+        if cwd.is_empty() || !self.git_inflight.insert(cwd.clone()) {
             return;
         }
-        self.branch_fetched.insert(cwd.clone());
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let branch = match crate::git::current_branch(&cwd).await {
-                Ok(b) => b,
+            let status = match crate::git::status(&cwd).await {
+                Ok(s) => s,
                 Err(e) => {
                     log!("{e:#}");
                     None
                 }
             };
-            // The daemon loop only stops at shutdown, when the branch no longer matters.
-            let _ = tx.send(Cmd::Branch { cwd, branch }).await;
+            // The daemon loop only stops at shutdown, when the status no longer matters.
+            let _ = tx.send(Cmd::Git { cwd, status }).await;
         });
     }
 
@@ -334,7 +394,7 @@ impl Daemon {
         let tx = self.tx.clone();
         tokio::spawn(async move {
             tokio::time::sleep(RECONCILE_DEBOUNCE).await;
-            // See fetch_branch: a closed channel means shutdown.
+            // See fetch_git: a closed channel means shutdown.
             let _ = tx.send(Cmd::Reconcile).await;
         });
     }
@@ -358,8 +418,9 @@ impl Daemon {
             }
         }
         let transitions = self.store.reconcile(&snap, now);
+        self.windows = tmux::windows(&snap);
         self.snapshot = snap;
-        self.fetch_missing_branches();
+        self.refresh_git();
         self.maintain_sidebars().await;
         self.on_transitions(transitions, "viewed");
         self.publish();

@@ -117,6 +117,7 @@ mod tests {
             now_ms: 181_000,
             sidebar: false,
             panes: vec![rec("%1", State::Blocked), rec("%12", State::Done)],
+            windows: vec![],
         };
         let out = render(&status);
         let lines: Vec<&str> = out.lines().collect();
@@ -143,6 +144,7 @@ mod tests {
             now_ms: 0,
             sidebar: false,
             panes: vec![],
+            windows: vec![],
         });
         assert_eq!(out, "no agents\n");
     }

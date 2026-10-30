@@ -1,8 +1,10 @@
 mod common;
 
 use std::collections::HashSet;
+use std::time::Duration;
 
-use common::{Harness, eventually};
+use common::{Harness, eventually, git_repo, poll};
+use simul::sidebar::model;
 
 /// (pane, window, width) of every tagged sidebar.
 fn sidebars(h: &Harness) -> Vec<(String, String, u32)> {
@@ -25,6 +27,25 @@ fn windows(h: &Harness) -> HashSet<String> {
         .lines()
         .map(str::to_owned)
         .collect()
+}
+
+/// The pane's directory as its sidebar row shows it outside git.
+fn place_of(h: &Harness, target: &str) -> String {
+    let path = h.tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        target,
+        "#{pane_current_path}",
+    ]);
+    model::short_path(&path, &std::env::var("HOME").unwrap_or_default())
+}
+
+/// The line under the first line that reads `above`, trimmed.
+fn line_under(screen: &str, above: &str) -> Option<String> {
+    let mut lines = screen.lines();
+    lines.find(|l| l.trim_end() == above)?;
+    lines.next().map(|l| l.trim().to_owned())
 }
 
 fn toggle(h: &Harness) {
@@ -112,7 +133,7 @@ fn sidebar_renders_agents() {
     let mut screen = String::new();
     eventually("agent row rendered", || {
         screen = h.tmux(&["capture-pane", "-p", "-t", &side.0]);
-        screen.contains(" \u{2298} 1:agents")
+        screen.contains("\n 1:agents\n   \u{2298} claude")
     });
     assert!(screen.starts_with('t'), "session header first: {screen}");
     assert!(screen.contains("f:all"), "{screen}");
@@ -143,6 +164,72 @@ fn windows_in_every_session_get_sidebars() {
             sidebars(&h).len() == want
         });
     }
+}
+
+#[test]
+fn pane_rows_show_git_status_or_a_short_path() {
+    let mut h = Harness::new();
+    let repo = h.dir.path().join("repo");
+    std::fs::create_dir_all(repo.join("sub")).unwrap();
+    // Without `-c`, tmux starts the pane in this test process's directory, not the session's.
+    let dir = h.dir.path().to_str().unwrap().to_owned();
+    let plain = h.tmux(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "t:",
+        "-c",
+        &dir,
+        "sh",
+    ]);
+    h.tmux(&["rename-window", "-t", &plain, "plain"]);
+    h.start_daemon();
+    toggle(&h);
+    let (pane, _, _) = sidebars(&h).remove(0);
+    let row = || line_under(&h.tmux(&["capture-pane", "-p", "-t", &pane]), " 1:plain");
+    let want = place_of(&h, &plain);
+    eventually("directory listed", || row().as_ref() == Some(&want));
+    h.tmux(&["send-keys", "-t", &plain, "cd repo/sub", "Enter"]);
+    eventually("cd shown without a tmux event", || {
+        row().is_some_and(|r| r.ends_with("/r/sub"))
+    });
+    git_repo(&repo, "trunk");
+    // The status is re-read every 5 s.
+    let slow = Duration::from_secs(10);
+    assert!(
+        poll(slow, || row().as_deref() == Some("trunk")),
+        "{:?}",
+        row()
+    );
+    std::fs::write(repo.join("new.txt"), "x").unwrap();
+    assert!(
+        poll(slow, || row().as_deref() == Some("trunk ?")),
+        "{:?}",
+        row()
+    );
+}
+
+#[test]
+fn lists_windows_without_agents() {
+    let mut h = Harness::new();
+    let cwd = h.dir.path().to_str().unwrap().to_owned();
+    h.tmux(&["new-session", "-d", "-c", &cwd, "-s", "u", "sh"]);
+    h.tmux(&["rename-window", "-t", "u:0", "plain"]);
+    h.start_daemon();
+    toggle(&h);
+    let (pane, _, _) = sidebars(&h).remove(0);
+    let mut screen = String::new();
+    eventually("agent-less session and window listed", || {
+        screen = h.tmux(&["capture-pane", "-p", "-t", &pane]);
+        screen.contains(&format!("\nu\n 0:plain\n     {}", place_of(&h, "u:0")))
+    });
+    assert!(
+        screen.starts_with("t\n 0:"),
+        "own session's window too: {screen}"
+    );
 }
 
 #[test]
@@ -227,7 +314,15 @@ fn selected_row_is_bold_without_a_block() {
     assert!(!screen.contains("\x1b[7m"), "no reverse video: {screen:?}");
     let label = style_of(&screen, "mine").unwrap();
     assert_eq!(label.fg, None, "selected label in default fg: {screen:?}");
-    let row = screen.lines().find(|l| l.contains("mine")).unwrap();
+    let row = screen
+        .lines()
+        .skip_while(|l| !l.contains("mine"))
+        .nth(1)
+        .unwrap();
+    assert!(
+        style_of(row, "claude").is_some_and(|s| s.bold),
+        "the agent under its window header is selected: {row:?}"
+    );
     let symbol = style_of(row, "\u{25d0}").unwrap();
     assert!(
         symbol.fg.is_some() && !symbol.muted(),
@@ -236,12 +331,17 @@ fn selected_row_is_bold_without_a_block() {
     let rest = style_of(&screen, "other").unwrap();
     assert!(
         !rest.bold && rest.muted(),
-        "other agents are muted: {screen:?}"
+        "other windows are muted: {screen:?}"
+    );
+    let plain = header(&screen, &place_of(&h, "t:0")).unwrap();
+    assert!(
+        !plain.bold && plain.muted(),
+        "plain panes are muted: {screen:?}"
     );
 }
 
 #[test]
-fn current_session_header_is_gold_like_status_left() {
+fn session_headers_are_gold_like_status_left() {
     let mut h = Harness::new();
     let agent = h.new_pane("sleep 600");
     h.tmux(&["new-session", "-d", "-s", "u", "sleep 600"]);
@@ -259,16 +359,13 @@ fn current_session_header_is_gold_like_status_left() {
         screen = h.tmux(&["capture-pane", "-e", "-p", "-t", &pane]);
         header(&screen, "u").is_some()
     });
-    let own = header(&screen, "t").unwrap();
-    assert!(
-        !own.bold && own.fg.as_deref() == Some("38;2;246;193;119"),
-        "own session gold, not bold: {screen:?}"
-    );
-    let rest = header(&screen, "u").unwrap();
-    assert!(
-        !rest.bold && rest.muted(),
-        "other session muted: {screen:?}"
-    );
+    for session in ["t", "u"] {
+        let sgr = header(&screen, session).unwrap();
+        assert!(
+            !sgr.bold && sgr.fg.as_deref() == Some("38;2;246;193;119"),
+            "session {session} gold, not bold: {screen:?}"
+        );
+    }
 }
 
 /// Text attributes of a run of cells in `capture-pane -e` output.
@@ -333,7 +430,7 @@ fn style_of(screen: &str, needle: &str) -> Option<Sgr> {
         .find_map(|(text, sgr)| text.contains(needle).then_some(sgr))
 }
 
-/// Attributes of the header line for `session`, if present.
+/// Attributes of the line whose text is just `session` (or another word), if present.
 fn header(screen: &str, session: &str) -> Option<Sgr> {
     screen.lines().find_map(|line| {
         let runs = runs(line);
