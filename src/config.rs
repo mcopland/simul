@@ -19,6 +19,9 @@ pub struct Config {
 #[serde(default)]
 pub struct SidebarConfig {
     pub width: u16,
+    /// Hide the session and windows from tmux's first status line, keeping status-right,
+    /// while the sidebar is shown.
+    pub hide_status: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -53,7 +56,10 @@ impl Default for Config {
 
 impl Default for SidebarConfig {
     fn default() -> SidebarConfig {
-        SidebarConfig { width: 30 }
+        SidebarConfig {
+            width: 30,
+            hide_status: true,
+        }
     }
 }
 
@@ -104,6 +110,7 @@ mod tests {
         let cfg = load_from(&dir.path().join("nope.toml")).unwrap();
         assert_eq!(cfg, Config::default());
         assert_eq!(cfg.sidebar.width, 30);
+        assert!(cfg.sidebar.hide_status);
         assert_eq!(cfg.notify.dedupe_secs, 10);
         assert!(!cfg.notify.desktop, "system notifications are opt-in");
         assert!(!cfg.notify.bell, "the terminal bell is opt-in");
@@ -131,6 +138,7 @@ mod tests {
         std::fs::write(&path, "[sidebar]\nwidth = 30\n").unwrap();
         let cfg = load_from(&path).unwrap();
         assert_eq!(cfg.sidebar.width, 30);
+        assert!(cfg.sidebar.hide_status);
         assert!(cfg.notify.enabled);
     }
 

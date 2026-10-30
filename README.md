@@ -71,6 +71,8 @@ Sidebar keys:
 
 Each agent row shows a state symbol, `window:window_name`, and time in the current state, with its branch on the line below. While the sidebar isn't focused, it highlights the agent in its own window, or nothing if that window has none. Like tmux's current window, the highlighted agent and the sidebar's own session are bold and everything else is dimmed; state symbols keep their colors. Focusing the sidebar keeps that row, or selects the first row if none was highlighted.
 
+The sidebar repeats tmux's session name and window list, so while it is shown simul cuts the first status line (`status-format[0]`) down to `status-right` and restores it when you toggle the sidebar off. Further status lines, such as `status-format[1]`, keep running. Set `hide_status = false` under `[sidebar]` to keep the line as is.
+
 | Symbol | State     | Meaning                                                              |
 | ------ | --------- | -------------------------------------------------------------------- |
 | `◐`    | `working` | The agent is running                                                 |
@@ -108,6 +110,7 @@ blocked_threshold_ms = 1500  # quiet time before a busy pane's screen is checked
 
 [sidebar]
 width = 30
+hide_status = true  # hide the session and windows from tmux's status line while the sidebar is shown
 
 [notify]
 enabled = true   # tmux status-line messages

@@ -24,6 +24,19 @@ const RECONCILE_DEBOUNCE: Duration = Duration::from_millis(50);
 const TICK: Duration = Duration::from_secs(1);
 /// Index in tmux hook arrays, so simul's entries never replace the user's.
 const HOOK_INDEX: u32 = 7463;
+/// Global tmux option holding the status-format[0] hidden while the sidebar is on.
+const SAVED_STATUS: &str = "@simul-status-format";
+/// The right-hand part of tmux's default status-format[0]: status-right alone, without the
+/// session name and window list the sidebar repeats.
+const RIGHT_ONLY_STATUS: &str = "#[align=right range=right #{E:status-right-style}]#[push-default]#{T;=/#{status-right-length}:status-right}#[pop-default]#[norange default]";
+
+/// tmux ends `show-options -v` output with one newline that isn't part of the value.
+fn strip_newline(mut s: String) -> String {
+    if s.ends_with('\n') {
+        s.pop();
+    }
+    s
+}
 
 pub enum Cmd {
     Hook(Envelope),
@@ -474,17 +487,71 @@ impl Daemon {
                     log!("failed to close sidebar {}: {e:#}", pane.id);
                 }
             }
+            // Regardless of config, so turning hide_status off still brings the line back.
+            if let Err(e) = self.restore_status().await {
+                log!("failed to restore the status line: {e:#}");
+            }
         } else {
             self.sidebar_on = true;
             let have = self.windows_with_sidebar();
             for window in self.windows().difference(&have) {
                 self.add_sidebar(window).await;
             }
+            if self.opts.config.sidebar.hide_status
+                && let Err(e) = self.hide_status().await
+            {
+                log!("failed to hide the status line: {e:#}");
+            }
         }
         self.known_windows = self.windows();
         self.publish();
         self.schedule_reconcile();
         self.sidebar_on
+    }
+
+    /// The status-format[0] that hide_status replaced. It lives in tmux so a daemon that
+    /// adopts sidebars after a restart can still restore it.
+    async fn saved_status(&self) -> Result<Option<String>> {
+        let tmux = &self.opts.tmux;
+        // Without -v, an unset option prints nothing; with -v, it can't be told from "".
+        if tmux
+            .run_async(&["show-options", "-gq", SAVED_STATUS])
+            .await?
+            .is_empty()
+        {
+            return Ok(None);
+        }
+        let value = tmux
+            .run_async(&["show-options", "-gqv", SAVED_STATUS])
+            .await?;
+        Ok(Some(strip_newline(value)))
+    }
+
+    /// Cuts tmux's first status line down to status-right; later lines keep running.
+    async fn hide_status(&self) -> Result<()> {
+        let tmux = &self.opts.tmux;
+        // Already saved by an earlier daemon, whose cut-down line must not overwrite it.
+        if self.saved_status().await?.is_none() {
+            let current = tmux
+                .run_async(&["show-options", "-gv", "status-format[0]"])
+                .await?;
+            tmux.run_async(&["set-option", "-g", SAVED_STATUS, &strip_newline(current)])
+                .await?;
+        }
+        tmux.run_async(&["set-option", "-g", "status-format[0]", RIGHT_ONLY_STATUS])
+            .await?;
+        Ok(())
+    }
+
+    async fn restore_status(&self) -> Result<()> {
+        let Some(saved) = self.saved_status().await? else {
+            return Ok(());
+        };
+        let tmux = &self.opts.tmux;
+        tmux.run_async(&["set-option", "-g", "status-format[0]", &saved])
+            .await?;
+        tmux.run_async(&["set-option", "-gu", SAVED_STATUS]).await?;
+        Ok(())
     }
 
     /// Adds sidebars to new windows and closes sidebars left alone in their window.

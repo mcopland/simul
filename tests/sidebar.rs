@@ -363,3 +363,52 @@ fn layout_hooks_see_the_sidebar_tag() {
         h.tmux(&["show-options", "-wv", "-t", "t:0", "pane-border-status"]) == "off"
     });
 }
+
+fn status_format(h: &Harness) -> String {
+    h.tmux(&["show-options", "-gv", "status-format[0]"])
+}
+
+#[test]
+fn toggle_cuts_first_status_line_to_status_right() {
+    let mut h = Harness::new();
+    h.tmux(&["set-option", "-g", "status-format[0]", "#S custom"]);
+    h.tmux(&["set-option", "-g", "status-left", "LEFT"]);
+    h.tmux(&["set-option", "-g", "status-right", "RIGHT"]);
+    h.tmux(&["rename-window", "-t", "t", "WINDOW"]);
+    let second = h.tmux(&["show-options", "-gv", "status-format[1]"]);
+    h.start_daemon();
+    toggle(&h);
+    let shown = h.tmux(&["display-message", "-p", "-t", "t", "#{E:status-format[0]}"]);
+    assert!(shown.contains("RIGHT"), "{shown}");
+    assert!(
+        !shown.contains("LEFT") && !shown.contains("WINDOW"),
+        "{shown}"
+    );
+    assert_eq!(h.tmux(&["show-options", "-gv", "status-format[1]"]), second);
+    toggle(&h);
+    assert_eq!(status_format(&h), "#S custom");
+    assert_eq!(h.tmux(&["show-options", "-gq", "@simul-status-format"]), "");
+}
+
+#[test]
+fn status_line_restored_after_daemon_restart() {
+    let mut h = Harness::new();
+    h.tmux(&["set-option", "-g", "status-format[0]", "#S custom"]);
+    h.start_daemon();
+    toggle(&h);
+    assert!(!status_format(&h).contains("#S"), "{}", status_format(&h));
+    h.stop_daemon();
+    h.start_daemon();
+    toggle(&h);
+    assert_eq!(status_format(&h), "#S custom");
+}
+
+#[test]
+fn hide_status_false_leaves_status_line() {
+    let mut h = Harness::with_config("[sidebar]\nhide_status = false\n");
+    h.tmux(&["set-option", "-g", "status-format[0]", "#S custom"]);
+    h.start_daemon();
+    toggle(&h);
+    assert_eq!(sidebars(&h).len(), 1);
+    assert_eq!(status_format(&h), "#S custom");
+}
