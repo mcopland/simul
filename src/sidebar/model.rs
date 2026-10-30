@@ -15,7 +15,8 @@ impl StateFilter {
     pub fn next(self) -> StateFilter {
         match self {
             StateFilter::All => StateFilter::Only(State::Blocked),
-            StateFilter::Only(State::Blocked) => StateFilter::Only(State::Done),
+            StateFilter::Only(State::Blocked) => StateFilter::Only(State::Failed),
+            StateFilter::Only(State::Failed) => StateFilter::Only(State::Done),
             StateFilter::Only(State::Done) => StateFilter::Only(State::Working),
             StateFilter::Only(State::Working) => StateFilter::Only(State::Idle),
             StateFilter::Only(_) => StateFilter::All,
@@ -69,6 +70,7 @@ pub fn symbol(state: State) -> char {
     match state {
         State::Blocked => '\u{2298}',
         State::Done => '\u{25cf}',
+        State::Failed => '\u{2715}',
         State::Working => '\u{25d0}',
         State::Idle => '\u{25cb}',
         State::Unknown => '\u{2205}',
@@ -383,6 +385,7 @@ mod tests {
         let all = [
             State::Blocked,
             State::Done,
+            State::Failed,
             State::Working,
             State::Idle,
             State::Unknown,
@@ -390,7 +393,9 @@ mod tests {
         .map(symbol);
         assert_eq!(
             all,
-            ['\u{2298}', '\u{25cf}', '\u{25d0}', '\u{25cb}', '\u{2205}']
+            [
+                '\u{2298}', '\u{25cf}', '\u{2715}', '\u{25d0}', '\u{25cb}', '\u{2205}'
+            ]
         );
     }
 
@@ -491,11 +496,14 @@ mod tests {
     fn filter_cycles_through_states() {
         let mut f = StateFilter::All;
         let mut seen = vec![f.label()];
-        for _ in 0..5 {
+        for _ in 0..6 {
             f = f.next();
             seen.push(f.label());
         }
-        assert_eq!(seen, ["all", "blocked", "done", "working", "idle", "all"]);
+        assert_eq!(
+            seen,
+            ["all", "blocked", "failed", "done", "working", "idle", "all"]
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@ use crate::config::NotifyConfig;
 use crate::log;
 use crate::tmux::Tmux;
 
-/// Decides which transitions notify: entering blocked or done, while unseen, not repeated.
+/// Decides which transitions notify: entering blocked, done, or failed, while unseen, not repeated.
 #[derive(Debug, Default)]
 pub struct Gate {
     last: HashMap<(String, State), u64>,
@@ -15,7 +15,7 @@ pub struct Gate {
 
 impl Gate {
     pub fn admit(&mut self, t: &Transition, viewed: bool, now: u64, dedupe_ms: u64) -> bool {
-        if !matches!(t.to, State::Blocked | State::Done) || viewed {
+        if !matches!(t.to, State::Blocked | State::Done | State::Failed) || viewed {
             return false;
         }
         let key = (t.pane.clone(), t.to);
@@ -41,6 +41,7 @@ pub fn message(t: &Transition, rec: Option<&PaneRecord>) -> Message {
     let agent = t.agent.label();
     let title = match t.to {
         State::Blocked => format!("{agent} needs approval"),
+        State::Failed => format!("{agent} failed"),
         _ => format!("{agent} finished"),
     };
     let mut body = rec.map_or_else(|| t.pane.clone(), crate::cli::ls::location);
@@ -52,6 +53,9 @@ pub fn message(t: &Transition, rec: Option<&PaneRecord>) -> Message {
     }
     if let (State::Blocked, Some(tool)) = (t.to, rec.and_then(|r| r.pending_tool.as_deref())) {
         body.push_str(&format!(" wants to run {tool}"));
+    }
+    if let (State::Failed, Some(error)) = (t.to, rec.and_then(|r| r.error.as_deref())) {
+        body.push_str(&format!(": {error}"));
     }
     Message { title, body }
 }
@@ -243,6 +247,11 @@ mod tests {
         assert_eq!(m.body, "dev:2");
         let m = message(&t("%7", State::Done), None);
         assert_eq!(m.body, "%7");
+        let mut failed = rec(None);
+        failed.error = Some("rate_limit".into());
+        let m = message(&t("%1", State::Failed), Some(&failed));
+        assert_eq!(m.title, "Claude failed");
+        assert_eq!(m.body, "dev:2: rate_limit");
     }
 
     #[test]
@@ -253,10 +262,11 @@ mod tests {
     }
 
     #[test]
-    fn only_blocked_and_done_notify() {
+    fn only_blocked_done_and_failed_notify() {
         let mut g = Gate::default();
         assert!(g.admit(&t("%1", State::Blocked), false, 0, 10_000));
         assert!(g.admit(&t("%2", State::Done), false, 0, 10_000));
+        assert!(g.admit(&t("%4", State::Failed), false, 0, 10_000));
         for s in [State::Working, State::Idle, State::Unknown] {
             assert!(!g.admit(&t("%3", s), false, 0, 10_000), "{s:?}");
         }

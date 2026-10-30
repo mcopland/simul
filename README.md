@@ -1,6 +1,6 @@
 # simul
 
-A tmux plugin that tracks the state of coding agents (Claude Code and Kiro CLI), shows them in a sidebar, and notifies you when one is blocked or done.
+A tmux plugin that tracks the state of coding agents (Claude Code and Kiro CLI), shows them in a sidebar, and notifies you when one is blocked, done, or failed.
 
 Status: early development. See `fixtures/CALIBRATION.md` for verified agent behavior.
 
@@ -71,15 +71,16 @@ Sidebar keys:
 
 Each agent row shows a state symbol, `window:window_name`, and time in the current state, with its branch on the line below. While the sidebar isn't focused, it highlights the agent in its own window, or nothing if that window has none. Like tmux's current window, the highlighted agent and the sidebar's own session are bold and everything else is dimmed; state symbols keep their colors. Focusing the sidebar keeps that row, or selects the first row if none was highlighted.
 
-| Symbol | State     | Meaning                                |
-| ------ | --------- | -------------------------------------- |
-| `◐`    | `working` | The agent is running                   |
-| `⊘`    | `blocked` | The agent is waiting for your approval |
-| `●`    | `done`    | Finished, and you haven't looked yet   |
-| `○`    | `idle`    | Waiting for input                      |
-| `∅`    | `unknown` | Not yet classified                     |
+| Symbol | State     | Meaning                                                              |
+| ------ | --------- | -------------------------------------------------------------------- |
+| `◐`    | `working` | The agent is running                                                 |
+| `⊘`    | `blocked` | The agent is waiting for your approval                               |
+| `●`    | `done`    | Finished, and you haven't looked yet                                 |
+| `✕`    | `failed`  | The turn ended with an API error, such as a rate limit (Claude only) |
+| `○`    | `idle`    | Waiting for input                                                    |
+| `∅`    | `unknown` | Not yet classified                                                   |
 
-When an agent becomes `blocked` or `done` in a pane you are not looking at, simul shows a message in the tmux status line. Desktop notifications and the terminal bell are off by default; turn them on under `[notify]`.
+When an agent becomes `blocked`, `done`, or `failed` in a pane you are not looking at, simul shows a message in the tmux status line. Desktop notifications and the terminal bell are off by default; turn them on under `[notify]`.
 
 ### tmux config that counts panes
 

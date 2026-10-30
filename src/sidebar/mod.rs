@@ -162,6 +162,7 @@ fn state_color(state: State) -> Color {
     match state {
         State::Blocked => Color::Red,
         State::Done => Color::Green,
+        State::Failed => Color::Magenta,
         State::Working => Color::Yellow,
         State::Idle => Color::Blue,
         State::Unknown => Color::DarkGray,

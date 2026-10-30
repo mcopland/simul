@@ -10,6 +10,7 @@ pub const EVENTS: &[&str] = &[
     "PermissionRequest",
     "Notification",
     "Stop",
+    "StopFailure",
     "SessionEnd",
 ];
 
@@ -45,6 +46,9 @@ pub fn parse(event: &str, payload: &Value) -> Parsed {
         "PermissionRequest" => AgentEvent::PermissionPrompt,
         "Notification" => notification(payload),
         "Stop" => AgentEvent::Stop,
+        "StopFailure" => AgentEvent::StopFailure {
+            error: str_field(payload, "error"),
+        },
         "SessionEnd" => AgentEvent::SessionEnd,
         _ => AgentEvent::Unrecognized,
     };
@@ -166,6 +170,13 @@ mod tests {
                 AgentEvent::IdlePrompt,
             ),
             ("Stop", "Stop", AgentEvent::Stop),
+            (
+                "StopFailure",
+                "StopFailure",
+                AgentEvent::StopFailure {
+                    error: Some("rate_limit".into()),
+                },
+            ),
             ("SessionEnd", "SessionEnd", AgentEvent::SessionEnd),
         ];
         for (event, file, want) in cases {

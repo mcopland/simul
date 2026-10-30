@@ -88,7 +88,7 @@ Record results here, sanitized, without work fixtures:
 
 ## Files
 
-- `claude/hooks/<Event>.json`: one payload per event, plus both Notification variants.
+- `claude/hooks/<Event>.json`: one payload per event, plus both Notification variants. `StopFailure.json` is synthetic, built from the hooks reference example, because a real API error is hard to trigger on demand.
 - `claude/session.jsonl`: the full ordered session as shim envelopes. Sequence: start, approve a Write, deny a Write with `3`, deny with `Escape`, interrupt a reply, two Bash runs, idle notification, `/exit`.
 - `claude/screens/*.txt`: `capture-pane -p` output for each signature above. `echoed-list-prompt.txt` is a submitted numbered list, which must not read as a selector.
 - `claude/sessions/*.json`: sanitized live session files, including a parked pane and its background session.

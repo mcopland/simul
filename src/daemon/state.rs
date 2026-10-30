@@ -11,6 +11,7 @@ pub enum State {
     Working,
     Blocked,
     Done,
+    Failed,
     Idle,
     Unknown,
 }
@@ -21,6 +22,7 @@ impl State {
             State::Working => "working",
             State::Blocked => "blocked",
             State::Done => "done",
+            State::Failed => "failed",
             State::Idle => "idle",
             State::Unknown => "unknown",
         }
@@ -40,6 +42,9 @@ pub struct PaneRecord {
     pub cwd: Option<String>,
     pub branch: Option<String>,
     pub pending_tool: Option<String>,
+    /// Why the last turn failed, while the pane is `failed`.
+    #[serde(default)]
+    pub error: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -76,6 +81,7 @@ impl PaneRecord {
             cwd: None,
             branch: None,
             pending_tool: None,
+            error: None,
             model: None,
             effort: None,
             transcript: None,
@@ -191,10 +197,18 @@ impl Store {
                 Some(State::Working)
             }
             AgentEvent::PermissionPrompt => Some(State::Blocked),
-            AgentEvent::IdlePrompt => (rec.state != State::Done).then_some(State::Idle),
+            AgentEvent::IdlePrompt => {
+                (!matches!(rec.state, State::Done | State::Failed)).then_some(State::Idle)
+            }
             AgentEvent::Stop => {
                 rec.pending_tool = None;
                 Some(if viewed { State::Idle } else { State::Done })
+            }
+            // Stays failed even while viewed, so the error is still showing when you look.
+            AgentEvent::StopFailure { error } => {
+                rec.pending_tool = None;
+                rec.error.clone_from(error);
+                Some(State::Failed)
             }
             AgentEvent::Unrecognized => Some(State::Unknown),
             AgentEvent::NoChange | AgentEvent::SessionEnd => None,
@@ -264,8 +278,8 @@ impl Store {
             let next = match l.status {
                 LiveStatus::Busy => State::Working,
                 LiveStatus::Waiting => State::Blocked,
-                // Only the Stop hook can tell a finished turn from an interrupted one.
-                LiveStatus::Idle if rec.state == State::Done => continue,
+                // Only the Stop hooks can tell a finished or failed turn from an interrupted one.
+                LiveStatus::Idle if matches!(rec.state, State::Done | State::Failed) => continue,
                 LiveStatus::Idle => State::Idle,
             };
             let from = Some(rec.state);
@@ -285,7 +299,7 @@ impl Store {
                     now.saturating_sub(r.last_event_ms) >= threshold_ms
                 }
                 State::Unknown => true,
-                State::Done | State::Idle => false,
+                State::Done | State::Failed | State::Idle => false,
             })
             .map(|r| (r.pane.clone(), r.agent))
             .collect()
@@ -297,7 +311,7 @@ impl Store {
             rec.idle_scrapes = 0;
         }
         let next = match (rec.state, screen) {
-            (_, Screen::Unknown) | (State::Done | State::Idle, _) => None,
+            (_, Screen::Unknown) | (State::Done | State::Failed | State::Idle, _) => None,
             (_, Screen::Blocked) => Some(State::Blocked),
             (_, Screen::Working) => Some(State::Working),
             (State::Unknown, Screen::Idle) => Some(State::Idle),
@@ -364,6 +378,9 @@ fn set_state(
     now: u64,
     from: Option<State>,
 ) -> Option<Transition> {
+    if next != State::Failed {
+        rec.error = None;
+    }
     if from == Some(next) {
         return None;
     }
@@ -404,6 +421,7 @@ mod tests {
             (AgentEvent::PermissionPrompt, State::Blocked),
             (AgentEvent::PostTool, State::Working),
             (AgentEvent::Stop, State::Done),
+            (AgentEvent::StopFailure { error: None }, State::Failed),
             (AgentEvent::Unrecognized, State::Unknown),
         ];
         for (event, want) in cases {
@@ -453,6 +471,42 @@ mod tests {
         s.apply("%1", Agent::Claude, &ev(AgentEvent::PromptSubmit), 1, true);
         s.apply("%1", Agent::Claude, &ev(AgentEvent::Stop), 2, true);
         assert_eq!(state(&s, "%1"), Some(State::Idle));
+    }
+
+    fn failure(error: &str) -> Parsed {
+        ev(AgentEvent::StopFailure {
+            error: Some(error.into()),
+        })
+    }
+
+    #[test]
+    fn failed_stays_while_viewed() {
+        let mut s = Store::default();
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::PromptSubmit), 1, true);
+        s.apply("%1", Agent::Claude, &failure("rate_limit"), 2, true);
+        assert_eq!(state(&s, "%1"), Some(State::Failed));
+        let snap = Snapshot {
+            panes: vec![pane("%1", "claude")],
+            viewed: HashSet::from(["%1".to_string()]),
+        };
+        assert!(s.reconcile(&snap, 3).is_empty());
+        assert_eq!(state(&s, "%1"), Some(State::Failed));
+    }
+
+    #[test]
+    fn failed_is_sticky_until_next_prompt() {
+        let mut s = placed(AgentEvent::PromptSubmit, 1);
+        s.apply("%1", Agent::Claude, &failure("rate_limit"), 2, false);
+        assert_eq!(s.get("%1").unwrap().error.as_deref(), Some("rate_limit"));
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::IdlePrompt), 3, false);
+        assert!(s.apply_live(&[live(LiveStatus::Idle, 4)], 5).is_empty());
+        assert_eq!(s.apply_screen("%1", Screen::Idle, 6), None);
+        assert!(s.needs_scrape(100_000, 1500).is_empty());
+        assert_eq!(state(&s, "%1"), Some(State::Failed));
+        s.apply("%1", Agent::Claude, &ev(AgentEvent::PromptSubmit), 7, false);
+        let rec = s.get("%1").unwrap();
+        assert_eq!(rec.state, State::Working);
+        assert_eq!(rec.error, None);
     }
 
     #[test]

@@ -83,6 +83,10 @@ pub enum AgentEvent {
     /// The agent reports it is waiting for input (corrects a stale `working`).
     IdlePrompt,
     Stop,
+    /// The turn ended with an API error, such as a rate limit.
+    StopFailure {
+        error: Option<String>,
+    },
     SessionEnd,
     NoChange,
     Unrecognized,
