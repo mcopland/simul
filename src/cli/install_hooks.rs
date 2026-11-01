@@ -209,7 +209,7 @@ pub fn kiro_managed(file: &Value) -> Vec<(String, String)> {
 
 /// Writes simul's Kiro hook file, replacing an earlier one but never a file with other hooks.
 pub fn install_kiro(path: &Path, exe: &Path) -> Result<PathBuf> {
-    if path.exists() {
+    if exists(path)? {
         let old = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
         let old: Value = serde_json::from_str(&old).with_context(|| {
@@ -292,7 +292,7 @@ pub fn add_exclude(file: &Path, entry: &str) -> Result<bool> {
 
 /// Merges hooks into the settings file, writing through a symlink rather than replacing it.
 pub fn install(path: &Path, exe: &Path) -> Result<PathBuf> {
-    let settings = if path.exists() {
+    let settings = if exists(path)? {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
         serde_json::from_str(&text)
@@ -307,10 +307,26 @@ pub fn install(path: &Path, exe: &Path) -> Result<PathBuf> {
     replace_file(path, &text, true)
 }
 
+/// Whether `path` exists, following symlinks. A symlink whose target is missing is an error:
+/// treating it as absent would replace the link, and the settings behind it, with a new file.
+fn exists(path: &Path) -> Result<bool> {
+    let is_link = std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
+    if is_link && !path.exists() {
+        let target = std::fs::read_link(path)
+            .with_context(|| format!("failed to read link {}", path.display()))?;
+        bail!(
+            "{} links to {}, which does not exist; restore it or remove the link",
+            path.display(),
+            target.display()
+        );
+    }
+    Ok(path.exists())
+}
+
 /// Atomically replaces the file behind `path` (following symlinks) with `text`, optionally keeping
 /// the old content as `<name>.simul-bak`. Returns the file actually written.
 fn replace_file(path: &Path, text: &str, backup: bool) -> Result<PathBuf> {
-    let real = if path.exists() {
+    let real = if exists(path)? {
         let real = path
             .canonicalize()
             .with_context(|| format!("failed to resolve {}", path.display()))?;
@@ -479,6 +495,29 @@ mod tests {
         let backup = dir.path().join("dotfiles-settings.json.simul-bak");
         let b: Value = serde_json::from_str(&std::fs::read_to_string(backup).unwrap()).unwrap();
         assert_eq!(b, user_settings());
+    }
+
+    #[test]
+    fn install_refuses_a_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("settings.json");
+        std::os::unix::fs::symlink(dir.path().join("gone.json"), &link).unwrap();
+        let err = format!("{:#}", install(&link, Path::new(EXE)).unwrap_err());
+        assert!(
+            err.contains("gone.json") && err.contains("does not exist"),
+            "{err}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link is left alone"
+        );
+        let kiro = dir.path().join("simul.json");
+        std::os::unix::fs::symlink(dir.path().join("gone-kiro.json"), &kiro).unwrap();
+        assert!(install_kiro(&kiro, Path::new(EXE)).is_err());
+        assert!(!dir.path().join("gone.json").exists());
     }
 
     fn read_json(path: &Path) -> Value {
