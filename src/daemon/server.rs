@@ -119,6 +119,20 @@ async fn serve(stream: UnixStream, tx: mpsc::Sender<Cmd>) -> Result<()> {
                 send(&tx, Cmd::Refresh).await?;
                 write_json(&mut w, &Ack { ok: true }).await?;
             }
+            Request::Collapse { session, collapsed } => {
+                let (reply, rx) = oneshot::channel();
+                send(
+                    &tx,
+                    Cmd::Collapse {
+                        session,
+                        collapsed,
+                        reply,
+                    },
+                )
+                .await?;
+                let ok = rx.await.context("daemon dropped collapse request")?;
+                write_json(&mut w, &Ack { ok }).await?;
+            }
         }
     }
     Ok(())

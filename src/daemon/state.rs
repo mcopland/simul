@@ -123,6 +123,8 @@ pub struct PaneInfo {
     pub window_panes: u32,
     /// Whether this is the active pane of its window.
     pub active: bool,
+    /// Whether the pane's session carries `@simul-collapsed`, folding it in the sidebar.
+    pub session_collapsed: bool,
     pub window_name: String,
 }
 
@@ -625,6 +627,7 @@ mod tests {
             is_sidebar: false,
             window_panes: 1,
             active: true,
+            session_collapsed: false,
             window_name: "api".into(),
         }
     }

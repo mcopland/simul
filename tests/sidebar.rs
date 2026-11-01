@@ -340,6 +340,76 @@ fn selected_row_is_bold_without_a_block() {
     );
 }
 
+/// The `@simul-collapsed` option of session `session`, empty when unset.
+fn collapsed_option(h: &Harness, session: &str) -> String {
+    h.tmux(&[
+        "show-options",
+        "-qv",
+        "-t",
+        &format!("={session}:"),
+        "@simul-collapsed",
+    ])
+}
+
+/// The sidebar in the first window of `session`.
+fn sidebar_in(h: &Harness, session: &str) -> String {
+    let window = h.tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        &format!("={session}:"),
+        "#{window_id}",
+    ]);
+    sidebars(h)
+        .into_iter()
+        .find(|s| s.1 == window)
+        .unwrap_or_else(|| panic!("no sidebar in {session}"))
+        .0
+}
+
+#[test]
+fn space_folds_a_session_in_every_sidebar_and_it_persists() {
+    let mut h = Harness::new();
+    h.tmux(&["new-session", "-d", "-s", "u", "sleep 600"]);
+    h.start_daemon();
+    toggle(&h);
+    eventually("a sidebar in each session", || sidebars(&h).len() == 2);
+    let folded = "u \u{25b8}";
+    let shows = |h: &Harness, session: &str, line: &str| {
+        let screen = h.tmux(&["capture-pane", "-p", "-t", &sidebar_in(h, session)]);
+        screen.lines().any(|l| l.trim_end() == line)
+    };
+    eventually("u listed", || shows(&h, "t", "u"));
+    // Unfocused, u's sidebar has its own window's pane selected, so Space folds u.
+    h.tmux(&["send-keys", "-t", &sidebar_in(&h, "u"), "Space"]);
+    if !poll(Duration::from_secs(5), || shows(&h, "t", folded)) {
+        let screen = |s| h.tmux(&["capture-pane", "-p", "-t", &sidebar_in(&h, s)]);
+        panic!(
+            "u never folded in t's sidebar\n-- t --\n{}\n-- u --\n{}",
+            screen("t"),
+            screen("u")
+        );
+    }
+    assert!(shows(&h, "u", folded), "and in u's own");
+    assert_eq!(collapsed_option(&h, "u"), "1");
+    assert_eq!(collapsed_option(&h, "t"), "");
+
+    h.stop_daemon();
+    h.start_daemon();
+    toggle(&h);
+    eventually("sidebars removed", || sidebars(&h).is_empty());
+    toggle(&h);
+    eventually("sidebars back", || sidebars(&h).len() == 2);
+    eventually("still folded after a daemon restart", || {
+        shows(&h, "t", folded)
+    });
+
+    // Folded away, u's sidebar selects u's header, so Space unfolds it.
+    h.tmux(&["send-keys", "-t", &sidebar_in(&h, "u"), "Space"]);
+    eventually("u unfolded", || shows(&h, "t", "u"));
+    assert_eq!(collapsed_option(&h, "u"), "");
+}
+
 #[test]
 fn session_headers_are_gold_like_status_left() {
     let mut h = Harness::new();

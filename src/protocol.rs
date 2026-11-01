@@ -18,6 +18,11 @@ pub enum Request {
     Toggle,
     /// Reasserts sidebar widths after a client resize.
     Resized,
+    /// Folds or unfolds a session in every sidebar; replies with `Ack`.
+    Collapse {
+        session: String,
+        collapsed: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -28,6 +33,9 @@ pub struct Status {
     /// Every tmux window, agent or not; absent from daemons before 0.2.
     #[serde(default)]
     pub windows: Vec<WindowInfo>,
+    /// Sessions folded in the sidebar, by name; absent from daemons before 0.5.
+    #[serde(default)]
+    pub collapsed: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +103,7 @@ mod tests {
         let s: Status =
             serde_json::from_value(json!({"now_ms": 1, "sidebar": false, "panes": []})).unwrap();
         assert!(s.windows.is_empty());
+        assert!(s.collapsed.is_empty());
         let w: WindowInfo =
             serde_json::from_value(json!({"id": "@1", "session": "s", "index": 1, "name": "n"}))
                 .unwrap();
@@ -119,5 +128,13 @@ mod tests {
         );
         let back: Request = serde_json::from_value(v).unwrap();
         assert_eq!(back, hook);
+        assert_eq!(
+            serde_json::to_value(Request::Collapse {
+                session: "me".into(),
+                collapsed: true
+            })
+            .unwrap(),
+            json!({"type": "collapse", "session": "me", "collapsed": true})
+        );
     }
 }

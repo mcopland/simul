@@ -4,7 +4,7 @@ pub mod scan;
 pub mod server;
 pub mod state;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -29,6 +29,9 @@ const GIT_REFRESH: Duration = Duration::from_secs(5);
 const HOOK_INDEX: u32 = 7463;
 /// Global tmux option holding the status-format[0] hidden while the sidebar is on.
 const SAVED_STATUS: &str = "@simul-status-format";
+/// Session option marking a session folded in the sidebar. It lives in tmux so it survives
+/// daemon restarts, goes with its session, and follows renames.
+const COLLAPSED: &str = "@simul-collapsed";
 /// The right-hand part of tmux's default status-format[0]: status-right alone, without the
 /// session name and window list the sidebar repeats.
 const RIGHT_ONLY_STATUS: &str = "#[align=right range=right #{E:status-right-style}]#[push-default]#{T;=/#{status-right-length}:status-right}#[pop-default]#[norange default]";
@@ -48,6 +51,11 @@ pub enum Cmd {
     Refresh,
     Toggle(oneshot::Sender<bool>),
     Resized,
+    Collapse {
+        session: String,
+        collapsed: bool,
+        reply: oneshot::Sender<bool>,
+    },
     TmuxNotification {
         name: String,
     },
@@ -86,6 +94,8 @@ struct Daemon {
     sidebar_on: bool,
     /// Windows seen at the last reconcile; only windows new since then get a sidebar.
     known_windows: HashSet<String>,
+    /// Sessions folded in the sidebar, as read from `COLLAPSED` at the last reconcile.
+    collapsed: BTreeSet<String>,
     notify_gate: notify::Gate,
     /// Git status by working directory, with when it was read; `None` outside a repo.
     git: HashMap<String, (Instant, Option<GitStatus>)>,
@@ -129,6 +139,7 @@ pub async fn run(opts: Options) -> Result<()> {
         git_inflight: HashSet::new(),
         sidebar_on: false,
         known_windows: HashSet::new(),
+        collapsed: BTreeSet::new(),
         notify_gate: notify::Gate::default(),
         git: HashMap::new(),
         turn_inflight: HashSet::new(),
@@ -222,6 +233,20 @@ impl Daemon {
                 let _ = reply.send(on);
             }
             Cmd::Resized => self.reassert_widths().await,
+            Cmd::Collapse {
+                session,
+                collapsed,
+                reply,
+            } => {
+                let ok = match self.set_collapsed(&session, collapsed).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        log!("failed to set {COLLAPSED} on session {session}: {e:#}");
+                        false
+                    }
+                };
+                let _ = reply.send(ok);
+            }
             Cmd::Shutdown => {}
         }
     }
@@ -232,6 +257,7 @@ impl Daemon {
             sidebar: self.sidebar_on,
             panes: self.store.records(),
             windows: self.windows_with_git(),
+            collapsed: self.collapsed.iter().cloned().collect(),
         }
     }
 
@@ -423,6 +449,12 @@ impl Daemon {
         }
         let transitions = self.store.reconcile(&snap, now);
         self.windows = tmux::windows(&snap);
+        self.collapsed = snap
+            .panes
+            .iter()
+            .filter(|p| p.session_collapsed)
+            .map(|p| p.session.clone())
+            .collect();
         self.snapshot = snap;
         self.refresh_git();
         self.maintain_sidebars().await;
@@ -590,6 +622,27 @@ impl Daemon {
         self.publish();
         self.schedule_reconcile();
         self.sidebar_on
+    }
+
+    /// Folds or unfolds `session` in every sidebar. tmux sends no notification for an option
+    /// change, so this publishes the change itself.
+    async fn set_collapsed(&mut self, session: &str, collapsed: bool) -> Result<()> {
+        // set-option takes a pane target; the trailing `:` makes it name a session (its current
+        // window and pane), and `=` makes tmux match the name exactly, even one like "3".
+        let target = format!("={session}:");
+        let args: &[&str] = if collapsed {
+            &["set-option", "-t", &target, COLLAPSED, "1"]
+        } else {
+            &["set-option", "-uq", "-t", &target, COLLAPSED]
+        };
+        self.opts.tmux.run_async(args).await?;
+        if collapsed {
+            self.collapsed.insert(session.to_owned());
+        } else {
+            self.collapsed.remove(session);
+        }
+        self.publish();
+        Ok(())
     }
 
     /// The status-format[0] that hide_status replaced. It lives in tmux so a daemon that

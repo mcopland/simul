@@ -1,5 +1,6 @@
 pub mod model;
 
+use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -14,7 +15,7 @@ use ratatui::widgets::Paragraph;
 use crate::client;
 use crate::daemon::state::State;
 use crate::paths::{self, env_var};
-use crate::protocol::{Status, now_ms};
+use crate::protocol::{Ack, Request, Status, now_ms};
 use crate::tmux::Tmux;
 use model::{Action, App, Line};
 
@@ -33,7 +34,8 @@ pub fn run() -> Result<()> {
         .context("the sidebar must run inside tmux")?;
     let own_pane = env_var("TMUX_PANE");
     let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || subscribe_forever(&socket, &tx));
+    let subscribe_socket = socket.clone();
+    std::thread::spawn(move || subscribe_forever(&subscribe_socket, &tx));
 
     let mut terminal = ratatui::init();
     crossterm::execute!(
@@ -42,7 +44,7 @@ pub fn run() -> Result<()> {
         crossterm::event::EnableFocusChange
     )
     .context("failed to enable mouse capture and focus reporting")?;
-    let result = ui_loop(&mut terminal, &rx, &tmux, own_pane.as_deref());
+    let result = ui_loop(&mut terminal, &rx, &tmux, &socket, own_pane.as_deref());
     // Restoring the terminal is best effort; the pane is usually being closed anyway.
     let _ = crossterm::execute!(
         std::io::stdout(),
@@ -85,6 +87,7 @@ fn ui_loop(
     terminal: &mut ratatui::DefaultTerminal,
     rx: &mpsc::Receiver<Update>,
     tmux: &Tmux,
+    socket: &Path,
     own_pane: Option<&str>,
 ) -> Result<()> {
     let mut view = View {
@@ -143,12 +146,22 @@ fn ui_loop(
             }
             _ => Action::None,
         };
-        if let Action::Jump(target) = action
-            && let Err(e) = jump(tmux, &target)
-        {
+        let result = match action {
+            Action::None => Ok(()),
+            Action::Jump(target) => jump(tmux, &target),
+            Action::Collapse { session, collapsed } => collapse(socket, session, collapsed),
+        };
+        if let Err(e) = result {
             view.error = Some(format!("{e:#}"));
         }
     }
+}
+
+/// Asks the daemon to fold or unfold `session`; every sidebar sees it in the next status.
+fn collapse(socket: &Path, session: String, collapsed: bool) -> Result<()> {
+    let ack: Ack = client::request(socket, &Request::Collapse { session, collapsed })?;
+    anyhow::ensure!(ack.ok, "the daemon could not set @simul-collapsed");
+    Ok(())
 }
 
 /// `target` is a pane or a window; for a window, its active pane is selected.
@@ -202,10 +215,37 @@ fn render(f: &mut Frame, view: &mut View) {
         .iter()
         .enumerate()
         .map(|(i, line)| match line {
-            Line::Session { name } => TextLine::from(Span::styled(
-                model::truncate(name, usize::from(list.width)),
-                session,
-            )),
+            Line::Session { name, folded, .. } => {
+                let style = if selected_line == Some(i) {
+                    session.add_modifier(Modifier::BOLD)
+                } else {
+                    session
+                };
+                let Some(counts) = folded else {
+                    return TextLine::from(Span::styled(
+                        model::truncate(name, usize::from(list.width)),
+                        style,
+                    ));
+                };
+                let tail: Vec<Span> = counts
+                    .iter()
+                    .map(|&(state, n)| {
+                        Span::styled(
+                            format!(" {}{n}", model::symbol(state)),
+                            Style::new().fg(state_color(state)),
+                        )
+                    })
+                    .collect();
+                let tail_width: usize = tail.iter().map(|s| s.content.chars().count()).sum();
+                // Room for the name before " ▸" and the counts.
+                let room = usize::from(list.width).saturating_sub(tail_width + 2);
+                let mut spans = vec![Span::styled(
+                    format!("{} \u{25b8}", model::truncate(name, room)),
+                    style,
+                )];
+                spans.extend(tail);
+                TextLine::from(spans)
+            }
             // Like tmux's current window, the sidebar's own window stays bold.
             Line::Window { id, label } => TextLine::from(Span::styled(
                 format!(
