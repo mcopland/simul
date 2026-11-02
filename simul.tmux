@@ -31,9 +31,19 @@ main() {
 		tmux display-message "simul: needs tmux 3.3 or newer (found $(tmux -V))"
 		return 0
 	fi
-	local bin socket install_err=""
+	local bin socket override install_err=""
+	# @simul-bin points at another build, such as a dev checkout's, for testing; unset it and
+	# reload tmux to go back to the release.
+	override=$(tmux show-option -gqv @simul-bin)
+	override=${override/#\~/$HOME}
+	if [ -n "$override" ]; then
+		if [ ! -x "$override" ]; then
+			tmux display-message "simul: @simul-bin is not an executable: $override"
+			return 0
+		fi
+		bin=$override
 	# A local cargo build means a dev checkout; leave it alone.
-	if [ ! -x "$CURRENT_DIR/target/release/simul" ]; then
+	elif [ ! -x "$CURRENT_DIR/target/release/simul" ]; then
 		# Only a failed install has an error worth showing; on success, stderr is
 		# just noise such as tar warnings.
 		if ! install_err=$("$CURRENT_DIR/scripts/install-binary.sh" 2>&1 >/dev/null); then
@@ -42,7 +52,7 @@ main() {
 			install_err=""
 		fi
 	fi
-	if ! bin=$(find_binary); then
+	if [ -z "$bin" ] && ! bin=$(find_binary); then
 		tmux display-message "simul: binary not found${install_err:+ ($install_err)}; run: cargo build --release --manifest-path '$CURRENT_DIR/Cargo.toml'"
 		return 0
 	fi
@@ -50,7 +60,8 @@ main() {
 		tmux display-message "$install_err; using $bin"
 	fi
 	socket=$(tmux display-message -p '#{socket_path}')
-	tmux run-shell -b "'$bin' daemon --tmux-socket '$socket' >/dev/null 2>&1"
+	# --replace hands over from a daemon of another build, such as the one before an update.
+	tmux run-shell -b "'$bin' daemon --replace --tmux-socket '$socket' >/dev/null 2>&1"
 
 	local key
 	key=$(tmux show-option -gqv @simul-key)

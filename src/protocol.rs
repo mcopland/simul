@@ -23,6 +23,41 @@ pub enum Request {
         session: String,
         collapsed: bool,
     },
+    /// Replies with the daemon's `Identity`, so a newer build can tell it needs replacing.
+    Identify,
+    /// Replies with `Ack`, then the daemon exits so another can take its socket.
+    Shutdown,
+}
+
+/// Which build a process runs: its version, its binary's resolved path, and that file's
+/// modification time when the process started, so a rebuild in place counts as another build.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Identity {
+    pub version: String,
+    pub exe: String,
+    /// Seconds since the epoch; 0 if unknown.
+    pub modified: u64,
+}
+
+impl Identity {
+    /// This build, running from `exe`. Call it at startup: later, the file may be a newer build.
+    pub fn of(exe: &std::path::Path) -> Identity {
+        let modified = std::fs::metadata(exe)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs());
+        Identity {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            exe: exe.to_string_lossy().into_owned(),
+            modified,
+        }
+    }
+
+    /// As stored in a sidebar pane's `@simul-sidebar-exe` option.
+    pub fn tag(&self) -> String {
+        format!("{} {} {}", self.version, self.modified, self.exe)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -8,7 +8,7 @@ use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-use super::Cmd;
+use super::{Cmd, Exit};
 use crate::log;
 use crate::protocol::{Ack, Request, Toggled};
 
@@ -132,6 +132,20 @@ async fn serve(stream: UnixStream, tx: mpsc::Sender<Cmd>) -> Result<()> {
                 .await?;
                 let ok = rx.await.context("daemon dropped collapse request")?;
                 write_json(&mut w, &Ack { ok }).await?;
+            }
+            Request::Identify => {
+                let (reply, rx) = oneshot::channel();
+                send(&tx, Cmd::Identify(reply)).await?;
+                write_json(
+                    &mut w,
+                    &rx.await.context("daemon dropped identify request")?,
+                )
+                .await?;
+            }
+            Request::Shutdown => {
+                // Reply first: once the daemon gets Shutdown, it exits without serving more.
+                write_json(&mut w, &Ack { ok: true }).await?;
+                send(&tx, Cmd::Shutdown(Exit::Replaced)).await?;
             }
         }
     }

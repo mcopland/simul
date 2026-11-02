@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use simul::protocol::{Ack, Request, Toggled};
+use simul::protocol::{Ack, Identity, Request, Toggled};
 use simul::{cli, client, config, daemon, paths, tmux::Tmux};
 
 #[derive(Parser)]
@@ -44,6 +44,10 @@ enum Command {
         /// tmux server socket; defaults to the one in $TMUX.
         #[arg(long)]
         tmux_socket: Option<PathBuf>,
+        /// Take over from a running daemon of another version or binary (the plugin passes
+        /// this; hooks don't, so an old hook path never displaces the plugin's build).
+        #[arg(long)]
+        replace: bool,
     },
     /// Called by tmux hooks.
     #[command(hide = true)]
@@ -85,7 +89,10 @@ fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Sidebar => simul::sidebar::run(),
-        Command::Daemon { tmux_socket } => run_daemon(tmux_socket),
+        Command::Daemon {
+            tmux_socket,
+            replace,
+        } => run_daemon(tmux_socket, replace),
         Command::Internal { what } => {
             let req = match what {
                 Internal::Refresh => Request::Refresh,
@@ -97,7 +104,7 @@ fn run(cli: Cli) -> Result<()> {
     }
 }
 
-fn run_daemon(tmux_socket: Option<PathBuf>) -> Result<()> {
+fn run_daemon(tmux_socket: Option<PathBuf>, replace: bool) -> Result<()> {
     let tmux_socket = tmux_socket
         .or_else(paths::current_tmux_socket)
         .context("daemon needs a tmux server: pass --tmux-socket or run inside tmux")?;
@@ -107,10 +114,18 @@ fn run_daemon(tmux_socket: Option<PathBuf>) -> Result<()> {
         paths::ensure_private_dir(dir)?;
     }
     simul::log::init(&log_path)?;
+    let exe = std::env::current_exe().context("failed to locate the simul binary")?;
+    // Hooks often run simul through a symlink; resolve it so the plugin's binary is found.
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    let identity = Identity::of(&exe);
+    if replace {
+        daemon::update::replace(&socket, &identity)?;
+    }
     let opts = daemon::Options {
         socket,
         tmux: Tmux::new(tmux_socket),
-        exe: std::env::current_exe().context("failed to locate the simul binary")?,
+        exe,
+        identity,
         config: config::load()?,
     };
     tokio::runtime::Builder::new_current_thread()

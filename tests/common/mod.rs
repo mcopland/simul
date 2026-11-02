@@ -23,7 +23,8 @@ pub struct Harness {
     pub dir: tempfile::TempDir,
     pub tmux_sock: PathBuf,
     pub simul_sock: PathBuf,
-    daemon: Option<Child>,
+    /// Every daemon the test started, in order; some may have exited or been replaced.
+    daemons: Vec<Child>,
 }
 
 /// Unix socket paths are limited to ~104 bytes, and macOS's default temp dir is long.
@@ -55,7 +56,7 @@ impl Harness {
             tmux_sock: dir.path().join("t.sock"),
             simul_sock: dir.path().join("s.sock"),
             dir,
-            daemon: None,
+            daemons: Vec::new(),
         };
         // Outside any repo, so the sidebar's pane rows don't depend on this checkout's state.
         let cwd = h.dir.path().to_str().unwrap().to_owned();
@@ -97,7 +98,12 @@ impl Harness {
     }
 
     pub fn simul(&self) -> Command {
-        let mut c = Command::new(BIN);
+        self.simul_at(Path::new(BIN))
+    }
+
+    /// Like `simul`, running the binary at `exe`.
+    pub fn simul_at(&self, exe: &Path) -> Command {
+        let mut c = Command::new(exe);
         c.env("SIMUL_SOCKET", &self.simul_sock)
             .env("XDG_CONFIG_HOME", self.dir.path().join("config"))
             .env("CLAUDE_CONFIG_DIR", self.dir.path().join("claude-config"))
@@ -108,22 +114,47 @@ impl Harness {
     }
 
     pub fn start_daemon(&mut self) {
-        let child = self
-            .simul()
-            .args(["daemon", "--tmux-socket"])
+        let cmd = self.simul();
+        self.start_daemon_with(cmd, &[]);
+    }
+
+    /// Starts `cmd` (from `simul_at`) as the daemon with `args` after `daemon`, and waits for
+    /// its socket. A daemon it replaces exits on its own.
+    pub fn start_daemon_with(&mut self, mut cmd: Command, args: &[&str]) {
+        let child = cmd
+            .arg("daemon")
+            .args(args)
+            .arg("--tmux-socket")
             .arg(&self.tmux_sock)
             .stdin(Stdio::null())
             .spawn()
             .unwrap();
-        self.daemon = Some(child);
+        self.daemons.push(child);
         eventually("daemon socket", || {
             UnixStream::connect(&self.simul_sock).is_ok()
         });
     }
 
+    /// The running daemon's reply to `identify`: its `version` and `exe`.
+    pub fn identify(&self) -> Option<Value> {
+        let mut stream = UnixStream::connect(&self.simul_sock).ok()?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream.write_all(b"{\"type\":\"identify\"}\n").ok()?;
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(stream), &mut line).ok()?;
+        serde_json::from_str(&line).ok()
+    }
+
+    /// The daemon's log, beside its socket.
+    pub fn daemon_log(&self) -> String {
+        std::fs::read_to_string(self.simul_sock.with_extension("log")).unwrap_or_default()
+    }
+
     pub fn stop_daemon(&mut self) {
-        if let Some(mut d) = self.daemon.take() {
-            // Already-exited daemons are fine; the test only needs it gone.
+        for mut d in self.daemons.drain(..) {
+            // Already-exited daemons are fine; the test only needs them gone.
             let _ = d.kill();
             let _ = d.wait();
         }

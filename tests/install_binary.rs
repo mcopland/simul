@@ -29,9 +29,11 @@ impl Plugin {
                  case \"$1\" in\n\
                  -V) echo 'tmux 3.5a' ;;\n\
                  display-message) [ \"$2\" = -p ] && echo /fake/socket ;;\n\
+                 show-option) [ \"$3\" = @simul-bin ] && cat '{}' 2>/dev/null ;;\n\
                  esac\n\
                  exit 0\n",
-                dir.path().join("tmux.log").display()
+                dir.path().join("tmux.log").display(),
+                dir.path().join("simul-bin").display()
             ),
         );
         Plugin { dir }
@@ -302,7 +304,58 @@ fn plugin_installs_binary_and_binds_key() {
             .any(|l| l.starts_with("bind-key a") && l.contains(&bin)),
         "{log}"
     );
+    assert!(
+        log.lines().any(|l| l.starts_with("run-shell -b")
+            && l.contains(&format!("'{bin}' daemon --replace --tmux-socket"))),
+        "the daemon takes over from another build: {log}"
+    );
     assert!(messages(&log).is_empty(), "unexpected messages: {log}");
+}
+
+#[test]
+fn plugin_uses_the_simul_bin_override_without_downloading() {
+    let p = Plugin::new();
+    let dev = p.dir.path().join("dev/simul");
+    fs::create_dir_all(dev.parent().unwrap()).unwrap();
+    write_stub(&dev, "0.0.0-dev");
+    fs::write(
+        p.dir.path().join("simul-bin"),
+        format!("{}\n", dev.display()),
+    )
+    .unwrap();
+
+    let log = p.load_plugin();
+
+    assert!(!p.bin().exists(), "an override must not download");
+    assert!(messages(&log).is_empty(), "unexpected messages: {log}");
+    let dev = dev.display().to_string();
+    assert!(
+        log.lines()
+            .any(|l| l.starts_with("bind-key a") && l.contains(&dev)),
+        "{log}"
+    );
+    assert!(
+        log.lines()
+            .any(|l| l.starts_with("run-shell -b") && l.contains(&format!("'{dev}' daemon"))),
+        "{log}"
+    );
+}
+
+#[test]
+fn plugin_reports_a_simul_bin_override_that_cannot_run() {
+    let p = Plugin::new();
+    fs::write(p.dir.path().join("simul-bin"), "/no/such/simul\n").unwrap();
+
+    let log = p.load_plugin();
+
+    let msgs = messages(&log);
+    assert_eq!(msgs.len(), 1, "{log}");
+    assert!(
+        msgs[0].contains("@simul-bin") && msgs[0].contains("/no/such/simul"),
+        "{log}"
+    );
+    assert!(!log.lines().any(|l| l.starts_with("bind-key")), "{log}");
+    assert!(!p.bin().exists(), "{log}");
 }
 
 #[test]

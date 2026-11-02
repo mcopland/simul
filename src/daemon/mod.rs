@@ -3,6 +3,7 @@ pub mod notify;
 pub mod scan;
 pub mod server;
 pub mod state;
+pub mod update;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
@@ -17,7 +18,7 @@ use crate::config::Config;
 use crate::hook::{Agent, AgentEvent, Envelope};
 use crate::kiro_sessions;
 use crate::log;
-use crate::protocol::{GitStatus, Status, WindowInfo, now_ms};
+use crate::protocol::{GitStatus, Identity, Status, WindowInfo, now_ms};
 use crate::tmux::{self, Tmux, shell_quote, tmux_double_quote};
 use state::{Snapshot, Store, Transition};
 
@@ -32,6 +33,9 @@ const SAVED_STATUS: &str = "@simul-status-format";
 /// Session option marking a session folded in the sidebar. It lives in tmux so it survives
 /// daemon restarts, goes with its session, and follows renames.
 const COLLAPSED: &str = "@simul-collapsed";
+/// Pane option naming the build a sidebar runs (see `Identity::tag`), so a daemon that takes
+/// over can restart sidebars still running an older one.
+const SIDEBAR_EXE: &str = "@simul-sidebar-exe";
 /// The right-hand part of tmux's default status-format[0]: status-right alone, without the
 /// session name and window list the sidebar repeats.
 const RIGHT_ONLY_STATUS: &str = "#[align=right range=right #{E:status-right-style}]#[push-default]#{T;=/#{status-right-length}:status-right}#[pop-default]#[norange default]";
@@ -69,13 +73,32 @@ pub enum Cmd {
         pane: String,
         turn: Option<Turn>,
     },
-    Shutdown,
+    Identify(oneshot::Sender<Identity>),
+    /// The plugin checkout's VERSION file changed.
+    PluginChanged,
+    /// The installer for `version` finished.
+    Installed {
+        version: String,
+        result: Result<(), String>,
+    },
+    Shutdown(Exit),
+}
+
+/// Why the daemon stops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exit {
+    TmuxGone,
+    /// Another build asked for the socket (see `update::replace`).
+    Replaced,
 }
 
 pub struct Options {
     pub socket: PathBuf,
     pub tmux: Tmux,
+    /// This binary, with symlinks resolved, so builds compare by where they really live.
     pub exe: PathBuf,
+    /// This build, as read at startup (see `Identity::of`).
+    pub identity: Identity,
     pub config: Config,
 }
 
@@ -107,6 +130,12 @@ struct Daemon {
     kiro_sessions_dir: Option<PathBuf>,
     /// Last failure reading either sessions dir, so a persistent one is logged once.
     live_error: Option<String>,
+    /// The plugin checkout this binary was installed into; `None` for other builds.
+    plugin: Option<PathBuf>,
+    /// The checkout's VERSION when last read, so repeated change events act once.
+    plugin_version: Option<String>,
+    /// An installer is running.
+    updating: bool,
 }
 
 pub async fn run(opts: Options) -> Result<()> {
@@ -124,6 +153,20 @@ pub async fn run(opts: Options) -> Result<()> {
     tokio::spawn(control_mode::run(opts.tmux.clone(), tx.clone()));
     tokio::spawn(ticker(tx.clone()));
     tokio::spawn(ignore_sighup());
+    let plugin = update::plugin_dir(&opts.exe);
+    // Lives until the daemon exits.
+    let _watcher = plugin
+        .as_deref()
+        .and_then(|p| match update::watch(p, tx.clone()) {
+            Ok(w) => {
+                log!("watching {} for updates", p.join("VERSION").display());
+                Some(w)
+            }
+            Err(e) => {
+                log!("{e:#}");
+                None
+            }
+        });
 
     let (updates, _) = broadcast::channel(64);
     let mut d = Daemon {
@@ -146,17 +189,27 @@ pub async fn run(opts: Options) -> Result<()> {
         sessions_dir: claude_sessions::sessions_dir(crate::paths::env_var),
         kiro_sessions_dir: kiro_sessions::sessions_dir(crate::paths::env_var),
         live_error: None,
+        plugin_version: plugin.as_deref().and_then(update::wanted_version),
+        plugin,
+        updating: false,
     };
     d.install_tmux_hooks().await;
     d.reconcile().await;
-    while let Some(cmd) = rx.recv().await {
-        if matches!(cmd, Cmd::Shutdown) {
-            break;
+    let exit = loop {
+        match rx.recv().await {
+            Some(Cmd::Shutdown(why)) => break why,
+            Some(cmd) => d.handle(cmd).await,
+            None => break Exit::TmuxGone,
         }
-        d.handle(cmd).await;
+    };
+    match exit {
+        Exit::TmuxGone => {
+            log!("daemon exiting: tmux server gone");
+            server::remove_socket(&d.opts.socket);
+        }
+        // The socket is the new daemon's to take; removing it could race its bind.
+        Exit::Replaced => log!("daemon exiting: replaced by another build"),
     }
-    log!("daemon exiting: tmux server gone");
-    server::remove_socket(&d.opts.socket);
     Ok(())
 }
 
@@ -247,8 +300,50 @@ impl Daemon {
                 };
                 let _ = reply.send(ok);
             }
-            Cmd::Shutdown => {}
+            Cmd::Identify(reply) => {
+                let _ = reply.send(self.opts.identity.clone());
+            }
+            Cmd::PluginChanged => self.on_plugin_changed(),
+            Cmd::Installed { version, result } => self.on_installed(&version, result),
+            Cmd::Shutdown(_) => {}
         }
+    }
+
+    /// Installs the release the plugin checkout now names, once per VERSION change.
+    fn on_plugin_changed(&mut self) {
+        let Some(plugin) = self.plugin.clone() else {
+            return;
+        };
+        let wanted = update::wanted_version(&plugin);
+        if self.updating || wanted.is_none() || wanted == self.plugin_version {
+            return;
+        }
+        self.plugin_version.clone_from(&wanted);
+        let Some(version) = wanted.filter(|v| v != env!("CARGO_PKG_VERSION")) else {
+            return;
+        };
+        log!("plugin updated to {version}; installing it");
+        self.updating = true;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = update::install(&plugin).await.map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Cmd::Installed { version, result }).await;
+        });
+    }
+
+    /// Re-executes into the freshly installed binary, which takes over from tmux's state.
+    fn on_installed(&mut self, version: &str, result: Result<(), String>) {
+        self.updating = false;
+        if let Err(e) = result {
+            log!("failed to install {version}: {e}");
+            return;
+        }
+        log!(
+            "installed {version}; restarting as {}",
+            self.opts.exe.display()
+        );
+        let e = update::exec(&self.opts.exe);
+        log!("{e:#}");
     }
 
     fn status(&self) -> Status {
@@ -446,6 +541,7 @@ impl Daemon {
             if !added.is_empty() {
                 log!("recovered agent panes: {}", added.join(" "));
             }
+            self.restart_stale_sidebars().await;
         }
         let transitions = self.store.reconcile(&snap, now);
         self.windows = tmux::windows(&snap);
@@ -719,13 +815,62 @@ impl Daemon {
         }
     }
 
-    async fn add_sidebar(&self, window: &str) {
-        let width = self.opts.config.sidebar.width.to_string();
-        let cmd = format!(
+    /// The shell command a sidebar pane runs.
+    fn sidebar_command(&self) -> String {
+        format!(
             "SIMUL_SOCKET={} exec {} sidebar",
             shell_quote(&self.opts.socket.to_string_lossy()),
             shell_quote(&self.opts.exe.to_string_lossy()),
-        );
+        )
+    }
+
+    async fn tag_sidebar_build(&self, pane: &str) {
+        let tag = self.opts.identity.tag();
+        let set = ["set-option", "-p", "-t", pane, SIDEBAR_EXE, &tag];
+        if let Err(e) = self.opts.tmux.run_async(&set).await {
+            log!("failed to tag sidebar {pane} with its build: {e:#}");
+        }
+    }
+
+    /// Restarts in place each sidebar left by another build, such as the daemon this one
+    /// replaced, so the sidebar runs this build's code too.
+    async fn restart_stale_sidebars(&self) {
+        let format = format!("#{{pane_id}}\t#{{@simul-sidebar}}\t#{{{SIDEBAR_EXE}}}");
+        let out = match self
+            .opts
+            .tmux
+            .run_async(&["list-panes", "-a", "-F", &format])
+            .await
+        {
+            Ok(out) => out,
+            Err(e) => {
+                log!("failed to list sidebars: {e:#}");
+                return;
+            }
+        };
+        let tag = self.opts.identity.tag();
+        let mut seen = HashSet::new();
+        let cmd = self.sidebar_command();
+        for line in out.lines() {
+            let mut f = line.splitn(3, '\t');
+            let (Some(pane), Some("1"), build) = (f.next(), f.next(), f.next()) else {
+                continue;
+            };
+            // A linked window lists its panes once per session.
+            if build == Some(tag.as_str()) || !seen.insert(pane) {
+                continue;
+            }
+            let respawn = ["respawn-pane", "-k", "-t", pane, &cmd];
+            match self.opts.tmux.run_async(&respawn).await {
+                Ok(_) => self.tag_sidebar_build(pane).await,
+                Err(e) => log!("failed to restart sidebar {pane}: {e:#}"),
+            }
+        }
+    }
+
+    async fn add_sidebar(&self, window: &str) {
+        let width = self.opts.config.sidebar.width.to_string();
+        let cmd = self.sidebar_command();
         let split = [
             "split-window",
             "-hbfd",
@@ -752,6 +897,7 @@ impl Daemon {
             log!("failed to tag sidebar {pane}: {e:#}");
             return;
         }
+        self.tag_sidebar_build(&pane).await;
         // The split fired window-layout-changed before the tag existed; rerun the user's
         // hooks so any that skip sidebars (e.g. pane-count checks) see it.
         let rerun = ["set-hook", "-R", "-t", &pane, "window-layout-changed"];

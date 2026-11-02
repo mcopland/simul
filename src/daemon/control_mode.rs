@@ -85,7 +85,7 @@ pub async fn run(tmux: Tmux, tx: mpsc::Sender<Cmd>) {
         }
         if tx.is_closed() || tmux.run_async(&["list-sessions"]).await.is_err() {
             // The receiver closing means the daemon already stopped.
-            let _ = tx.send(Cmd::Shutdown).await;
+            let _ = tx.send(Cmd::Shutdown(super::Exit::TmuxGone)).await;
             return;
         }
         // Reattached: state may have changed while detached. A send error means shutdown.

@@ -18,10 +18,11 @@ With TPM, add this to `tmux.conf` and press `prefix + I`:
 set -g @plugin 'mcopland/simul'
 ```
 
-When tmux loads the plugin, it downloads the release binary matching the plugin's `VERSION` into `~/.tmux/plugins/simul/bin/simul` and checks its sha256. Then it starts the daemon. Link the binary onto your PATH:
+When tmux loads the plugin, it downloads the release binary matching the plugin's `VERSION` into `bin/simul` in the plugin directory and checks its sha256. Then it starts the daemon. TPM keeps plugins in `~/.tmux/plugins`, or in `~/.config/tmux/plugins` when your config is `~/.config/tmux/tmux.conf`. Link the binary onto your PATH:
 
 ```sh
 ln -s ~/.tmux/plugins/simul/bin/simul ~/.local/bin/simul  # or any directory on your PATH
+ln -s ~/.config/tmux/plugins/simul/bin/simul ~/.local/bin/simul  # with ~/.config/tmux
 ```
 
 Then install the agent hooks:
@@ -39,7 +40,21 @@ For Claude, the merge keeps your existing hooks. If the settings file is a symli
 
 For Kiro, simul owns the whole `simul.json` hook file and rewrites it on each run. It uses the standalone hook files of Kiro CLI's V3 engine; the V2 engine reads hooks only from agent profiles, which simul does not edit. Kiro's hooks were built from its public docs and have not yet been checked against a live Kiro session. Its session files were observed with `kiro-cli 2.34.2 --v3`. See `fixtures/CALIBRATION.md`.
 
-Check the setup with `simul doctor`. After a TPM update (`prefix + U`), reload tmux (`tmux source ~/.tmux.conf`) to download the new binary, then run `pkill -f 'simul daemon'`. After a rebuild, just run the `pkill`. The next hook event or tmux reload starts the new binary, and toggling the sidebar off and on restarts it too.
+Check the setup with `simul doctor`.
+
+### Update
+
+Update with TPM (`prefix + U`); nothing else is needed. The daemon watches the plugin's `VERSION` file, and the OS tells it when the update changes it, so it doesn't poll. It then downloads and verifies the new release, restarts itself on it, and restarts each sidebar in place. Agent states carry over from what tmux and the agents report, as after any restart. Loading the plugin, when tmux starts or you reload its config, also replaces a running daemon of another version or binary.
+
+Daemons from 0.5.0 and earlier don't do this, so the first update past 0.5.0 needs one manual restart: run `pkill -f 'simul daemon'` and reload your tmux config.
+
+To try a local build, point the plugin at it and reload your tmux config; the daemon and sidebars switch to it. After each rebuild, reload again:
+
+```tmux
+set -g @simul-bin ~/dev/simul/target/release/simul
+```
+
+Remove the line (or `set -gu @simul-bin`) and reload again to go back to the release.
 
 ### Build from source
 
@@ -50,7 +65,7 @@ cargo build --release
 ln -s "$PWD/target/release/simul" ~/.cargo/bin/simul  # or any directory on your PATH
 ```
 
-Then add `run-shell /path/to/simul/simul.tmux` to `tmux.conf`. When `target/release/simul` exists, the plugin uses it and skips the download, and rebuilds update the symlink in place.
+Then add `run-shell /path/to/simul/simul.tmux` to `tmux.conf`. When `target/release/simul` exists, the plugin uses it and skips the download, and rebuilds update the symlink in place. A build from source doesn't update itself; after a rebuild, reload your tmux config.
 
 ## Use
 
