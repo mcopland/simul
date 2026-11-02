@@ -4,38 +4,42 @@ use crate::cli::ls::fmt_age;
 use crate::daemon::state::{PaneRecord, State};
 use crate::protocol::{GitStatus, PaneSummary, Status, WindowInfo};
 
+/// What the sidebar lists; `f` switches between the two.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum StateFilter {
+pub enum Mode {
+    /// Every session, window, and pane.
     #[default]
     All,
-    Only(State),
+    /// Only agents, most urgent state first.
+    Status,
 }
 
-impl StateFilter {
-    pub fn next(self) -> StateFilter {
+impl Mode {
+    pub fn next(self) -> Mode {
         match self {
-            StateFilter::All => StateFilter::Only(State::Blocked),
-            StateFilter::Only(State::Blocked) => StateFilter::Only(State::Asking),
-            StateFilter::Only(State::Asking) => StateFilter::Only(State::Failed),
-            StateFilter::Only(State::Failed) => StateFilter::Only(State::Done),
-            StateFilter::Only(State::Done) => StateFilter::Only(State::Working),
-            StateFilter::Only(State::Working) => StateFilter::Only(State::Idle),
-            StateFilter::Only(_) => StateFilter::All,
+            Mode::All => Mode::Status,
+            Mode::Status => Mode::All,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            StateFilter::All => "all",
-            StateFilter::Only(s) => s.name(),
+            Mode::All => "all",
+            Mode::Status => "status",
         }
     }
+}
 
-    fn admits(self, state: State) -> bool {
-        match self {
-            StateFilter::All => true,
-            StateFilter::Only(s) => s == state,
-        }
+/// Where a state sorts in the status view: what needs you comes first.
+fn rank(state: State) -> u8 {
+    match state {
+        State::Blocked => 0,
+        State::Asking => 1,
+        State::Failed => 2,
+        State::Done => 3,
+        State::Working => 4,
+        State::Idle => 5,
+        State::Unknown => 6,
     }
 }
 
@@ -244,11 +248,19 @@ impl Window<'_> {
     }
 }
 
-/// Lists every window under its session, and each pane under its window, as an agent row when
-/// an agent runs there. Sessions sort by name so rows don't jump as focus moves. `home` shortens
-/// paths (see `short_path`).
-pub fn lines(status: &Status, filter: StateFilter, text: &str, home: &str) -> Vec<Line> {
+/// The sidebar's lines in `mode`, keeping those that match `text`. `home` shortens paths (see
+/// `short_path`).
+pub fn lines(status: &Status, mode: Mode, text: &str, home: &str) -> Vec<Line> {
     let needle = text.to_lowercase();
+    match mode {
+        Mode::All => tree_lines(status, &needle, home),
+        Mode::Status => status_lines(status, &needle, home),
+    }
+}
+
+/// Lists every window under its session, and each pane under its window, as an agent row when
+/// an agent runs there. Sessions sort by name so rows don't jump as focus moves.
+fn tree_lines(status: &Status, needle: &str, home: &str) -> Vec<Line> {
     let mut windows: Vec<Window> = status.windows.iter().map(window_of).collect();
     for r in &status.panes {
         // An agent the daemon has not placed in a known window still gets a header.
@@ -277,7 +289,7 @@ pub fn lines(status: &Status, filter: StateFilter, text: &str, home: &str) -> Ve
     let mut windows: Vec<(Window, Vec<Placed>)> = windows
         .into_iter()
         .filter_map(|w| {
-            let hit = needle.is_empty() || w.haystack().contains(&needle);
+            let hit = needle.is_empty() || w.haystack().contains(needle);
             let entries: Vec<Placed> = entries(&w)
                 .into_iter()
                 .map(|e| {
@@ -285,21 +297,15 @@ pub fn lines(status: &Status, filter: StateFilter, text: &str, home: &str) -> Ve
                     (e, place)
                 })
                 .filter(|(e, place)| {
-                    let found = |s: &str| s.to_lowercase().contains(&needle);
-                    let place_hit = place.as_deref().is_some_and(found);
-                    match e {
-                        Entry::Agent(r, _) => {
-                            filter.admits(r.state) && (hit || place_hit || found(&haystack(r)))
+                    let found = |s: &str| s.to_lowercase().contains(needle);
+                    hit || place.as_deref().is_some_and(found)
+                        || match e {
+                            Entry::Agent(r, _) => found(&haystack(r)),
+                            Entry::Pane(p) => found(&p.command),
                         }
-                        // A state filter is about agents, so it hides plain panes.
-                        Entry::Pane(p) => {
-                            filter == StateFilter::All && (hit || place_hit || found(&p.command))
-                        }
-                    }
                 })
                 .collect();
-            let shown = !entries.is_empty() || (hit && filter == StateFilter::All);
-            shown.then_some((w, entries))
+            (hit || !entries.is_empty()).then_some((w, entries))
         })
         .collect();
     windows.sort_by_key(|(w, _)| {
@@ -336,14 +342,7 @@ pub fn lines(status: &Status, filter: StateFilter, text: &str, home: &str) -> Ve
                     continue;
                 }
             };
-            out.push(Line::Agent(Row {
-                pane: r.pane.clone(),
-                state: r.state,
-                label: r.agent.name().to_owned(),
-                age: fmt_age(status.now_ms.saturating_sub(r.since_ms)),
-                window_id: r.window_id.clone(),
-                active: r.active,
-            }));
+            out.push(Line::Agent(row(r, status.now_ms)));
             if let Some(text) = place {
                 out.push(Line::Place {
                     pane: r.pane.clone(),
@@ -353,6 +352,68 @@ pub fn lines(status: &Status, filter: StateFilter, text: &str, home: &str) -> Ve
         }
     }
     out
+}
+
+/// Lists only agents, without headers: by `rank`, then longest in its state first. Under each
+/// agent, its session and window, then where it is.
+fn status_lines(status: &Status, needle: &str, home: &str) -> Vec<Line> {
+    let mut agents: Vec<(&PaneRecord, String, Option<String>)> = status
+        .panes
+        .iter()
+        .map(|r| {
+            let found = status
+                .windows
+                .iter()
+                .find_map(|w| Some((w, w.panes.iter().find(|p| p.id == r.pane)?)));
+            let location = match found {
+                Some((w, _)) => format!(
+                    "{} {}",
+                    w.session,
+                    window_label(Some(w.index), Some(&w.name))
+                ),
+                None => format!("{} {}", r.session.as_deref().unwrap_or("?"), label(r)),
+            };
+            let place = entry_place(&Entry::Agent(r, found.map(|(_, p)| p)), home);
+            (r, location, place)
+        })
+        .filter(|(r, location, place)| {
+            let found = |s: &str| s.to_lowercase().contains(needle);
+            needle.is_empty()
+                || found(location)
+                || place.as_deref().is_some_and(found)
+                || found(&haystack(r))
+        })
+        .collect();
+    agents.sort_by_key(|(r, ..)| (rank(r.state), r.since_ms, pane_number(&r.pane)));
+    let mut out = Vec::new();
+    for (r, location, place) in agents {
+        out.push(Line::Agent(row(r, status.now_ms)));
+        for text in std::iter::once(location).chain(place) {
+            out.push(Line::Place {
+                pane: r.pane.clone(),
+                text,
+            });
+        }
+    }
+    out
+}
+
+fn row(r: &PaneRecord, now_ms: u64) -> Row {
+    Row {
+        pane: r.pane.clone(),
+        state: r.state,
+        label: r.agent.name().to_owned(),
+        age: fmt_age(now_ms.saturating_sub(r.since_ms)),
+        window_id: r.window_id.clone(),
+        active: r.active,
+    }
+}
+
+/// `%12` is 12; anything else sorts last.
+fn pane_number(pane: &str) -> u32 {
+    pane.trim_start_matches('%')
+        .parse::<u32>()
+        .unwrap_or(u32::MAX)
 }
 
 /// The entry's `place`; an agent outside known panes falls back to its own branch, then cwd.
@@ -395,12 +456,7 @@ fn entries<'a>(w: &Window<'a>) -> Vec<Entry<'a>> {
         .copied()
         .filter(|r| !w.panes.iter().any(|p| p.id == r.pane))
         .collect();
-    rest.sort_by_key(|r| {
-        r.pane
-            .trim_start_matches('%')
-            .parse::<u32>()
-            .unwrap_or(u32::MAX)
-    });
+    rest.sort_by_key(|r| pane_number(&r.pane));
     out.extend(rest.into_iter().map(|r| Entry::Agent(r, None)));
     out
 }
@@ -499,7 +555,7 @@ pub struct App {
     pub status: Option<Status>,
     /// The window this sidebar lives in; its active pane's row is selected while unfocused.
     pub own_window: Option<String>,
-    pub filter: StateFilter,
+    pub mode: Mode,
     pub text: String,
     pub editing: bool,
     /// Whether the sidebar pane has keyboard focus.
@@ -513,7 +569,7 @@ pub struct App {
 impl App {
     pub fn lines(&self) -> Vec<Line> {
         match &self.status {
-            Some(s) => lines(s, self.filter, &self.text, &self.home),
+            Some(s) => lines(s, self.mode, &self.text, &self.home),
             None => Vec::new(),
         }
     }
@@ -618,7 +674,7 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.step(false),
             KeyCode::Char('/') => self.editing = true,
             KeyCode::Char('f') => {
-                self.filter = self.filter.next();
+                self.mode = self.mode.next();
                 self.selected = Some(0);
                 self.refresh();
             }
@@ -636,11 +692,16 @@ impl App {
     /// Clicking line `index` (0-based, as rendered) selects and jumps to that window or pane.
     pub fn on_click(&mut self, index: usize) -> Action {
         let lines = self.lines();
-        let line = match lines.get(index) {
-            // A place line directly follows its agent.
-            Some(Line::Place { .. }) => index.saturating_sub(1),
-            Some(l) if selectable(l) => index,
-            _ => return Action::None,
+        if index >= lines.len() {
+            return Action::None;
+        }
+        // Detail lines follow their agent.
+        let Some(line) = lines[..=index]
+            .iter()
+            .rposition(|l| !matches!(l, Line::Place { .. }))
+            .filter(|&i| selectable(&lines[i]))
+        else {
+            return Action::None;
         };
         let n = lines[..line].iter().filter(|l| selectable(l)).count();
         let Some(item) = items(&lines).into_iter().nth(n) else {
@@ -763,7 +824,7 @@ mod tests {
     }
 
     fn all(status: &Status) -> Vec<Line> {
-        lines(status, StateFilter::All, "", HOME)
+        lines(status, Mode::All, "", HOME)
     }
 
     fn key(c: char) -> KeyEvent {
@@ -973,42 +1034,88 @@ mod tests {
     }
 
     #[test]
-    fn state_filter_hides_windows_without_a_match() {
-        let out = lines(&status(), StateFilter::Only(State::Done), "", HOME);
+    fn status_view_lists_only_agents_with_where_they_are() {
+        let out = lines(&status(), Mode::Status, "ops", HOME);
         assert_eq!(
             out,
             [
-                session("me"),
-                window("@me3", "3:w3"),
                 Line::Agent(Row {
-                    pane: "%2".into(),
-                    state: State::Done,
+                    pane: "%1".into(),
+                    state: State::Blocked,
                     label: "claude".into(),
                     age: "2m".into(),
-                    window_id: Some("@me3".into()),
+                    window_id: Some("@ops2".into()),
                     active: true,
                 }),
                 Line::Place {
-                    pane: "%2".into(),
-                    text: "br-%2".into()
+                    pane: "%1".into(),
+                    text: "ops 2:w2".into()
+                },
+                Line::Place {
+                    pane: "%1".into(),
+                    text: "br-%1".into()
                 },
             ]
         );
+        let out = lines(&status(), Mode::Status, "", HOME);
+        assert!(
+            out.iter()
+                .all(|l| matches!(l, Line::Agent(_) | Line::Place { .. })),
+            "no headers or plain panes: {out:?}"
+        );
+        assert_eq!(panes(&out).len(), 5);
     }
 
     #[test]
-    fn state_filter_drops_plain_panes() {
-        let out = lines(&status(), StateFilter::Only(State::Working), "", HOME);
-        assert_eq!(panes(&out), ["%3"]);
-        assert!(
-            !out.iter().any(|l| matches!(l, Line::Pane { .. })),
-            "{out:?}"
+    fn status_view_orders_by_priority_then_longest_in_state() {
+        let mut s = status();
+        for (pane, state, session) in [("%6", State::Failed, "web"), ("%7", State::Asking, "zz")] {
+            let mut unplaced = rec(pane, state, session, 4, false);
+            unplaced.window_id = None;
+            s.panes.push(unplaced);
+        }
+        let out = lines(&s, Mode::Status, "", HOME);
+        assert_eq!(panes(&out), ["%1", "%7", "%6", "%2", "%3", "%4", "%5"]);
+        let p7 = out
+            .iter()
+            .position(|l| matches!(l, Line::Agent(r) if r.pane == "%7"))
+            .unwrap();
+        assert_eq!(
+            out[p7 + 1..p7 + 3],
+            [
+                Line::Place {
+                    pane: "%7".into(),
+                    text: "zz 4:w4".into()
+                },
+                Line::Place {
+                    pane: "%7".into(),
+                    text: "br-%7".into()
+                },
+            ],
+            "outside known windows, the agent's own session, window, and branch"
         );
+        s.panes
+            .iter_mut()
+            .find(|r| r.pane == "%4")
+            .unwrap()
+            .since_ms = 1_000;
+        let out = lines(&s, Mode::Status, "", HOME);
+        assert_eq!(panes(&out)[5..], ["%5", "%4"], "idle longer comes first");
+    }
+
+    #[test]
+    fn status_view_text_matches_place_and_agent() {
+        let out = lines(&status(), Mode::Status, "BR-%3", HOME);
+        assert_eq!(panes(&out), ["%3"]);
+        let out = lines(&status(), Mode::Status, "idle", HOME);
+        assert_eq!(panes(&out), ["%4", "%5"]);
+        let out = lines(&status(), Mode::Status, "vim", HOME);
+        assert!(out.is_empty(), "plain panes never show: {out:?}");
     }
 
     #[test]
     fn text_matching_a_window_keeps_all_its_agents() {
-        let out = lines(&status(), StateFilter::All, "logs", HOME);
+        let out = lines(&status(), Mode::All, "logs", HOME);
         assert_eq!(
             out,
             [
@@ -1017,15 +1124,15 @@ mod tests {
                 pane("%13", "tail", "@zz1", true)
             ]
         );
-        let out = lines(&status(), StateFilter::All, "3:W3", HOME);
+        let out = lines(&status(), Mode::All, "3:W3", HOME);
         assert_eq!(panes(&out), ["%2", "%4"]);
-        let out = lines(&status(), StateFilter::All, "CLAUDE", HOME);
+        let out = lines(&status(), Mode::All, "CLAUDE", HOME);
         assert_eq!(panes(&out).len(), 5, "matches the agent name");
     }
 
     #[test]
     fn text_matches_a_pane_command() {
-        let out = lines(&status(), StateFilter::All, "VIM", HOME);
+        let out = lines(&status(), Mode::All, "VIM", HOME);
         assert_eq!(
             out,
             [
@@ -1038,14 +1145,14 @@ mod tests {
 
     #[test]
     fn text_matches_a_pane_place() {
-        let out = lines(&status(), StateFilter::All, "/S/TAIL", HOME);
+        let out = lines(&status(), Mode::All, "/S/TAIL", HOME);
         assert_eq!(out.last(), Some(&pane("%13", "tail", "@zz1", true)));
         assert_eq!(out.len(), 3, "{out:?}");
     }
 
     #[test]
     fn cwd_still_matches_the_text_filter() {
-        let out = lines(&status(), StateFilter::All, "/w/repo", HOME);
+        let out = lines(&status(), Mode::All, "/w/repo", HOME);
         assert_eq!(panes(&out).len(), 5);
     }
 
@@ -1091,28 +1198,18 @@ mod tests {
     }
 
     #[test]
-    fn filters_by_state_and_text() {
-        let out = lines(&status(), StateFilter::Only(State::Blocked), "", HOME);
+    fn filters_by_text() {
+        let out = lines(&status(), Mode::All, "BR-%1", HOME);
         assert_eq!(panes(&out), ["%1"]);
-        let out = lines(&status(), StateFilter::All, "BR-%1", HOME);
-        assert_eq!(panes(&out), ["%1"]);
-        assert!(lines(&status(), StateFilter::All, "zzz", HOME).is_empty());
+        assert!(lines(&status(), Mode::All, "zzz", HOME).is_empty());
     }
 
     #[test]
-    fn filter_cycles_through_states() {
-        let mut f = StateFilter::All;
-        let mut seen = vec![f.label()];
-        for _ in 0..7 {
-            f = f.next();
-            seen.push(f.label());
-        }
-        assert_eq!(
-            seen,
-            [
-                "all", "blocked", "asking", "failed", "done", "working", "idle", "all"
-            ]
-        );
+    fn mode_toggles_between_all_and_status() {
+        let labels: Vec<&str> = [Mode::All, Mode::All.next(), Mode::All.next().next()]
+            .map(Mode::label)
+            .into();
+        assert_eq!(labels, ["all", "status", "all"]);
     }
 
     #[test]
@@ -1226,13 +1323,35 @@ mod tests {
     }
 
     #[test]
-    fn f_cycles_filter_and_clamps_selection() {
+    fn f_switches_mode_and_resets_selection() {
         let mut app = app_in("@me1");
         app.on_focus(true);
         app.selected = Some(4);
         app.on_key(key('f'));
-        assert_eq!(app.filter, StateFilter::Only(State::Blocked));
+        assert_eq!(app.mode, Mode::Status);
         assert_eq!(app.selected, Some(0));
+        app.on_key(key('f'));
+        assert_eq!(app.mode, Mode::All);
+        let mut app = app_in("@me3");
+        app.on_key(key('f'));
+        assert_eq!(
+            app.selected,
+            Some(1),
+            "unfocused, the window's active agent, now second"
+        );
+        app.set_location("@me9".into());
+        assert_eq!(app.selected, None, "a window without agents has no row");
+    }
+
+    #[test]
+    fn status_view_click_on_any_detail_line_selects_its_agent() {
+        let mut app = app_in("@me1");
+        app.mode = Mode::Status;
+        assert_eq!(app.on_click(5), Action::Jump("%2".into()), "branch line");
+        assert_eq!(app.selected, Some(1));
+        assert_eq!(app.on_click(1), Action::Jump("%1".into()), "location line");
+        assert_eq!(app.selected, Some(0));
+        assert_eq!(app.on_click(99), Action::None);
     }
 
     #[test]

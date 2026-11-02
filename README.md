@@ -62,14 +62,14 @@ Then add `run-shell /path/to/simul/simul.tmux` to `tmux.conf`. When `target/rele
 
 Sidebar keys:
 
-| Key            | Action                     |
-| -------------- | -------------------------- |
-| `j` / `k`      | Move                       |
-| Enter or click | Jump to the window or pane |
-| `/`            | Filter by text             |
-| `f`            | Cycle the state filter     |
+| Key            | Action                                      |
+| -------------- | ------------------------------------------- |
+| `j` / `k`      | Move                                        |
+| Enter or click | Jump to the window or pane                  |
+| `/`            | Filter by text                              |
+| `f`            | Switch between the `all` and `status` views |
 
-The sidebar lists every session, every `window_index:window_name` in it, and every pane in each window, whether or not an agent runs there. An agent pane shows a state symbol, the agent name, and time in the current state, with where it is on the line below; any other pane shows only where it is. Where a pane is reads like a starship prompt: in a git repo, the branch (or `HEAD`) followed by status markers, rechecked every 5 seconds while the sidebar is shown; elsewhere, its directory with each parent cut to one letter, from home when under it (`~/dev/simul/examples` is `/d/s/examples`, and home is `~`). The text filter matches session and window names, where panes are, pane commands, and agent details; the state filter shows only agents in that state. While the sidebar isn't focused, it highlights the active pane of its own window. Session names are gold like tmux's status-left; the sidebar's own window and the highlighted row are bold, and everything else is dimmed; state symbols keep their colors. Focusing the sidebar keeps that row, or selects the first row if none was highlighted.
+The sidebar lists every session, every `window_index:window_name` in it, and every pane in each window, whether or not an agent runs there. An agent pane shows a state symbol, the agent name, and time in the current state, with where it is on the line below; any other pane shows only where it is. Where a pane is reads like a starship prompt: in a git repo, the branch (or `HEAD`) followed by status markers, rechecked every 5 seconds while the sidebar is shown; elsewhere, its directory with each parent cut to one letter, from home when under it (`~/dev/simul/examples` is `/d/s/examples`, and home is `~`). The text filter matches session and window names, where panes are, pane commands, and agent details. That is the `all` view; `f` switches to the `status` view, which lists only agents, without session or window headers, ordered `blocked`, `asking`, `failed`, `done`, `working`, `idle`, then `unknown`, and within a state, the one in it longest first. Under each agent it shows the session and window, then where the agent is. While the sidebar isn't focused, it highlights the active pane of its own window. Session names are gold like tmux's status-left; the sidebar's own window and the highlighted row are bold, and everything else is dimmed; state symbols keep their colors. Focusing the sidebar keeps that row, or selects the first row if none was highlighted.
 
 The sidebar repeats tmux's session name and window list, so while it is shown simul cuts the first status line (`status-format[0]`) down to `status-right` and restores it when you toggle the sidebar off. Further status lines, such as `status-format[1]`, keep running. Set `hide_status = false` under `[sidebar]` to keep the line as is.
 

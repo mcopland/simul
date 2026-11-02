@@ -273,7 +273,7 @@ fn render(f: &mut Frame, view: &mut View) {
             view.app.text.clone()
         };
         TextLine::from(Span::styled(
-            format!("f:{} /:{text}", view.app.filter.label()),
+            format!("f:{} /:{text}", view.app.mode.label()),
             Style::new().fg(Color::DarkGray),
         ))
     };
