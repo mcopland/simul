@@ -165,10 +165,7 @@ pub fn managed(settings: &Value) -> Vec<(String, String)> {
 
 /// Kiro's global hook file: `$KIRO_HOME/hooks/simul.json`, else `~/.kiro/hooks/simul.json`.
 pub fn kiro_hook_file(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    let home = env("KIRO_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env("HOME").map(|h| PathBuf::from(h).join(".kiro")))?;
-    Some(home.join("hooks/simul.json"))
+    crate::kiro_sessions::kiro_home(env).map(|home| home.join("hooks/simul.json"))
 }
 
 /// The whole simul-owned Kiro hook file, one command hook per V3 trigger.

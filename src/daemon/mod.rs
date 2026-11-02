@@ -15,6 +15,7 @@ use crate::claude_metrics::{Turn, last_turn};
 use crate::claude_sessions;
 use crate::config::Config;
 use crate::hook::{Agent, AgentEvent, Envelope};
+use crate::kiro_sessions;
 use crate::log;
 use crate::protocol::{GitStatus, Status, WindowInfo, now_ms};
 use crate::tmux::{self, Tmux, shell_quote, tmux_double_quote};
@@ -92,7 +93,9 @@ struct Daemon {
     turn_inflight: HashSet<String>,
     /// Where Claude Code keeps live session status; `None` without `$HOME`.
     sessions_dir: Option<PathBuf>,
-    /// Last failure reading `sessions_dir`, so a persistent one is logged once.
+    /// Where Kiro CLI keeps its session files; `None` without `$KIRO_HOME` or `$HOME`.
+    kiro_sessions_dir: Option<PathBuf>,
+    /// Last failure reading either sessions dir, so a persistent one is logged once.
     live_error: Option<String>,
 }
 
@@ -130,6 +133,7 @@ pub async fn run(opts: Options) -> Result<()> {
         git: HashMap::new(),
         turn_inflight: HashSet::new(),
         sessions_dir: claude_sessions::sessions_dir(crate::paths::env_var),
+        kiro_sessions_dir: kiro_sessions::sessions_dir(crate::paths::env_var),
         live_error: None,
     };
     d.install_tmux_hooks().await;
@@ -426,26 +430,44 @@ impl Daemon {
         self.publish();
     }
 
-    /// Applies Claude's own session status; it covers Esc, denials, and interrupts, which fire no hook.
+    /// Applies Claude's and Kiro's own session status; it covers Esc, denials, interrupts, and
+    /// Kiro's approvals, which fire no hook.
     async fn read_live(&mut self) {
-        let Some(dir) = self.sessions_dir.clone() else {
+        let claude_dir = self.sessions_dir.clone();
+        let kiro_dir = self.kiro_sessions_dir.clone();
+        if claude_dir.is_none() && kiro_dir.is_none() {
             return;
-        };
+        }
+        let kiro_panes = self.store.kiro_panes();
         let read = tokio::task::spawn_blocking(move || {
-            claude_sessions::read(&dir, claude_sessions::pid_alive)
+            let mut found = claude_sessions::Sessions::default();
+            let mut merge = |read: Result<claude_sessions::Sessions>| match read {
+                Ok(s) => {
+                    found.live.extend(s.live);
+                    found.skipped.extend(s.skipped);
+                }
+                Err(e) => found.skipped.push(format!("{e:#}")),
+            };
+            if let Some(dir) = claude_dir {
+                merge(claude_sessions::read(&dir, claude_sessions::pid_alive));
+            }
+            if let Some(dir) = kiro_dir {
+                merge(kiro_sessions::read(
+                    &dir,
+                    &kiro_panes,
+                    claude_sessions::pid_alive,
+                ));
+            }
+            found
         })
         .await;
-        // On failure every pane loses its live status, so the screen scrape takes over.
+        // Panes a failed source covered lose their live status, so the screen scrape takes over.
         let (live, error) = match read {
-            Ok(Ok(found)) => {
+            Ok(found) => {
                 let error = (!found.skipped.is_empty()).then(|| found.skipped.join("; "));
                 (found.live, error)
             }
-            Ok(Err(e)) => (Vec::new(), Some(format!("{e:#}"))),
-            Err(e) => (
-                Vec::new(),
-                Some(format!("Claude session reader panicked: {e}")),
-            ),
+            Err(e) => (Vec::new(), Some(format!("session reader panicked: {e}"))),
         };
         if error.is_some() && error != self.live_error {
             log!("{}", error.as_deref().unwrap_or_default());

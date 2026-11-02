@@ -15,7 +15,8 @@ impl StateFilter {
     pub fn next(self) -> StateFilter {
         match self {
             StateFilter::All => StateFilter::Only(State::Blocked),
-            StateFilter::Only(State::Blocked) => StateFilter::Only(State::Failed),
+            StateFilter::Only(State::Blocked) => StateFilter::Only(State::Asking),
+            StateFilter::Only(State::Asking) => StateFilter::Only(State::Failed),
             StateFilter::Only(State::Failed) => StateFilter::Only(State::Done),
             StateFilter::Only(State::Done) => StateFilter::Only(State::Working),
             StateFilter::Only(State::Working) => StateFilter::Only(State::Idle),
@@ -78,8 +79,9 @@ pub enum Line {
 pub fn symbol(state: State) -> char {
     match state {
         State::Blocked => '\u{2298}',
+        State::Asking => '\u{003f}',
         State::Done => '\u{25cf}',
-        State::Failed => '\u{2715}',
+        State::Failed => '\u{2717}',
         State::Working => '\u{25d0}',
         State::Idle => '\u{25cb}',
         State::Unknown => '\u{2205}',
@@ -797,6 +799,7 @@ mod tests {
     fn symbols_are_distinct_shapes() {
         let all = [
             State::Blocked,
+            State::Asking,
             State::Done,
             State::Failed,
             State::Working,
@@ -807,7 +810,7 @@ mod tests {
         assert_eq!(
             all,
             [
-                '\u{2298}', '\u{25cf}', '\u{2715}', '\u{25d0}', '\u{25cb}', '\u{2205}'
+                '\u{2298}', '\u{003f}', '\u{25cf}', '\u{2717}', '\u{25d0}', '\u{25cb}', '\u{2205}'
             ]
         );
     }
@@ -1100,13 +1103,15 @@ mod tests {
     fn filter_cycles_through_states() {
         let mut f = StateFilter::All;
         let mut seen = vec![f.label()];
-        for _ in 0..6 {
+        for _ in 0..7 {
             f = f.next();
             seen.push(f.label());
         }
         assert_eq!(
             seen,
-            ["all", "blocked", "failed", "done", "working", "idle", "all"]
+            [
+                "all", "blocked", "asking", "failed", "done", "working", "idle", "all"
+            ]
         );
     }
 

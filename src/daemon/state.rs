@@ -4,15 +4,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::claude_sessions::{Live, LiveStatus};
 use crate::hook::{Agent, AgentEvent, Parsed, Screen};
+use crate::kiro_sessions;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum State {
     Working,
     Blocked,
+    /// The agent asked a question; lasts until the next prompt.
+    Asking,
     Done,
+    /// The turn ended in an error; lasts until the next prompt.
     Failed,
     Idle,
+    /// Also any state a newer daemon reports that this build doesn't know.
+    #[serde(other)]
     Unknown,
 }
 
@@ -21,6 +27,7 @@ impl State {
         match self {
             State::Working => "working",
             State::Blocked => "blocked",
+            State::Asking => "asking",
             State::Done => "done",
             State::Failed => "failed",
             State::Idle => "idle",
@@ -64,9 +71,9 @@ pub struct PaneRecord {
     /// Consecutive scrapes suggesting a busy pane has settled (idle, or no prompt left).
     #[serde(skip)]
     idle_scrapes: u8,
-    /// Status time of the agent's own live session file, while it has one.
+    /// Time and status last read from the agent's own live session files, while it has them.
     #[serde(skip)]
-    live_ms: Option<u64>,
+    live: Option<(u64, LiveStatus)>,
 }
 
 impl PaneRecord {
@@ -91,7 +98,7 @@ impl PaneRecord {
             window_name: None,
             active: false,
             idle_scrapes: 0,
-            live_ms: None,
+            live: None,
         }
     }
 }
@@ -198,11 +205,17 @@ impl Store {
             }
             AgentEvent::PermissionPrompt => Some(State::Blocked),
             AgentEvent::IdlePrompt => {
-                (!matches!(rec.state, State::Done | State::Failed)).then_some(State::Idle)
+                (!matches!(rec.state, State::Done | State::Failed | State::Asking))
+                    .then_some(State::Idle)
             }
+            // The session log can report a question or an error before the turn's Stop arrives.
             AgentEvent::Stop => {
                 rec.pending_tool = None;
-                Some(if viewed { State::Idle } else { State::Done })
+                (!matches!(rec.state, State::Asking | State::Failed)).then_some(if viewed {
+                    State::Idle
+                } else {
+                    State::Done
+                })
             }
             // Stays failed even while viewed, so the error is still showing when you look.
             AgentEvent::StopFailure { error } => {
@@ -267,10 +280,12 @@ impl Store {
                 .filter(|l| l.pane == rec.pane && rec.session.as_deref() == Some(&l.session))
                 .max_by_key(|l| l.updated_ms)
             else {
-                rec.live_ms = None;
+                rec.live = None;
                 continue;
             };
-            if rec.live_ms.replace(l.updated_ms) == Some(l.updated_ms)
+            // Status counts too: Kiro's question can land a read after the turn_end it follows.
+            let seen = (l.updated_ms, l.status);
+            if rec.live.replace(seen) == Some(seen)
                 || l.updated_ms + HOOK_LAG_MS < rec.last_event_ms
             {
                 continue;
@@ -278,8 +293,15 @@ impl Store {
             let next = match l.status {
                 LiveStatus::Busy => State::Working,
                 LiveStatus::Waiting => State::Blocked,
-                // Only the Stop hooks can tell a finished or failed turn from an interrupted one.
-                LiveStatus::Idle if matches!(rec.state, State::Done | State::Failed) => continue,
+                LiveStatus::Asking => State::Asking,
+                LiveStatus::Failed => State::Failed,
+                // Only the Stop hooks can tell a finished or failed turn from an interrupted one,
+                // and a question stays until the next prompt.
+                LiveStatus::Idle
+                    if matches!(rec.state, State::Done | State::Failed | State::Asking) =>
+                {
+                    continue;
+                }
                 LiveStatus::Idle => State::Idle,
             };
             let from = Some(rec.state);
@@ -288,18 +310,33 @@ impl Store {
         out
     }
 
+    /// Placed Kiro panes whose hooks reported a session id, to look up in Kiro's session files.
+    pub fn kiro_panes(&self) -> Vec<kiro_sessions::Pane> {
+        self.panes
+            .values()
+            .filter(|r| r.agent == Agent::Kiro)
+            .filter_map(|r| {
+                Some(kiro_sessions::Pane {
+                    pane: r.pane.clone(),
+                    session: r.session.clone()?,
+                    session_id: r.session_id.clone()?,
+                })
+            })
+            .collect()
+    }
+
     /// Panes whose state should be checked against the screen: busy or unknown, with no recent hook
     /// and no live session file.
     pub fn needs_scrape(&self, now: u64, threshold_ms: u64) -> Vec<(String, Agent)> {
         self.panes
             .values()
-            .filter(|r| r.live_ms.is_none())
+            .filter(|r| r.live.is_none())
             .filter(|r| match r.state {
                 State::Working | State::Blocked => {
                     now.saturating_sub(r.last_event_ms) >= threshold_ms
                 }
                 State::Unknown => true,
-                State::Done | State::Failed | State::Idle => false,
+                State::Asking | State::Done | State::Failed | State::Idle => false,
             })
             .map(|r| (r.pane.clone(), r.agent))
             .collect()
@@ -311,7 +348,8 @@ impl Store {
             rec.idle_scrapes = 0;
         }
         let next = match (rec.state, screen) {
-            (_, Screen::Unknown) | (State::Done | State::Failed | State::Idle, _) => None,
+            (_, Screen::Unknown)
+            | (State::Asking | State::Done | State::Failed | State::Idle, _) => None,
             (_, Screen::Blocked) => Some(State::Blocked),
             (_, Screen::Working) => Some(State::Working),
             (State::Unknown, Screen::Idle) => Some(State::Idle),
@@ -943,6 +981,102 @@ mod tests {
         s.recover(&snap, 1);
         s.apply_live(&[live(LiveStatus::Busy, 0)], 2);
         assert_eq!(state(&s, "%1"), Some(State::Working));
+    }
+
+    #[test]
+    fn live_asking_and_failed_map_to_states() {
+        let mut s = placed(AgentEvent::PromptSubmit, 1);
+        let t = s.apply_live(&[live(LiveStatus::Asking, 10)], 11);
+        assert_eq!(t.iter().map(|t| t.to).collect::<Vec<_>>(), [State::Asking]);
+        s.apply(
+            "%1",
+            Agent::Claude,
+            &ev(AgentEvent::PromptSubmit),
+            12,
+            false,
+        );
+        let t = s.apply_live(&[live(LiveStatus::Failed, 20)], 21);
+        assert_eq!(t.iter().map(|t| t.to).collect::<Vec<_>>(), [State::Failed]);
+    }
+
+    #[test]
+    fn asking_is_sticky_until_next_prompt() {
+        let mut s = placed(AgentEvent::PromptSubmit, 1);
+        s.apply_live(&[live(LiveStatus::Asking, 2)], 3);
+        assert_eq!(
+            s.apply("%1", Agent::Kiro, &ev(AgentEvent::Stop), 4, false),
+            None,
+            "a late Stop keeps the question"
+        );
+        s.apply("%1", Agent::Kiro, &ev(AgentEvent::IdlePrompt), 5, false);
+        assert!(s.apply_live(&[live(LiveStatus::Idle, 6)], 7).is_empty());
+        let snap = Snapshot {
+            panes: vec![pane("%1", "kiro-cli")],
+            viewed: HashSet::from(["%1".to_string()]),
+        };
+        assert!(s.reconcile(&snap, 8).is_empty(), "stays while viewed");
+        s.apply_live(&[], 9);
+        assert!(s.needs_scrape(100_000, 1500).is_empty());
+        assert_eq!(s.apply_screen("%1", Screen::Working, 10), None);
+        assert_eq!(s.apply_screen("%1", Screen::Blocked, 11), None);
+        assert_eq!(state(&s, "%1"), Some(State::Asking));
+        s.apply("%1", Agent::Kiro, &ev(AgentEvent::PromptSubmit), 12, false);
+        assert_eq!(state(&s, "%1"), Some(State::Working));
+    }
+
+    #[test]
+    fn late_stop_keeps_failed() {
+        let mut s = placed(AgentEvent::PromptSubmit, 1);
+        s.apply_live(&[live(LiveStatus::Failed, 2)], 3);
+        assert_eq!(
+            s.apply("%1", Agent::Kiro, &ev(AgentEvent::Stop), 4, false),
+            None
+        );
+        assert_eq!(state(&s, "%1"), Some(State::Failed));
+    }
+
+    #[test]
+    fn question_read_after_its_turn_end_still_counts() {
+        let mut s = placed(AgentEvent::PromptSubmit, 1);
+        s.apply_live(&[live(LiveStatus::Idle, 5)], 6);
+        assert_eq!(state(&s, "%1"), Some(State::Idle));
+        s.apply_live(&[live(LiveStatus::Asking, 5)], 7);
+        assert_eq!(state(&s, "%1"), Some(State::Asking));
+    }
+
+    #[test]
+    fn unknown_state_names_read_as_unknown() {
+        let s: State = serde_json::from_str(r#""asking""#).unwrap();
+        assert_eq!(s, State::Asking);
+        let s: State = serde_json::from_str(r#""pondering""#).unwrap();
+        assert_eq!(s, State::Unknown);
+    }
+
+    #[test]
+    fn kiro_panes_need_a_session_id_and_a_place() {
+        let mut s = Store::default();
+        let start = |id: Option<&str>| Parsed {
+            event: AgentEvent::SessionStart,
+            meta: Meta {
+                session_id: id.map(str::to_owned),
+                ..Meta::default()
+            },
+        };
+        s.apply("%1", Agent::Kiro, &start(Some("sess_a")), 1, false);
+        s.apply("%2", Agent::Kiro, &start(None), 1, false);
+        s.apply("%3", Agent::Claude, &start(Some("c")), 1, false);
+        s.apply("%4", Agent::Kiro, &start(Some("sess_b")), 1, false);
+        for p in ["%1", "%2", "%3"] {
+            s.locate(&pane(p, "kiro-cli"));
+        }
+        assert_eq!(
+            s.kiro_panes(),
+            vec![kiro_sessions::Pane {
+                pane: "%1".into(),
+                session: "main".into(),
+                session_id: "sess_a".into(),
+            }]
+        );
     }
 
     #[test]

@@ -7,7 +7,8 @@ use crate::config::NotifyConfig;
 use crate::log;
 use crate::tmux::Tmux;
 
-/// Decides which transitions notify: entering blocked, done, or failed, while unseen, not repeated.
+/// Decides which transitions notify: entering blocked, asking, done, or failed, while unseen, not
+/// repeated.
 #[derive(Debug, Default)]
 pub struct Gate {
     last: HashMap<(String, State), u64>,
@@ -15,7 +16,11 @@ pub struct Gate {
 
 impl Gate {
     pub fn admit(&mut self, t: &Transition, viewed: bool, now: u64, dedupe_ms: u64) -> bool {
-        if !matches!(t.to, State::Blocked | State::Done | State::Failed) || viewed {
+        let notable = matches!(
+            t.to,
+            State::Blocked | State::Asking | State::Done | State::Failed
+        );
+        if !notable || viewed {
             return false;
         }
         let key = (t.pane.clone(), t.to);
@@ -41,6 +46,7 @@ pub fn message(t: &Transition, rec: Option<&PaneRecord>) -> Message {
     let agent = t.agent.label();
     let title = match t.to {
         State::Blocked => format!("{agent} needs approval"),
+        State::Asking => format!("{agent} has a question"),
         State::Failed => format!("{agent} failed"),
         _ => format!("{agent} finished"),
     };
@@ -252,6 +258,11 @@ mod tests {
         let m = message(&t("%1", State::Failed), Some(&failed));
         assert_eq!(m.title, "Claude failed");
         assert_eq!(m.body, "dev:2: rate_limit");
+        let mut kiro = t("%1", State::Asking);
+        kiro.agent = Agent::Kiro;
+        let m = message(&kiro, Some(&rec(None)));
+        assert_eq!(m.title, "Kiro has a question");
+        assert_eq!(m.body, "dev:2");
     }
 
     #[test]
@@ -262,11 +273,12 @@ mod tests {
     }
 
     #[test]
-    fn only_blocked_done_and_failed_notify() {
+    fn only_blocked_asking_done_and_failed_notify() {
         let mut g = Gate::default();
         assert!(g.admit(&t("%1", State::Blocked), false, 0, 10_000));
         assert!(g.admit(&t("%2", State::Done), false, 0, 10_000));
         assert!(g.admit(&t("%4", State::Failed), false, 0, 10_000));
+        assert!(g.admit(&t("%5", State::Asking), false, 0, 10_000));
         for s in [State::Working, State::Idle, State::Unknown] {
             assert!(!g.admit(&t("%3", s), false, 0, 10_000), "{s:?}");
         }

@@ -1,6 +1,6 @@
 # simul
 
-A tmux plugin that tracks the state of coding agents (Claude Code and Kiro CLI), shows them in a sidebar, and notifies you when one is blocked, done, or failed.
+A tmux plugin that tracks the state of coding agents (Claude Code and Kiro CLI), shows them in a sidebar, and notifies you when one is blocked, asking, done, or failed.
 
 Status: early development. See `fixtures/CALIBRATION.md` for verified agent behavior.
 
@@ -37,7 +37,7 @@ Hooks record the path you ran `simul` from, so run it through a path that won't 
 
 For Claude, the merge keeps your existing hooks. If the settings file is a symlink, simul writes through it and leaves the link in place. Each run replaces simul's previous entries, which are tagged `#simul-managed`, and saves a `.simul-bak` copy first.
 
-For Kiro, simul owns the whole `simul.json` hook file and rewrites it on each run. It uses the standalone hook files of Kiro CLI's V3 engine; the V2 engine reads hooks only from agent profiles, which simul does not edit. Kiro support is built from Kiro's public docs and has not yet been checked against a live Kiro session; see `fixtures/CALIBRATION.md`.
+For Kiro, simul owns the whole `simul.json` hook file and rewrites it on each run. It uses the standalone hook files of Kiro CLI's V3 engine; the V2 engine reads hooks only from agent profiles, which simul does not edit. Kiro's hooks were built from its public docs and have not yet been checked against a live Kiro session. Its session files were observed with `kiro-cli 2.34.2 --v3`. See `fixtures/CALIBRATION.md`.
 
 Check the setup with `simul doctor`. After a TPM update (`prefix + U`), reload tmux (`tmux source ~/.tmux.conf`) to download the new binary, then run `pkill -f 'simul daemon'`. After a rebuild, just run the `pkill`. The next hook event or tmux reload starts the new binary, and toggling the sidebar off and on restarts it too.
 
@@ -73,14 +73,17 @@ The sidebar lists every session, every `window_index:window_name` in it, and eve
 
 The sidebar repeats tmux's session name and window list, so while it is shown simul cuts the first status line (`status-format[0]`) down to `status-right` and restores it when you toggle the sidebar off. Further status lines, such as `status-format[1]`, keep running. Set `hide_status = false` under `[sidebar]` to keep the line as is.
 
-| Symbol | State     | Meaning                                                              |
-| ------ | --------- | -------------------------------------------------------------------- |
-| `◐`    | `working` | The agent is running                                                 |
-| `⊘`    | `blocked` | The agent is waiting for your approval                               |
-| `●`    | `done`    | Finished, and you haven't looked yet                                 |
-| `✕`    | `failed`  | The turn ended with an API error, such as a rate limit (Claude only) |
-| `○`    | `idle`    | Waiting for input                                                    |
-| `∅`    | `unknown` | Not yet classified                                                   |
+| Symbol | State     | Meaning                                            |
+| ------ | --------- | -------------------------------------------------- |
+| `◐`    | `working` | The agent is running                               |
+| `⊘`    | `blocked` | The agent is waiting for your approval             |
+| `?`    | `asking`  | The agent asked you a question (Kiro only)         |
+| `●`    | `done`    | Finished, and you haven't looked yet               |
+| `✗`    | `failed`  | The turn ended with an error, such as a rate limit |
+| `○`    | `idle`    | Waiting for input                                  |
+| `∅`    | `unknown` | Not yet classified                                 |
+
+`asking` and `failed` stay until your next prompt, even after you look at the pane.
 
 Git status markers follow the branch in this order:
 
@@ -94,7 +97,7 @@ Git status markers follow the branch in this order:
 | `?`         | Untracked files                               |
 | `≡`         | Stashed changes                               |
 
-When an agent becomes `blocked`, `done`, or `failed` in a pane you are not looking at, simul shows a message in the tmux status line. Desktop notifications and the terminal bell are off by default; turn them on under `[notify]`.
+When an agent becomes `blocked`, `asking`, `done`, or `failed` in a pane you are not looking at, simul shows a message in the tmux status line. Desktop notifications and the terminal bell are off by default; turn them on under `[notify]`.
 
 ### tmux config that counts panes
 
@@ -134,7 +137,7 @@ bell = false     # ring the terminal bell
 approval_patterns = []  # extra text that marks Kiro's approval prompt on screen
 ```
 
-Kiro has no hook for approval prompts, so simul reads the bottom of a busy Kiro pane. It recognizes the classic `Allow this action? ... [y/n/t]:` prompt. If your Kiro shows a different approval dialog, add a line of text unique to it to `approval_patterns`. Pick text that disappears once you answer: a pattern still in the bottom 15 lines keeps the pane `blocked`.
+Kiro has no hook for approval prompts, so simul reads them from Kiro's session log (`$KIRO_HOME/sessions`, else `~/.kiro/sessions`). The same log shows when a turn ends, is interrupted, fails, or asks you a question. When the log can't be read, simul falls back to reading the bottom of a busy Kiro pane. That scrape recognizes the classic `Allow this action? ... [y/n/t]:` prompt. If your Kiro shows a different approval dialog, add a line of text unique to it to `approval_patterns`. Pick text that disappears once you answer: a pattern still in the bottom 15 lines keeps the pane `blocked`.
 
 The daemon log is next to its socket: `$XDG_RUNTIME_DIR/simul/<hash>.log`, or `/tmp/simul-$UID/<hash>.log`.
 

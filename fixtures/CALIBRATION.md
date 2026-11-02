@@ -48,7 +48,7 @@ Subagent hooks carry `agent_id` and fire with the parent's `$TMUX_PANE`, even af
 
 ## Kiro CLI
 
-**Unverified.** Kiro is not installed on the home machine, and work fixtures must not enter this public repo. Support was built on 2026-10-25 from public sources. Every `fixtures/kiro/` file is **synthetic**, hand-written to match these sources:
+**Hooks unverified.** Kiro is not installed on the home machine, and work fixtures must not enter this public repo. Hook support was built on 2026-10-25 from public sources. The live session files (below) were observed at work with `kiro-cli 2.34.2 --v3` and are recorded here as formats only, with no work data. Every `fixtures/kiro/` file is **synthetic**, hand-written to match these sources:
 
 - Kiro docs: [CLI V3 hooks migration](https://kiro.dev/docs/cli/v3/hooks-migration/), [2.x reference](https://kiro.dev/docs/cli/2x-reference/)
 - Captured payloads and field reports: [stablyai/orca#31577](https://github.com/stablyai/orca/issues/31577), [manaflow-ai/cmux#23685](https://github.com/manaflow-ai/cmux/pull/23685), [yangzichao/JustSessions#185](https://github.com/yangzichao/JustSessions/issues/185)
@@ -68,17 +68,49 @@ Subagent hooks carry `agent_id` and fire with the parent's `$TMUX_PANE`, even af
 | Interrupts | Esc or Ctrl-C fires no `Stop`. |
 | Approval prompt | Classic: `Allow this action? Use 't' to trust (always allow) this tool for the session. [y/n/t]:`, answered at the `>` prompt below it. `y` approves, `n` denies, `t` trusts the tool for the session. A newer TUI may show a Yes/Trust/No bar instead. |
 
+### Live session files
+
+Observed with `kiro-cli 2.34.2 --v3`. The V3 engine keeps one directory per session under `$KIRO_HOME/sessions`, else `~/.kiro/sessions`, at `<hash>/<session id>/`, where `<hash>` is any directory name. The session id is the `session_id` the hooks report, e.g. `sess_01jf3k9q7w2m5n8p4r6t0v2x4z`.
+
+| File | Contents |
+| --- | --- |
+| `.lock` | `{"pid": N}` while the session is open. A dead pid means the session is stale. |
+| `messages.jsonl` | One `{"timestamp": "<UTC ISO 8601 with ms>Z", "payload": {"type": ..., ...}}` per line. |
+| `session.json` | Has a `status` field. `waiting_on_user` means the agent asked a question, and it outlives the end of the turn. |
+
+The `messages.jsonl` payload types that decide the status:
+
+| `type` | Fields | Meaning |
+| --- | --- | --- |
+| `turn_start` | | A turn began. |
+| `turn_end` | `stopReason`: `end_turn`, `cancelled`, or `error` | The turn finished, was interrupted (Esc), or failed. |
+| `pending_interaction` | `toolCallId` | An approval prompt opened. |
+| `interaction_resolved` | `toolCallId` | That approval was answered, approved or denied. |
+
+For each Kiro pane whose hooks reported a session id, the daemon reads these every tick (`src/kiro_sessions.rs`):
+
+1. It checks the id: `sess_` followed only by letters, digits, `-`, and `_`.
+2. It skips the session unless its `.lock` names a live pid.
+3. It reads about the last 256 KB of `messages.jsonl` and walks it newest first:
+   - `turn_end` with `error` gives `failed`, and any other `turn_end` gives `idle`.
+   - `turn_start` gives `working`.
+   - A `pending_interaction` with no newer `interaction_resolved` for the same `toolCallId` gives `blocked`.
+4. When `session.json` says `waiting_on_user`, it upgrades `idle` to `asking`.
+
+A status counts from the time of the newest deciding line. As with Claude, it applies only when it changed and is newer than the pane's last hook, and panes that have one are not scraped. Anything unreadable gives the pane no live status, so the hooks and the screen scrape take over.
+
 ### Known gaps
 
-- **Esc leaves a pane `working`.** Neither a hook nor the screen corrects it until the next turn ends. Kiro writes `~/.local/share/kiro-cli/run/turn-markers/<pid>-<ms>.json` while a turn runs, and removes it at the end. That could play the role Claude's session files play, once the pid can be mapped to a pane.
-- **Only `blocked` is scraped.** Kiro's idle and working screens are unrecorded, so the classifier returns `unknown` for them, and recovered Kiro panes stay `unknown` until their first hook.
+- **Without readable session files**, the gaps below still apply. The session log fixes Esc, denied approvals, and approvals that show no recognizable prompt.
+- **Esc leaves a pane `working`.** Neither a hook nor the screen corrects it until the next turn ends.
+- **Only `blocked` is scraped.** Kiro's idle and working screens are unrecorded, so the classifier returns `unknown` for them, and recovered Kiro panes stay `unknown` until their first hook. Session files can't help either, since a recovered pane has no session id until a hook reports one.
 - **A denied approval** keeps the pane `blocked` until Kiro's next hook.
 
 ### To check at work
 
 Record results here, sanitized, without work fixtures:
 
-- [ ] `kiro-cli --version`, and whether it runs the V3 engine by default or needs `--v3`
+- [ ] `kiro-cli --version`, and whether it runs the V3 engine by default or needs `--v3` (session files were observed with 2.34.2 run with `--v3`; the default is unchecked)
 - [ ] Kiro loads `~/.kiro/hooks/simul.json` with no validation error, including the `SessionEnd` trigger
 - [ ] the `timeout` unit (simul writes `500`, which outlasts the shim's 200 ms budget whether it means ms or seconds)
 - [ ] hook commands run through a shell (the quoted path and the `#simul-managed` comment depend on it)
@@ -92,4 +124,5 @@ Record results here, sanitized, without work fixtures:
 - `claude/session.jsonl`: the full ordered session as shim envelopes. Sequence: start, approve a Write, deny a Write with `3`, deny with `Escape`, interrupt a reply, two Bash runs, idle notification, `/exit`.
 - `claude/screens/*.txt`: `capture-pane -p` output for each signature above. `echoed-list-prompt.txt` is a submitted numbered list, which must not read as a selector.
 - `claude/sessions/*.json`: sanitized live session files, including a parked pane and its background session.
+- Kiro session files have no fixture. The tests in `src/kiro_sessions.rs` build small synthetic ones in a temporary directory.
 - `kiro/hooks/<Event>.json`, `kiro/session.jsonl`, `kiro/screens/*.txt`: synthetic, see above. `session.jsonl` includes an Esc after `PreToolUse` that sends no hook. `screens/answered.txt` is a prompt already answered with `y`; `prose-mentions-prompt.txt` quotes the prompt in prose. Neither may read as blocked.

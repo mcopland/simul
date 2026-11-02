@@ -162,6 +162,7 @@ fn jump(tmux: &Tmux, target: &str) -> Result<()> {
 fn state_color(state: State) -> Color {
     match state {
         State::Blocked => Color::Red,
+        State::Asking => Color::Cyan,
         State::Done => Color::Green,
         State::Failed => Color::Magenta,
         State::Working => Color::Yellow,

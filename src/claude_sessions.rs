@@ -13,9 +13,13 @@ pub enum LiveStatus {
     Busy,
     Waiting,
     Idle,
+    /// The turn ended with a question for the user (Kiro only).
+    Asking,
+    /// The turn ended in an error (Kiro only).
+    Failed,
 }
 
-/// One pane's status as Claude Code last wrote it.
+/// One pane's status as the agent last wrote it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Live {
     pub pane: String,

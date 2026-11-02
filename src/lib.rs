@@ -6,6 +6,7 @@ pub mod config;
 pub mod daemon;
 pub mod git;
 pub mod hook;
+pub mod kiro_sessions;
 pub mod log;
 pub mod paths;
 pub mod protocol;
