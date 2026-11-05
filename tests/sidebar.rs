@@ -411,7 +411,9 @@ fn space_folds_a_session_in_every_sidebar_and_it_persists() {
 }
 
 #[test]
-fn session_headers_are_gold_like_status_left() {
+fn session_headers_are_dim_gold_and_the_selected_one_bright() {
+    const GOLD: &str = "38;2;246;193;119";
+    const DIM_GOLD: &str = "38;2;147;115;71";
     let mut h = Harness::new();
     let agent = h.new_pane("sleep 600");
     h.tmux(&["new-session", "-d", "-s", "u", "sleep 600"]);
@@ -432,10 +434,30 @@ fn session_headers_are_gold_like_status_left() {
     for session in ["t", "u"] {
         let sgr = header(&screen, session).unwrap();
         assert!(
-            !sgr.bold && sgr.fg.as_deref() == Some("38;2;246;193;119"),
-            "session {session} gold, not bold: {screen:?}"
+            !sgr.bold && sgr.fg.as_deref() == Some(DIM_GOLD),
+            "unselected session {session} dim gold, not bold: {screen:?}"
         );
     }
+
+    // Folded away, u's sidebar selects u's header.
+    let side = sidebar_in(&h, "u");
+    h.tmux(&["send-keys", "-t", &side, "Space"]);
+    let folded = "u \u{25b8}";
+    eventually("u folded and selected", || {
+        screen = h.tmux(&["capture-pane", "-e", "-p", "-t", &side]);
+        style_of(&screen, folded).is_some()
+    });
+    let selected = style_of(&screen, folded).unwrap();
+    assert!(
+        selected.bold && selected.fg.as_deref() == Some(GOLD),
+        "selected session bright gold and bold, like status-left: {screen:?}"
+    );
+    let rest = header(&screen, "t").unwrap();
+    assert!(
+        !rest.bold && rest.fg.as_deref() == Some(DIM_GOLD),
+        "unselected session dim gold: {screen:?}"
+    );
+    assert!(!screen.contains("\x1b[7m"), "no reverse video: {screen:?}");
 }
 
 /// Text attributes of a run of cells in `capture-pane -e` output.

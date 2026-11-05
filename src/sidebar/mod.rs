@@ -201,8 +201,12 @@ fn render(f: &mut Frame, view: &mut View) {
         _ => None,
     });
     let current = Style::new().add_modifier(Modifier::BOLD);
-    // Matches the session name in tmux's status-left.
-    let session = Style::new().fg(Color::Rgb(0xf6, 0xc1, 0x77));
+    // The selected session matches the session name in tmux's status-left; the rest are
+    // dimmed, as unselected windows are muted.
+    let session = Style::new().fg(Color::Rgb(0x93, 0x73, 0x47));
+    let session_selected = Style::new()
+        .fg(Color::Rgb(0xf6, 0xc1, 0x77))
+        .add_modifier(Modifier::BOLD);
     let muted = Style::new().fg(Color::DarkGray);
     let detail = |pane: &str| {
         if selected_pane == Some(pane) {
@@ -217,7 +221,7 @@ fn render(f: &mut Frame, view: &mut View) {
         .map(|(i, line)| match line {
             Line::Session { name, folded, .. } => {
                 let style = if selected_line == Some(i) {
-                    session.add_modifier(Modifier::BOLD)
+                    session_selected
                 } else {
                     session
                 };
@@ -318,4 +322,81 @@ fn render(f: &mut Frame, view: &mut View) {
         ))
     };
     f.render_widget(Paragraph::new(footer_line), footer);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{PaneSummary, WindowInfo};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+
+    fn plain_window(session: &str, pane: &str) -> WindowInfo {
+        WindowInfo {
+            id: format!("@{session}"),
+            session: session.into(),
+            index: 1,
+            name: "w".into(),
+            panes: vec![PaneSummary {
+                id: pane.into(),
+                command: "zsh".into(),
+                active: true,
+                cwd: "/".into(),
+                git: None,
+            }],
+        }
+    }
+
+    /// Draws a sidebar listing sessions `a` and `b` with item `selected` chosen.
+    fn draw(selected: Option<usize>) -> Buffer {
+        let mut view = View {
+            app: App {
+                status: Some(Status {
+                    now_ms: 0,
+                    sidebar: true,
+                    panes: vec![],
+                    windows: vec![plain_window("a", "%1"), plain_window("b", "%2")],
+                    collapsed: vec![],
+                }),
+                selected,
+                ..App::default()
+            },
+            error: None,
+            offset: 0,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(20, 8)).unwrap();
+        terminal.draw(|f| render(f, &mut view)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    const GOLD: Color = Color::Rgb(0xf6, 0xc1, 0x77);
+
+    #[test]
+    fn selected_session_is_bright_gold_and_bold_the_rest_dim() {
+        // Lines: a, 1:w, pane, b, 1:w, pane; item 0 is session a.
+        let buf = draw(Some(0));
+        let (a, b) = (&buf[(0, 0)], &buf[(0, 3)]);
+        assert_eq!((a.symbol(), b.symbol()), ("a", "b"));
+        assert_eq!(a.fg, GOLD);
+        assert!(a.modifier.contains(Modifier::BOLD));
+        assert!(!a.modifier.contains(Modifier::REVERSED), "no block");
+        assert_ne!(b.fg, GOLD, "unselected session is dimmed");
+        assert!(
+            matches!(b.fg, Color::Rgb(..)),
+            "still gold-toned: {:?}",
+            b.fg
+        );
+        assert!(!b.modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn unselected_sessions_are_dim() {
+        let buf = draw(None);
+        for row in [0, 3] {
+            let cell = &buf[(0, row)];
+            assert_ne!(cell.fg, GOLD, "row {row}");
+            assert!(!cell.modifier.contains(Modifier::BOLD), "row {row}");
+        }
+    }
 }
