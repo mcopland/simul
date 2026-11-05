@@ -49,7 +49,7 @@ fn rank(state: State) -> u8 {
 pub struct Row {
     pub pane: String,
     pub state: State,
-    /// The agent's name.
+    /// Where the agent is, as `place` puts it, else the agent's name.
     pub label: String,
     pub age: String,
     pub window_id: Option<String>,
@@ -71,7 +71,7 @@ pub enum Line {
         label: String,
     },
     Agent(Row),
-    /// Line under an agent: where it is, as `place` puts it.
+    /// Line under an agent in the status view: its session and window.
     Place {
         pane: String,
         text: String,
@@ -383,20 +383,14 @@ fn tree_lines(status: &Status, needle: &str, home: &str) -> Vec<Line> {
                     continue;
                 }
             };
-            out.push(Line::Agent(row(r, status.now_ms)));
-            if let Some(text) = place {
-                out.push(Line::Place {
-                    pane: r.pane.clone(),
-                    text,
-                });
-            }
+            out.push(Line::Agent(row(r, place, status.now_ms)));
         }
     }
     out
 }
 
 /// Lists only agents, without headers: by `rank`, then longest in its state first. Under each
-/// agent, its session and window, then where it is.
+/// agent, its session and window.
 fn status_lines(status: &Status, needle: &str, home: &str) -> Vec<Line> {
     let mut agents: Vec<(&PaneRecord, String, Option<String>)> = status
         .panes
@@ -428,22 +422,20 @@ fn status_lines(status: &Status, needle: &str, home: &str) -> Vec<Line> {
     agents.sort_by_key(|(r, ..)| (rank(r.state), r.since_ms, pane_number(&r.pane)));
     let mut out = Vec::new();
     for (r, location, place) in agents {
-        out.push(Line::Agent(row(r, status.now_ms)));
-        for text in std::iter::once(location).chain(place) {
-            out.push(Line::Place {
-                pane: r.pane.clone(),
-                text,
-            });
-        }
+        out.push(Line::Agent(row(r, place, status.now_ms)));
+        out.push(Line::Place {
+            pane: r.pane.clone(),
+            text: location,
+        });
     }
     out
 }
 
-fn row(r: &PaneRecord, now_ms: u64) -> Row {
+fn row(r: &PaneRecord, place: Option<String>, now_ms: u64) -> Row {
     Row {
         pane: r.pane.clone(),
         state: r.state,
-        label: r.agent.name().to_owned(),
+        label: place.unwrap_or_else(|| r.agent.name().to_owned()),
         age: fmt_age(now_ms.saturating_sub(r.since_ms)),
         window_id: r.window_id.clone(),
         active: r.active,
@@ -824,11 +816,10 @@ mod tests {
 
     const HOME: &str = "/h";
 
-    /// Lines, with item numbers in brackets:
-    /// 0 [0] me | 1 [1] 1:w1 | 2 [2] %3 | 3 br | 4 [3] %10 zsh | 5 [4] 2:notes | 6 [5] %11 zsh |
-    /// 7 [6] 3:w3 | 8 [7] %2 | 9 br | 10 [8] %4 | 11 br | 12 [9] 9:w9 | 13 [10] %12 vim |
-    /// 14 [11] ops | 15 [12] 2:w2 | 16 [13] %1 | 17 br | 18 [14] web | 19 [15] 1:w1 |
-    /// 20 [16] %5 | 21 dir | 22 [17] zz | 23 [18] 1:logs | 24 [19] %13 tail
+    /// Lines, each also its item number:
+    /// 0 me | 1 1:w1 | 2 %3 | 3 %10 zsh | 4 2:notes | 5 %11 zsh | 6 3:w3 | 7 %2 | 8 %4 |
+    /// 9 9:w9 | 10 %12 vim | 11 ops | 12 2:w2 | 13 %1 | 14 web | 15 1:w1 | 16 %5 | 17 zz |
+    /// 18 1:logs | 19 %13 tail
     ///
     /// Agents are in a repo on branch `br-<pane>`, except %5; other panes are in `~/src/<cmd>`.
     fn status() -> Status {
@@ -1003,27 +994,16 @@ mod tests {
         let Line::Agent(row) = &out[2] else {
             panic!("{out:?}")
         };
-        assert_eq!(row.label, "claude");
+        assert_eq!(row.label, "br-%3", "where it is, beside its symbol");
         assert_eq!(row.age, "2m");
-        assert_eq!(
-            out[3],
-            Line::Place {
-                pane: "%3".into(),
-                text: "br-%3".into()
-            }
+        assert!(
+            !out.iter().any(|l| matches!(l, Line::Place { .. })),
+            "no separate place line: {out:?}"
         );
         let web = out.iter().position(|l| *l == session("web")).unwrap();
         assert!(
-            matches!(&out[web + 2], Line::Agent(r) if r.pane == "%5"),
-            "{out:?}"
-        );
-        assert_eq!(
-            out[web + 3],
-            Line::Place {
-                pane: "%5".into(),
-                text: "/s/claude".into()
-            },
-            "outside git, the directory"
+            matches!(&out[web + 2], Line::Agent(r) if r.pane == "%5" && r.label == "/s/claude"),
+            "outside git, the directory: {out:?}"
         );
     }
 
@@ -1037,11 +1017,27 @@ mod tests {
         let places: Vec<&str> = out
             .iter()
             .filter_map(|l| match l {
-                Line::Place { text, .. } => Some(text.as_str()),
+                Line::Agent(r) => Some(r.label.as_str()),
                 _ => None,
             })
             .collect();
         assert_eq!(places, ["br-%1", "/x/y"], "{out:?}");
+    }
+
+    #[test]
+    fn agent_nowhere_known_shows_its_agent_name() {
+        let mut s = status();
+        s.windows.clear();
+        s.panes.truncate(1);
+        s.panes[0].cwd = None;
+        for mode in [Mode::All, Mode::Status] {
+            let out = lines(&s, mode, "", HOME);
+            assert!(
+                out.iter()
+                    .any(|l| matches!(l, Line::Agent(r) if r.label == "claude")),
+                "{mode:?}: {out:?}"
+            );
+        }
     }
 
     #[test]
@@ -1099,9 +1095,9 @@ mod tests {
     #[test]
     fn windows_and_sessions_without_agents_are_listed() {
         let out = all(&status());
-        assert_eq!(out[5], window("@me2", "2:notes"));
-        assert_eq!(out[7], window("@me3", "3:w3"));
-        assert_eq!(out[12], window("@me9", "9:w9"));
+        assert_eq!(out[4], window("@me2", "2:notes"));
+        assert_eq!(out[6], window("@me3", "3:w3"));
+        assert_eq!(out[9], window("@me9", "9:w9"));
         assert_eq!(
             out[out.len() - 3..],
             [
@@ -1122,7 +1118,7 @@ mod tests {
             matches!(&out[3], Line::Agent(r) if r.pane == "%3"),
             "{out:?}"
         );
-        assert_eq!(all(&status())[13], pane("%12", "vim", "@me9", true));
+        assert_eq!(all(&status())[10], pane("%12", "vim", "@me9", true));
     }
 
     #[test]
@@ -1137,9 +1133,9 @@ mod tests {
         let out = all(&s);
         let web = out.iter().position(|l| *l == session("web")).unwrap();
         assert_eq!(out[web + 1], window("@web1", "1:w1"));
-        assert_eq!(out[web + 4], window("=web:4", "4:w4"), "a tmux target");
+        assert_eq!(out[web + 3], window("=web:4", "4:w4"), "a tmux target");
         assert!(
-            matches!(&out[web + 7], Line::Agent(r) if r.pane == "%9"),
+            matches!(&out[web + 5], Line::Agent(r) if r.pane == "%9"),
             "{out:?}"
         );
         assert_eq!(
@@ -1160,7 +1156,7 @@ mod tests {
                 Line::Agent(Row {
                     pane: "%1".into(),
                     state: State::Blocked,
-                    label: "claude".into(),
+                    label: "br-%1".into(),
                     age: "2m".into(),
                     window_id: Some("@ops2".into()),
                     active: true,
@@ -1168,10 +1164,6 @@ mod tests {
                 Line::Place {
                     pane: "%1".into(),
                     text: "ops 2:w2".into()
-                },
-                Line::Place {
-                    pane: "%1".into(),
-                    text: "br-%1".into()
                 },
             ]
         );
@@ -1198,19 +1190,17 @@ mod tests {
             .iter()
             .position(|l| matches!(l, Line::Agent(r) if r.pane == "%7"))
             .unwrap();
+        assert!(
+            matches!(&out[p7], Line::Agent(r) if r.label == "br-%7"),
+            "outside known windows, the agent's own branch: {out:?}"
+        );
         assert_eq!(
-            out[p7 + 1..p7 + 3],
-            [
-                Line::Place {
-                    pane: "%7".into(),
-                    text: "zz 4:w4".into()
-                },
-                Line::Place {
-                    pane: "%7".into(),
-                    text: "br-%7".into()
-                },
-            ],
-            "outside known windows, the agent's own session, window, and branch"
+            out[p7 + 1..p7 + 2],
+            [Line::Place {
+                pane: "%7".into(),
+                text: "zz 4:w4".into()
+            }],
+            "and its own session and window"
         );
         s.panes
             .iter_mut()
@@ -1310,7 +1300,7 @@ mod tests {
             Line::Agent(r) => r.clone(),
             other => panic!("{other:?}"),
         };
-        assert_eq!(agent_text(&row, 10), "claude  2m");
+        assert_eq!(agent_text(&row, 10), "br-%3   2m");
         row.label = "1:a-very-long-name".into();
         assert_eq!(agent_text(&row, 12), "1:a-very\u{2026} 2m");
     }
@@ -1470,7 +1460,7 @@ mod tests {
     fn status_view_click_on_any_detail_line_selects_its_agent() {
         let mut app = app_in("@me1");
         app.mode = Mode::Status;
-        assert_eq!(app.on_click(5), Action::Jump("%2".into()), "branch line");
+        assert_eq!(app.on_click(3), Action::Jump("%2".into()), "location line");
         assert_eq!(app.selected, Some(1));
         assert_eq!(app.on_click(1), Action::Jump("%1".into()), "location line");
         assert_eq!(app.selected, Some(0));
@@ -1478,18 +1468,22 @@ mod tests {
     }
 
     #[test]
-    fn click_on_window_agent_or_place_line_jumps() {
+    fn click_on_window_agent_or_pane_jumps() {
         let mut app = app_in("@me9");
-        assert_eq!(app.on_click(8), Action::Jump("%2".into()));
+        assert_eq!(app.on_click(7), Action::Jump("%2".into()));
         assert_eq!(app.selected, Some(7));
-        assert_eq!(app.on_click(9), Action::Jump("%2".into()), "place line");
         assert_eq!(
-            app.on_click(5),
+            app.on_click(8),
+            Action::Jump("%4".into()),
+            "the next agent, with no place line between"
+        );
+        assert_eq!(
+            app.on_click(4),
             Action::Jump("@me2".into()),
             "window header"
         );
         assert_eq!(app.selected, Some(4));
-        assert_eq!(app.on_click(4), Action::Jump("%10".into()), "plain pane");
+        assert_eq!(app.on_click(3), Action::Jump("%10".into()), "plain pane");
         assert_eq!(app.selected, Some(3));
         assert_eq!(app.on_click(99), Action::None);
     }
@@ -1498,7 +1492,7 @@ mod tests {
     fn click_on_session_header_folds_and_unfolds_it() {
         let mut app = app_in("@me9");
         assert_eq!(
-            app.on_click(14),
+            app.on_click(11),
             Action::Collapse {
                 session: "ops".into(),
                 collapsed: true
@@ -1507,9 +1501,9 @@ mod tests {
         assert_eq!(app.selected, Some(11));
         app.set_status(status_collapsed(&["ops"]));
         let out = app.lines();
-        assert_eq!(out[14], folded("ops", &[(State::Blocked, 1)]));
+        assert_eq!(out[11], folded("ops", &[(State::Blocked, 1)]));
         assert_eq!(
-            app.on_click(14),
+            app.on_click(11),
             Action::Collapse {
                 session: "ops".into(),
                 collapsed: false
@@ -1556,7 +1550,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_the_place_of_an_unplaced_agent_selects_the_agent() {
+    fn clicking_an_unplaced_agent_selects_it_not_its_header() {
         let mut s = status();
         let mut unplaced = rec("%8", State::Idle, "zz", 4, true);
         unplaced.window_id = None;
@@ -1565,7 +1559,7 @@ mod tests {
         let mut app = app_in("@me1");
         app.set_status(s);
         let out = app.lines();
-        assert_eq!(out[out.len() - 3], window("%8", "?"));
+        assert_eq!(out[out.len() - 2], window("%8", "?"));
         assert_eq!(app.on_click(out.len() - 1), Action::Jump("%8".into()));
         assert!(
             matches!(&app.items()[app.selected.unwrap()], Item::Agent(r) if r.pane == "%8"),
@@ -1580,8 +1574,14 @@ mod tests {
         assert_eq!(line_of(&out, 0), Some(0), "a session header");
         assert_eq!(line_of(&out, 1), Some(1));
         assert_eq!(line_of(&out, 2), Some(2));
-        assert_eq!(line_of(&out, 3), Some(4), "a plain pane");
+        assert_eq!(line_of(&out, 3), Some(3), "a plain pane");
         assert_eq!(line_of(&out, 99), None);
+        let out = lines(&status(), Mode::Status, "", HOME);
+        assert_eq!(
+            line_of(&out, 1),
+            Some(2),
+            "past the first agent's location line"
+        );
     }
 
     #[test]
@@ -1597,7 +1597,7 @@ mod tests {
         );
         assert_eq!(out[1], session("ops"));
         assert_eq!(out.last(), Some(&folded("zz", &[])), "no agents: no counts");
-        assert_eq!(out.len(), all(&status()).len() - 13 - 2);
+        assert_eq!(out.len(), all(&status()).len() - 10 - 2);
         assert_eq!(panes(&out), ["%1", "%5"]);
     }
 
@@ -1702,19 +1702,21 @@ mod tests {
     #[test]
     fn scrolling_keeps_headers_and_place_lines_in_view() {
         let out = all(&status());
-        assert_eq!(scroll(&out, 15, 16, 5), 14, "a window shows its session");
+        assert_eq!(scroll(&out, 12, 13, 5), 11, "a window shows its session");
         assert_eq!(
             scroll(&out, 2, 5, 5),
             0,
             "a first agent shows its window and session"
         );
-        assert_eq!(scroll(&out, 13, 14, 5), 12, "a first pane shows its window");
+        assert_eq!(scroll(&out, 10, 11, 5), 9, "a first pane shows its window");
+        assert_eq!(scroll(&out, 8, 9, 5), 8, "a later agent needs only itself");
+        assert_eq!(scroll(&out, 13, 0, 5), 9, "down: the agent at the bottom");
+        let status_view = lines(&status(), Mode::Status, "", HOME);
         assert_eq!(
-            scroll(&out, 10, 11, 5),
-            10,
-            "a later agent needs only itself"
+            scroll(&status_view, 4, 0, 5),
+            1,
+            "down: its location line too"
         );
-        assert_eq!(scroll(&out, 16, 0, 5), 13, "down: the place line too");
         assert_eq!(scroll(&out, 4, 2, 5), 2, "already in view");
         assert_eq!(scroll(&out, 4, 2, 0), 2, "no height");
     }

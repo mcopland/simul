@@ -130,11 +130,14 @@ fn sidebar_renders_agents() {
         .unwrap();
     // Renaming after the sidebar opens checks that window renames reach it.
     h.tmux(&["rename-window", "-t", &agent, "agents"]);
+    // The agent's place sits beside its symbol, with no line naming the agent.
+    let row = format!("\n 1:agents\n   \u{2298} {}", place_of(&h, &agent));
     let mut screen = String::new();
     eventually("agent row rendered", || {
         screen = h.tmux(&["capture-pane", "-p", "-t", &side.0]);
-        screen.contains("\n 1:agents\n   \u{2298} claude")
+        screen.contains(&row)
     });
+    assert!(!screen.contains("claude"), "{screen}");
     assert!(screen.starts_with('t'), "session header first: {screen}");
     assert!(screen.contains("f:all"), "{screen}");
 }
@@ -320,7 +323,7 @@ fn selected_row_is_bold_without_a_block() {
         .nth(1)
         .unwrap();
     assert!(
-        style_of(row, "claude").is_some_and(|s| s.bold),
+        style_of(row, &place_of(&h, &mine)).is_some_and(|s| s.bold),
         "the agent under its window header is selected: {row:?}"
     );
     let symbol = style_of(row, "\u{25d0}").unwrap();
