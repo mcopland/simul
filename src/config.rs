@@ -18,7 +18,6 @@ pub struct Config {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct SidebarConfig {
-    pub width: u16,
     /// Hide the session and windows from tmux's first status line, keeping status-right,
     /// while the sidebar is shown.
     pub hide_status: bool,
@@ -56,10 +55,7 @@ impl Default for Config {
 
 impl Default for SidebarConfig {
     fn default() -> SidebarConfig {
-        SidebarConfig {
-            width: 30,
-            hide_status: true,
-        }
+        SidebarConfig { hide_status: true }
     }
 }
 
@@ -109,7 +105,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = load_from(&dir.path().join("nope.toml")).unwrap();
         assert_eq!(cfg, Config::default());
-        assert_eq!(cfg.sidebar.width, 30);
         assert!(cfg.sidebar.hide_status);
         assert_eq!(cfg.notify.dedupe_secs, 10);
         assert!(!cfg.notify.desktop, "system notifications are opt-in");
@@ -135,18 +130,30 @@ mod tests {
     fn partial_file_overrides_only_given_keys() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[sidebar]\nwidth = 30\n").unwrap();
+        std::fs::write(&path, "[sidebar]\nhide_status = false\n").unwrap();
         let cfg = load_from(&path).unwrap();
-        assert_eq!(cfg.sidebar.width, 30);
-        assert!(cfg.sidebar.hide_status);
+        assert!(!cfg.sidebar.hide_status);
         assert!(cfg.notify.enabled);
+        assert_eq!(cfg.blocked_threshold_ms, 1500);
+    }
+
+    #[test]
+    fn retired_sidebar_width_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[sidebar]\nwidth = 30\nhide_status = false\n").unwrap();
+        let cfg = load_from(&path).unwrap();
+        assert!(
+            !cfg.sidebar.hide_status,
+            "the rest of the table still applies"
+        );
     }
 
     #[test]
     fn bad_file_names_the_path() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        std::fs::write(&path, "[sidebar]\nwidth = \"wide\"\n").unwrap();
+        std::fs::write(&path, "[sidebar]\nhide_status = \"wide\"\n").unwrap();
         let err = format!("{:#}", load_from(&path).unwrap_err());
         assert!(err.contains("config.toml"), "{err}");
     }

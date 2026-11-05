@@ -4,6 +4,7 @@ pub mod scan;
 pub mod server;
 pub mod state;
 pub mod update;
+pub mod width;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
@@ -20,7 +21,7 @@ use crate::kiro_sessions;
 use crate::log;
 use crate::protocol::{GitStatus, Identity, Status, WindowInfo, now_ms};
 use crate::tmux::{self, Tmux, shell_quote, tmux_double_quote};
-use state::{Snapshot, Store, Transition};
+use state::{PaneInfo, Snapshot, Store, Transition};
 
 const RECONCILE_DEBOUNCE: Duration = Duration::from_millis(50);
 const TICK: Duration = Duration::from_secs(1);
@@ -28,6 +29,7 @@ const TICK: Duration = Duration::from_secs(1);
 const GIT_REFRESH: Duration = Duration::from_secs(5);
 /// Index in tmux hook arrays, so simul's entries never replace the user's.
 const HOOK_INDEX: u32 = 7463;
+const LAYOUT_HOOK: &str = "window-layout-changed";
 /// Global tmux option holding the status-format[0] hidden while the sidebar is on.
 const SAVED_STATUS: &str = "@simul-status-format";
 /// Session option marking a session folded in the sidebar. It lives in tmux so it survives
@@ -64,6 +66,8 @@ pub enum Cmd {
         name: String,
     },
     Reconcile,
+    /// A debounced `Resized`: reasserts sidebar widths alone.
+    CheckWidths,
     Tick,
     Git {
         cwd: String,
@@ -113,6 +117,7 @@ struct Daemon {
     tx: mpsc::Sender<Cmd>,
     updates: broadcast::Sender<Status>,
     reconcile_pending: bool,
+    widths_pending: bool,
     git_inflight: HashSet<String>,
     sidebar_on: bool,
     /// Windows seen at the last reconcile; only windows new since then get a sidebar.
@@ -136,6 +141,8 @@ struct Daemon {
     plugin_version: Option<String>,
     /// An installer is running.
     updating: bool,
+    /// Sidebar widths last asked of tmux (see `width::resizes`).
+    width_requested: width::Requested,
 }
 
 pub async fn run(opts: Options) -> Result<()> {
@@ -179,6 +186,7 @@ pub async fn run(opts: Options) -> Result<()> {
         tx,
         updates,
         reconcile_pending: false,
+        widths_pending: false,
         git_inflight: HashSet::new(),
         sidebar_on: false,
         known_windows: HashSet::new(),
@@ -192,6 +200,7 @@ pub async fn run(opts: Options) -> Result<()> {
         plugin_version: plugin.as_deref().and_then(update::wanted_version),
         plugin,
         updating: false,
+        width_requested: width::Requested::new(),
     };
     d.install_tmux_hooks().await;
     d.reconcile().await;
@@ -285,7 +294,11 @@ impl Daemon {
                 let on = self.toggle().await;
                 let _ = reply.send(on);
             }
-            Cmd::Resized => self.reassert_widths().await,
+            Cmd::Resized => self.schedule_width_check(),
+            Cmd::CheckWidths => {
+                self.widths_pending = false;
+                self.check_widths().await;
+            }
             Cmd::Collapse {
                 session,
                 collapsed,
@@ -511,6 +524,29 @@ impl Daemon {
         });
     }
 
+    /// Layout hooks fire on every step of a border drag, so checks are debounced, and skipped
+    /// while no sidebar is shown.
+    fn schedule_width_check(&mut self) {
+        if !self.sidebar_on || self.widths_pending {
+            return;
+        }
+        self.widths_pending = true;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(RECONCILE_DEBOUNCE).await;
+            // See fetch_git: a closed channel means shutdown.
+            let _ = tx.send(Cmd::CheckWidths).await;
+        });
+    }
+
+    /// Reasserts widths from a fresh look at the panes, without a full reconcile.
+    async fn check_widths(&mut self) {
+        match self.opts.tmux.snapshot(self.focus_events).await {
+            Ok(snap) => self.reassert_widths(&snap.panes).await,
+            Err(e) => log!("failed to read panes to check sidebar widths: {e:#}"),
+        }
+    }
+
     fn schedule_reconcile(&mut self) {
         if self.reconcile_pending {
             return;
@@ -542,6 +578,7 @@ impl Daemon {
                 log!("recovered agent panes: {}", added.join(" "));
             }
             self.restart_stale_sidebars().await;
+            self.set_layout_hook(self.sidebar_on).await;
         }
         let transitions = self.store.reconcile(&snap, now);
         self.windows = tmux::windows(&snap);
@@ -554,6 +591,10 @@ impl Daemon {
         self.snapshot = snap;
         self.refresh_git();
         self.maintain_sidebars().await;
+        // Layout changes in the control client's session trigger a reconcile, so this also
+        // snaps those sidebars back to their share; the layout hook covers other sessions.
+        let panes = self.snapshot.panes.clone();
+        self.reassert_widths(&panes).await;
         self.on_transitions(transitions, "viewed");
         self.publish();
     }
@@ -640,16 +681,12 @@ impl Daemon {
         }
     }
 
-    /// tmux sends no control-mode notification for terminal focus, so hooks poke the daemon.
+    /// tmux sends no control-mode notification for terminal focus, nor `%layout-change` for
+    /// windows outside the control client's session, so hooks poke the daemon.
     async fn install_tmux_hooks(&mut self) {
         self.focus_events = self.query_focus_events().await;
-        let cmd = format!(
-            "SIMUL_SOCKET={} {} internal refresh >/dev/null 2>&1",
-            shell_quote(&self.opts.socket.to_string_lossy()),
-            shell_quote(&self.opts.exe.to_string_lossy()),
-        );
-        let refresh = format!("run-shell -b {}", tmux_double_quote(&cmd));
-        let resized = refresh.replace("internal refresh", "internal resized");
+        let refresh = self.hook_command("refresh");
+        let resized = self.hook_command("resized");
         for (hook, run) in [
             ("pane-focus-in", &refresh),
             ("pane-focus-out", &refresh),
@@ -664,6 +701,34 @@ impl Daemon {
             {
                 log!("failed to install tmux hook {name}: {e:#}");
             }
+        }
+    }
+
+    /// A hook body that runs `simul internal <sub>` against this daemon.
+    fn hook_command(&self, sub: &str) -> String {
+        let cmd = format!(
+            "SIMUL_SOCKET={} {} internal {sub} >/dev/null 2>&1",
+            shell_quote(&self.opts.socket.to_string_lossy()),
+            shell_quote(&self.opts.exe.to_string_lossy()),
+        );
+        format!("run-shell -b {}", tmux_double_quote(&cmd))
+    }
+
+    /// Installs, or removes, the hook that reports a dragged sidebar border in any session.
+    /// It fires on every layout change, so it is only set while sidebars are shown.
+    async fn set_layout_hook(&self, on: bool) {
+        let name = format!("{LAYOUT_HOOK}[{HOOK_INDEX}]");
+        let run = self.hook_command("resized");
+        let args: &[&str] = if on {
+            &["set-hook", "-g", &name, &run]
+        } else {
+            &["set-hook", "-gu", &name]
+        };
+        if let Err(e) = self.opts.tmux.run_async(args).await {
+            log!(
+                "failed to set tmux hook {name} {}: {e:#}",
+                if on { "on" } else { "off" }
+            );
         }
     }
 
@@ -698,6 +763,7 @@ impl Daemon {
                     log!("failed to close sidebar {}: {e:#}", pane.id);
                 }
             }
+            self.set_layout_hook(false).await;
             // Regardless of config, so turning hide_status off still brings the line back.
             if let Err(e) = self.restore_status().await {
                 log!("failed to restore the status line: {e:#}");
@@ -708,6 +774,7 @@ impl Daemon {
             for window in self.windows().difference(&have) {
                 self.add_sidebar(window).await;
             }
+            self.set_layout_hook(true).await;
             if self.opts.config.sidebar.hide_status
                 && let Err(e) = self.hide_status().await
             {
@@ -869,13 +936,12 @@ impl Daemon {
     }
 
     async fn add_sidebar(&self, window: &str) {
-        let width = self.opts.config.sidebar.width.to_string();
         let cmd = self.sidebar_command();
         let split = [
             "split-window",
             "-hbfd",
             "-l",
-            &width,
+            &width::split_size(),
             "-t",
             window,
             "-P",
@@ -899,19 +965,21 @@ impl Daemon {
         }
         self.tag_sidebar_build(&pane).await;
         // The split fired window-layout-changed before the tag existed; rerun the user's
-        // hooks so any that skip sidebars (e.g. pane-count checks) see it.
-        let rerun = ["set-hook", "-R", "-t", &pane, "window-layout-changed"];
+        // hooks so any that skip sidebars (e.g. pane-count checks) see it. This also reruns
+        // simul's own width hook, which is cheap: the width is already right.
+        let rerun = ["set-hook", "-R", "-t", &pane, LAYOUT_HOOK];
         if let Err(e) = self.opts.tmux.run_async(&rerun).await {
             log!("failed to rerun layout hooks for {pane}: {e:#}");
         }
     }
 
-    async fn reassert_widths(&mut self) {
-        let width = self.opts.config.sidebar.width.to_string();
-        for pane in self.snapshot.panes.iter().filter(|p| p.is_sidebar) {
-            let resize = ["resize-pane", "-t", &pane.id, "-x", &width];
+    /// Brings every sidebar in `panes` back to its share of the window (see `width::resizes`).
+    async fn reassert_widths(&mut self, panes: &[PaneInfo]) {
+        for (pane, cols) in width::resizes(panes, &mut self.width_requested) {
+            let cols = cols.to_string();
+            let resize = ["resize-pane", "-t", &pane, "-x", &cols];
             if let Err(e) = self.opts.tmux.run_async(&resize).await {
-                log!("failed to resize sidebar {}: {e:#}", pane.id);
+                log!("failed to resize sidebar {pane} to {cols} columns: {e:#}");
             }
         }
     }

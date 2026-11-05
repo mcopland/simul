@@ -16,7 +16,7 @@ pub enum Request {
     Refresh,
     /// Shows or hides the sidebar in every window; replies with `Toggled`.
     Toggle,
-    /// Reasserts sidebar widths after a client resize.
+    /// Reasserts sidebar widths after a client resize or a layout change.
     Resized,
     /// Folds or unfolds a session in every sidebar; replies with `Ack`.
     Collapse {

@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use crate::daemon::state::{PaneInfo, Snapshot};
 use crate::protocol::{PaneSummary, WindowInfo};
 
-pub const PANES_FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_id}\t#{pane_active}\t#{window_active}\t#{pane_current_command}\t#{pane_current_path}\t#{@simul-sidebar}\t#{window_panes}\t#{@simul-collapsed}\t#{window_name}";
+pub const PANES_FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_id}\t#{pane_active}\t#{window_active}\t#{pane_current_command}\t#{pane_current_path}\t#{@simul-sidebar}\t#{window_panes}\t#{@simul-collapsed}\t#{pane_width}\t#{window_width}\t#{window_zoomed_flag}\t#{window_name}";
 pub const CLIENTS_FORMAT: &str = "#{client_session}\t#{client_flags}\t#{client_tty}";
 
 #[derive(Clone, Debug)]
@@ -91,7 +91,7 @@ pub fn parse_snapshot(panes: &str, clients: &str, focus_events: bool) -> Snapsho
     let mut seen = HashSet::new();
     for line in panes.lines() {
         // The window name comes last so a tab inside it stays part of the name.
-        let f: Vec<&str> = line.splitn(12, '\t').collect();
+        let f: Vec<&str> = line.splitn(15, '\t').collect();
         let [
             id,
             session,
@@ -104,12 +104,20 @@ pub fn parse_snapshot(panes: &str, clients: &str, focus_events: bool) -> Snapsho
             sidebar,
             window_panes,
             collapsed,
+            width,
+            window_width,
+            zoomed,
             window_name,
         ] = f[..]
         else {
             continue;
         };
-        let (Ok(window), Ok(window_panes)) = (window.parse(), window_panes.parse()) else {
+        let (Ok(window), Ok(window_panes), Ok(width), Ok(window_width)) = (
+            window.parse(),
+            window_panes.parse(),
+            width.parse(),
+            window_width.parse(),
+        ) else {
             continue;
         };
         if pane_active == "1" && window_active == "1" && viewing_sessions.contains(session) {
@@ -129,6 +137,9 @@ pub fn parse_snapshot(panes: &str, clients: &str, focus_events: bool) -> Snapsho
             window_panes,
             active: pane_active == "1",
             session_collapsed: collapsed == "1",
+            width,
+            window_width,
+            window_zoomed: zoomed == "1",
             window_name: window_name.to_owned(),
         });
     }
@@ -195,11 +206,11 @@ pub fn tmux_double_quote(s: &str) -> String {
 mod tests {
     use super::*;
 
-    const PANES: &str = "%1\tmain\t1\t@1\t1\t1\t2.1.307\t/w/a\t\t2\t\tapi\n\
-%2\tmain\t1\t@1\t0\t1\tzsh\t/w/a\t\t2\t\tapi\n\
-%3\tmain\t2\t@2\t1\t0\tclaude\t/w/b\t\t1\t\tweb\n\
-%4\twork\t1\t@3\t1\t1\tclaude\t/w/c\t\t2\t1\tmy\ttabbed name\n\
-%5\twork\t1\t@3\t0\t1\tsimul\t/w/c\t1\t2\t1\tmy\ttabbed name\n";
+    const PANES: &str = "%1\tmain\t1\t@1\t1\t1\t2.1.307\t/w/a\t\t2\t\t120\t200\t0\tapi\n\
+%2\tmain\t1\t@1\t0\t1\tzsh\t/w/a\t\t2\t\t79\t200\t0\tapi\n\
+%3\tmain\t2\t@2\t1\t0\tclaude\t/w/b\t\t1\t\t200\t200\t0\tweb\n\
+%4\twork\t1\t@3\t1\t1\tclaude\t/w/c\t\t2\t1\t150\t200\t1\tmy\ttabbed name\n\
+%5\twork\t1\t@3\t0\t1\tsimul\t/w/c\t1\t2\t1\t49\t200\t1\tmy\ttabbed name\n";
 
     #[test]
     fn parses_panes() {
@@ -218,10 +229,15 @@ mod tests {
                 window_panes: 2,
                 active: true,
                 session_collapsed: false,
+                width: 120,
+                window_width: 200,
+                window_zoomed: false,
                 window_name: "api".into(),
             }
         );
         assert!(snap.panes[4].is_sidebar);
+        assert_eq!(snap.panes[4].width, 49);
+        assert!(snap.panes[4].window_zoomed);
         assert!(snap.panes[3].session_collapsed, "a session option");
         assert!(!snap.panes[1].active);
         assert_eq!(snap.panes[3].window_name, "my\ttabbed name");
@@ -260,8 +276,7 @@ mod tests {
 
     #[test]
     fn linked_windows_are_listed_once() {
-        let panes =
-            "%1\ta\t1\t@1\t1\t0\tclaude\t/w\t\t1\t\tx\n%1\tb\t3\t@1\t1\t1\tclaude\t/w\t\t1\t\tx\n";
+        let panes = "%1\ta\t1\t@1\t1\t0\tclaude\t/w\t\t1\t\t80\t80\t0\tx\n%1\tb\t3\t@1\t1\t1\tclaude\t/w\t\t1\t\t80\t80\t0\tx\n";
         let snap = parse_snapshot(panes, "b\tattached,focused\t/dev/ttys1\n", true);
         assert_eq!(snap.panes.len(), 1);
         assert_eq!(snap.viewed, HashSet::from(["%1".to_string()]));

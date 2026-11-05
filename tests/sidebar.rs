@@ -69,7 +69,7 @@ fn toggle_adds_and_removes_sidebars_in_every_window() {
         side.iter().map(|s| s.1.clone()).collect::<HashSet<_>>(),
         windows(&h)
     );
-    assert!(side.iter().all(|s| s.2 == 30), "{side:?}");
+    assert!(side.iter().all(|s| s.2 == quarter(&h, &s.1)), "{side:?}");
     eventually("sidebar process running", || {
         h.tmux(&[
             "display-message",
@@ -104,17 +104,137 @@ fn closing_the_last_other_pane_closes_the_window() {
     assert_eq!(sidebars(&h).len(), 1, "the other window keeps its sidebar");
 }
 
+/// A quarter of `window`'s width: what its sidebar should take.
+fn quarter(h: &Harness, window: &str) -> u32 {
+    let width: u32 = h
+        .tmux(&["display-message", "-p", "-t", window, "#{window_width}"])
+        .parse()
+        .unwrap();
+    width * 25 / 100
+}
+
 #[test]
 fn resize_reasserts_width() {
-    let mut h = Harness::with_config("[sidebar]\nwidth = 30\n");
+    let mut h = Harness::new();
     h.start_daemon();
     toggle(&h);
-    let (pane, _, width) = sidebars(&h).remove(0);
-    assert_eq!(width, 30);
+    let (pane, window, width) = sidebars(&h).remove(0);
+    assert_eq!(width, quarter(&h, &window));
     h.tmux(&["resize-pane", "-t", &pane, "-x", "70"]);
+    eventually("a drag snaps back on its own", || {
+        sidebars(&h)[0].2 == quarter(&h, &window)
+    });
+    h.tmux(&["resize-window", "-t", &window, "-x", "120"]);
+    eventually("a quarter of the resized window", || {
+        sidebars(&h)[0].2 == 30
+    });
+}
+
+/// simul's own `window-layout-changed` hook, empty when unset.
+fn layout_hook(h: &Harness) -> String {
+    h.tmux(&["show-hooks", "-g", "window-layout-changed"])
+        .lines()
+        .filter(|l| l.contains("internal resized"))
+        .collect()
+}
+
+#[test]
+fn internal_resized_reasserts_every_width() {
+    let mut h = Harness::new();
+    h.tmux(&[
+        "new-session",
+        "-d",
+        "-x",
+        "200",
+        "-y",
+        "50",
+        "-s",
+        "u",
+        "sh",
+    ]);
+    h.start_daemon();
+    toggle(&h);
+    eventually("a sidebar in each session", || sidebars(&h).len() == 2);
+    // Without the hook, a drag outside the control client's session is only noticed through
+    // `internal resized` (as tmux's client-resized hook sends).
+    h.tmux(&["set-hook", "-gu", "window-layout-changed[7463]"]);
+    assert_eq!(layout_hook(&h), "");
+    let side = sidebars(&h);
+    for (pane, _, _) in &side {
+        h.tmux(&["resize-pane", "-t", pane, "-x", "70"]);
+    }
     let out = h.simul().args(["internal", "resized"]).output().unwrap();
     assert!(out.status.success());
-    eventually("width restored", || sidebars(&h)[0].2 == 30);
+    eventually("both widths restored", || {
+        sidebars(&h).iter().all(|s| s.2 == quarter(&h, &s.1))
+    });
+}
+
+#[test]
+fn layout_hook_is_set_only_while_sidebars_are_shown() {
+    let mut h = Harness::new();
+    h.start_daemon();
+    assert_eq!(layout_hook(&h), "");
+    toggle(&h);
+    assert_ne!(layout_hook(&h), "");
+    toggle(&h);
+    assert_eq!(layout_hook(&h), "");
+}
+
+#[test]
+fn a_zoomed_window_stays_zoomed() {
+    let mut h = Harness::new();
+    h.start_daemon();
+    toggle(&h);
+    let (pane, window, _) = sidebars(&h).remove(0);
+    h.tmux(&["resize-pane", "-Z", "-t", &pane]);
+    let zoomed = || {
+        h.tmux(&[
+            "display-message",
+            "-p",
+            "-t",
+            &window,
+            "#{window_zoomed_flag}",
+        ])
+    };
+    assert_eq!(zoomed(), "1");
+    // Long enough for the layout hook and a debounced width check.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(zoomed(), "1", "the daemon left the zoom alone");
+    h.tmux(&["resize-pane", "-Z", "-t", &pane]);
+    eventually("back to its share once unzoomed", || {
+        sidebars(&h)[0].2 == quarter(&h, &window)
+    });
+}
+
+#[test]
+fn a_drag_in_another_session_snaps_back() {
+    let mut h = Harness::new();
+    // The daemon's control client attaches to one session; the hook covers the rest.
+    h.tmux(&[
+        "new-session",
+        "-d",
+        "-x",
+        "200",
+        "-y",
+        "50",
+        "-s",
+        "u",
+        "sh",
+    ]);
+    h.start_daemon();
+    toggle(&h);
+    eventually("a sidebar in each session", || sidebars(&h).len() == 2);
+    for session in ["t", "u"] {
+        let pane = sidebar_in(&h, session);
+        let window = h.tmux(&["display-message", "-p", "-t", &pane, "#{window_id}"]);
+        h.tmux(&["resize-pane", "-t", &pane, "-x", "70"]);
+        eventually(&format!("{session}'s sidebar snaps back"), || {
+            sidebars(&h)
+                .iter()
+                .any(|s| s.0 == pane && s.2 == quarter(&h, &window))
+        });
+    }
 }
 
 #[test]
