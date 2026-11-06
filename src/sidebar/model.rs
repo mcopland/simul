@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -267,7 +268,7 @@ pub fn lines(status: &Status, mode: Mode, text: &str, home: &str) -> Vec<Line> {
 }
 
 /// Lists every window under its session, and each pane under its window, as an agent row when
-/// an agent runs there. Sessions sort by name so rows don't jump as focus moves. A collapsed
+/// an agent runs there. Sessions sort by name, numbers in numeric order, so rows don't jump as focus moves. A collapsed
 /// session is just its header, with its agents counted by state, unless the text filter is
 /// active, so matches are never hidden.
 fn tree_lines(status: &Status, needle: &str, home: &str) -> Vec<Line> {
@@ -321,13 +322,12 @@ fn tree_lines(status: &Status, needle: &str, home: &str) -> Vec<Line> {
             (hit || !entries.is_empty()).then_some((w, entries))
         })
         .collect();
-    windows.sort_by_key(|(w, _)| {
-        (
-            w.session.is_none(),
-            w.session.map(str::to_owned),
-            w.index.is_none(),
-            w.index,
-        )
+    windows.sort_by(|(a, _), (b, _)| {
+        let session = match (a.session, b.session) {
+            (Some(x), Some(y)) => natural_cmp(x, y),
+            (x, y) => x.is_none().cmp(&y.is_none()),
+        };
+        session.then_with(|| (a.index.is_none(), a.index).cmp(&(b.index.is_none(), b.index)))
     });
     // A folded session's header counts the agents in all its windows.
     let mut states: HashMap<Option<&str>, Vec<State>> = HashMap::new();
@@ -447,6 +447,45 @@ fn pane_number(pane: &str) -> u32 {
     pane.trim_start_matches('%')
         .parse::<u32>()
         .unwrap_or(u32::MAX)
+}
+
+/// Orders names with runs of digits compared as numbers, so `6267` comes before `11212`.
+fn natural_cmp(a: &str, b: &str) -> Ordering {
+    let (mut x, mut y) = (chunks(a), chunks(b));
+    loop {
+        let (p, q) = match (x.next(), y.next()) {
+            // Equal chunks can still differ in leading zeros; keep the order total.
+            (None, None) => return a.cmp(b),
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(p), Some(q)) => (p, q),
+        };
+        let digits = |s: &str| s.starts_with(|c: char| c.is_ascii_digit());
+        let order = if digits(p) && digits(q) {
+            // By length, not by parsing, so no run of digits is too long.
+            let (p, q) = (p.trim_start_matches('0'), q.trim_start_matches('0'));
+            p.len().cmp(&q.len()).then_with(|| p.cmp(q))
+        } else {
+            p.cmp(q)
+        };
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+}
+
+/// Splits `s` into alternating runs of ASCII digits and everything else.
+fn chunks(s: &str) -> impl Iterator<Item = &str> {
+    let mut rest = s;
+    std::iter::from_fn(move || {
+        let digit = rest.chars().next()?.is_ascii_digit();
+        let end = rest
+            .find(|c: char| c.is_ascii_digit() != digit)
+            .unwrap_or(rest.len());
+        let (chunk, tail) = rest.split_at(end);
+        rest = tail;
+        Some(chunk)
+    })
 }
 
 /// The entry's `place`; an agent outside known panes falls back to its own branch, then cwd.
@@ -1275,6 +1314,37 @@ mod tests {
             })
             .collect();
         assert_eq!(sessions, ["me", "ops", "web", "zz"]);
+    }
+
+    #[test]
+    fn sessions_sort_naturally() {
+        let mut s = status();
+        s.windows
+            .push(win("11212", 1, "w1", &[("%20", "zsh", true)]));
+        s.windows
+            .push(win("6267", 1, "w1", &[("%21", "zsh", true)]));
+        let sessions: Vec<String> = all(&s)
+            .into_iter()
+            .filter_map(|l| match l {
+                Line::Session { name, .. } => Some(name),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sessions, ["6267", "11212", "me", "ops", "web", "zz"]);
+    }
+
+    #[test]
+    fn natural_cmp_orders_digit_runs_numerically() {
+        use std::cmp::Ordering::*;
+        assert_eq!(natural_cmp("6267", "11212"), Less);
+        assert_eq!(natural_cmp("web2", "web10"), Less);
+        assert_eq!(natural_cmp("x1y10", "x1y2"), Greater);
+        assert_eq!(natural_cmp("a", "b"), Less);
+        assert_eq!(natural_cmp("me", "me"), Equal);
+        assert_ne!(natural_cmp("007", "7"), Equal, "order stays total");
+        assert_eq!(natural_cmp("007", "8"), Less, "leading zeros don't count");
+        let long = "9".repeat(40);
+        assert_eq!(natural_cmp(&long, &format!("1{long}")), Less);
     }
 
     #[test]
