@@ -13,6 +13,7 @@ pub struct Config {
     pub sidebar: SidebarConfig,
     pub notify: NotifyConfig,
     pub kiro: KiroConfig,
+    pub panes: PanesConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -42,6 +43,25 @@ pub struct KiroConfig {
     pub approval_patterns: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct PanesConfig {
+    /// Commands that mark a pane interactive rather than running, matched by name.
+    pub interactive: Vec<String>,
+}
+
+impl Default for PanesConfig {
+    fn default() -> PanesConfig {
+        let names = [
+            "vi", "vim", "nvim", "hx", "helix", "emacs", "nano", "micro", "kak", "less", "more",
+            "man", "ssh", "mosh", "htop", "btop", "top", "watch", "lazygit", "tig",
+        ];
+        PanesConfig {
+            interactive: names.into_iter().map(str::to_owned).collect(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Config {
         Config {
@@ -49,6 +69,7 @@ impl Default for Config {
             sidebar: SidebarConfig::default(),
             notify: NotifyConfig::default(),
             kiro: KiroConfig::default(),
+            panes: PanesConfig::default(),
         }
     }
 }
@@ -111,6 +132,18 @@ mod tests {
         assert!(!cfg.notify.bell, "the terminal bell is opt-in");
         assert_eq!(cfg.blocked_threshold_ms, 1500);
         assert!(cfg.kiro.approval_patterns.is_empty());
+        for name in ["hx", "nvim", "less", "ssh"] {
+            assert!(cfg.panes.interactive.iter().any(|n| n == name), "{name}");
+        }
+    }
+
+    #[test]
+    fn interactive_list_replaces_the_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[panes]\ninteractive = [\"k9s\"]\n").unwrap();
+        let cfg = load_from(&path).unwrap();
+        assert_eq!(cfg.panes.interactive, vec!["k9s".to_string()]);
     }
 
     #[test]

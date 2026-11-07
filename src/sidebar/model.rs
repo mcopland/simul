@@ -928,6 +928,7 @@ mod tests {
                     active,
                     cwd: format!("{HOME}/src/{command}"),
                     git: None,
+                    run: None,
                 })
                 .collect(),
         }

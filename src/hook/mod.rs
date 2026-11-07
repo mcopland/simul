@@ -55,6 +55,14 @@ impl Agent {
         }
     }
 
+    /// The agent a pane running `pane_current_command` is, if any.
+    pub fn for_process(pane_current_command: &str) -> Option<Agent> {
+        Agent::all()
+            .iter()
+            .copied()
+            .find(|a| a.matches_process(pane_current_command))
+    }
+
     pub fn parse(self, event: &str, payload: &Value) -> Parsed {
         match self {
             Agent::Claude => claude::parse(event, payload),

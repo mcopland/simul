@@ -95,6 +95,29 @@ pub struct PaneSummary {
     /// The repo state at `cwd`; `None` outside git or before the daemon has looked.
     #[serde(default)]
     pub git: Option<GitStatus>,
+    /// What the pane's foreground process is doing, unless it is an agent or an idle shell.
+    #[serde(default)]
+    pub run: Option<Run>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RunState {
+    Running,
+    /// An editor, pager, remote shell, or monitor: a program you work in, not one you wait on.
+    Interactive,
+    /// The process ended while you weren't looking; lasts until you view the pane.
+    Finished,
+    /// Any state a newer daemon reports that this build doesn't know.
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Run {
+    pub state: RunState,
+    /// Unix ms the pane entered `state`.
+    pub since_ms: u64,
 }
 
 /// What `git status` reports, as counts of entries.
@@ -143,6 +166,17 @@ mod tests {
             serde_json::from_value(json!({"id": "@1", "session": "s", "index": 1, "name": "n"}))
                 .unwrap();
         assert!(w.panes.is_empty());
+        let p: PaneSummary =
+            serde_json::from_value(json!({"id": "%1", "command": "zsh", "active": true})).unwrap();
+        assert_eq!(p.run, None);
+    }
+
+    #[test]
+    fn run_states_read_forward_compatibly() {
+        let r: Run = serde_json::from_value(json!({"state": "finished", "since_ms": 5})).unwrap();
+        assert_eq!(r.state, RunState::Finished);
+        let r: Run = serde_json::from_value(json!({"state": "paused", "since_ms": 5})).unwrap();
+        assert_eq!(r.state, RunState::Unknown);
     }
 
     #[test]

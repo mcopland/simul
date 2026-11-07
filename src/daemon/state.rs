@@ -118,6 +118,8 @@ pub struct PaneInfo {
     pub window: u32,
     pub window_id: String,
     pub current_command: String,
+    /// The process tmux started in the pane, usually its shell; 0 if unknown.
+    pub pid: u32,
     pub path: String,
     pub is_sidebar: bool,
     pub window_panes: u32,
@@ -261,11 +263,7 @@ impl Store {
             if self.panes.contains_key(&info.id) {
                 continue;
             }
-            let Some(agent) = Agent::all()
-                .iter()
-                .copied()
-                .find(|a| a.matches_process(&info.current_command))
-            else {
+            let Some(agent) = Agent::for_process(&info.current_command) else {
                 continue;
             };
             let mut rec = PaneRecord::new(&info.id, agent, State::Unknown, now);
@@ -628,6 +626,7 @@ mod tests {
             window: 2,
             window_id: "@2".into(),
             current_command: cmd.into(),
+            pid: 0,
             path: "/w".into(),
             is_sidebar: false,
             window_panes: 1,

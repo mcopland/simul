@@ -345,6 +345,7 @@ mod tests {
                 active: true,
                 cwd: "/".into(),
                 git: None,
+                run: None,
             }],
         }
     }
