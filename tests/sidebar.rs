@@ -497,7 +497,8 @@ fn space_folds_a_session_in_every_sidebar_and_it_persists() {
     h.start_daemon();
     toggle(&h);
     eventually("a sidebar in each session", || sidebars(&h).len() == 2);
-    let folded = "u \u{25b8}";
+    // u's only pane runs `sleep`, which the folded header counts as running.
+    let folded = "u \u{25b8} \u{25b6}1";
     let shows = |h: &Harness, session: &str, line: &str| {
         let screen = h.tmux(&["capture-pane", "-p", "-t", &sidebar_in(h, session)]);
         screen.lines().any(|l| l.trim_end() == line)

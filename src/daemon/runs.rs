@@ -50,6 +50,18 @@ pub async fn shells_with_jobs(pids: &[u32]) -> Result<HashSet<u32>> {
     Ok(parse_jobs(&String::from_utf8_lossy(&out.stdout)))
 }
 
+/// The jobs to go on after a ps call that gave `result`, and its error. A failed call keeps
+/// what the last good one said: forgetting would end every running script.
+pub fn after_ps(
+    last: &HashSet<u32>,
+    result: Result<HashSet<u32>, String>,
+) -> (HashSet<u32>, Option<String>) {
+    match result {
+        Ok(jobs) => (jobs, None),
+        Err(e) => (last.clone(), Some(e)),
+    }
+}
+
 /// The foreground process of each plain pane, by pane id.
 #[derive(Debug, Default)]
 pub struct Runs {
@@ -286,5 +298,18 @@ mod tests {
     fn ps_output_names_shells_whose_terminal_belongs_to_another_group() {
         let out = "  97454 97454 97454\n  98275 98275 98301\n  500   500    -1\n garbage\n";
         assert_eq!(parse_jobs(out), HashSet::from([98275]));
+    }
+
+    #[test]
+    fn a_failed_ps_call_keeps_the_last_jobs() {
+        let last = HashSet::from([7]);
+        assert_eq!(
+            after_ps(&last, Err("ps: boom".into())),
+            (last.clone(), Some("ps: boom".into()))
+        );
+        assert_eq!(
+            after_ps(&last, Ok(HashSet::from([8]))),
+            (HashSet::from([8]), None)
+        );
     }
 }

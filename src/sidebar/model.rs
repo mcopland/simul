@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::cli::ls::fmt_age;
 use crate::daemon::state::{PaneRecord, State};
-use crate::protocol::{GitStatus, PaneSummary, Status, WindowInfo};
+use crate::protocol::{GitStatus, PaneSummary, Run, RunState, Status, WindowInfo};
 
 /// What the sidebar lists; `f` switches between the two.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -63,8 +63,9 @@ pub enum Line {
         name: String,
         /// Whether the session is marked collapsed; the text filter still shows it open.
         collapsed: bool,
-        /// While folded, its agents by state in `rank` order; `None` while open.
-        folded: Option<Vec<(State, usize)>>,
+        /// While folded, its agents by state and its running or finished panes, in
+        /// `mark_rank` order; `None` while open.
+        folded: Option<Vec<(Mark, usize)>>,
     },
     /// A window header; `id` is what jumping to it targets.
     Window {
@@ -83,7 +84,18 @@ pub enum Line {
         place: String,
         window: String,
         active: bool,
+        /// What its foreground process is doing; `None` at a shell prompt.
+        run: Option<RunState>,
+        /// Time in `run`, for running and finished processes; empty otherwise.
+        age: String,
     },
+}
+
+/// What a folded session header counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mark {
+    Agent(State),
+    Run(RunState),
 }
 
 /// Shapes, so states stay distinguishable without relying on color.
@@ -97,6 +109,46 @@ pub fn symbol(state: State) -> char {
         State::Idle => '\u{25cb}',
         State::Unknown => '\u{2205}',
     }
+}
+
+/// Shapes for plain panes, apart from every agent `symbol`.
+pub fn run_symbol(run: RunState) -> char {
+    match run {
+        RunState::Running => '\u{25b6}',
+        RunState::Finished => '\u{25a0}',
+        RunState::Interactive => '\u{25b7}',
+        // `pane_run` drops these, so none is drawn.
+        RunState::Unknown => ' ',
+    }
+}
+
+/// What a folded header shows for `mark`.
+pub fn mark_symbol(mark: Mark) -> char {
+    match mark {
+        Mark::Agent(s) => symbol(s),
+        Mark::Run(r) => run_symbol(r),
+    }
+}
+
+/// Agents by `rank`, then unseen finishes, then what still runs.
+fn mark_rank(mark: Mark) -> u8 {
+    match mark {
+        Mark::Agent(s) => rank(s),
+        Mark::Run(RunState::Finished) => 7,
+        Mark::Run(_) => 8,
+    }
+}
+
+/// The pane's run when it is one you wait on: running, or finished unseen. These show their
+/// age and count in folded headers.
+fn counted_run(p: &PaneSummary) -> Option<Run> {
+    p.run
+        .filter(|r| matches!(r.state, RunState::Running | RunState::Finished))
+}
+
+/// The pane's run, if this build knows how to draw it.
+fn pane_run(p: &PaneSummary) -> Option<RunState> {
+    p.run.map(|r| r.state).filter(|s| *s != RunState::Unknown)
 }
 
 /// A selectable line: what j/k step over and Enter acts on.
@@ -228,9 +280,17 @@ pub fn short_path(path: &str, home: &str) -> String {
 
 /// The agent line after its symbol: the label, then the age right-aligned to `width`.
 pub fn agent_text(row: &Row, width: usize) -> String {
-    let room = width.saturating_sub(row.age.chars().count() + 1);
-    let label = truncate(&row.label, room);
-    format!("{label:<room$} {}", row.age)
+    text_with_age(&row.label, &row.age, width)
+}
+
+/// `label`, then `age` right-aligned to `width`; just `label`, cut to fit, without an age.
+pub fn text_with_age(label: &str, age: &str, width: usize) -> String {
+    if age.is_empty() {
+        return truncate(label, width);
+    }
+    let room = width.saturating_sub(age.chars().count() + 1);
+    let label = truncate(label, room);
+    format!("{label:<room$} {age}")
 }
 
 struct Window<'a> {
@@ -329,13 +389,19 @@ fn tree_lines(status: &Status, needle: &str, home: &str) -> Vec<Line> {
         };
         session.then_with(|| (a.index.is_none(), a.index).cmp(&(b.index.is_none(), b.index)))
     });
-    // A folded session's header counts the agents in all its windows.
-    let mut states: HashMap<Option<&str>, Vec<State>> = HashMap::new();
+    // A folded session's header counts the agents and the running or finished panes in all
+    // its windows.
+    let mut marks: HashMap<Option<&str>, Vec<Mark>> = HashMap::new();
     for (w, entries) in &windows {
         for (e, _) in entries {
-            if let Entry::Agent(r, _) = e {
-                states.entry(w.session).or_default().push(r.state);
-            }
+            let mark = match e {
+                Entry::Agent(r, _) => Mark::Agent(r.state),
+                Entry::Pane(p) => match counted_run(p) {
+                    Some(run) => Mark::Run(run.state),
+                    None => continue,
+                },
+            };
+            marks.entry(w.session).or_default().push(mark);
         }
     }
     let mut out = Vec::new();
@@ -347,14 +413,14 @@ fn tree_lines(status: &Status, needle: &str, home: &str) -> Vec<Line> {
             let marked = collapsed(w.session);
             open = !(fold && marked);
             let folded = (!open).then(|| {
-                let mut counts: Vec<(State, usize)> = Vec::new();
-                for &s in states.get(&w.session).into_iter().flatten() {
-                    match counts.iter_mut().find(|(t, _)| *t == s) {
+                let mut counts: Vec<(Mark, usize)> = Vec::new();
+                for &m in marks.get(&w.session).into_iter().flatten() {
+                    match counts.iter_mut().find(|(t, _)| *t == m) {
                         Some((_, n)) => *n += 1,
-                        None => counts.push((s, 1)),
+                        None => counts.push((m, 1)),
                     }
                 }
-                counts.sort_by_key(|&(s, _)| rank(s));
+                counts.sort_by_key(|&(m, _)| mark_rank(m));
                 counts
             });
             out.push(Line::Session {
@@ -374,11 +440,17 @@ fn tree_lines(status: &Status, needle: &str, home: &str) -> Vec<Line> {
             let r = match e {
                 Entry::Agent(r, _) => r,
                 Entry::Pane(p) => {
+                    let run = pane_run(p);
+                    let age = counted_run(p).map_or_else(String::new, |r| {
+                        fmt_age(status.now_ms.saturating_sub(r.since_ms))
+                    });
                     out.push(Line::Pane {
                         id: p.id.clone(),
                         place: place.unwrap_or_default(),
                         window: w.id.clone(),
                         active: p.active,
+                        run,
+                        age,
                     });
                     continue;
                 }
@@ -951,6 +1023,11 @@ mod tests {
 
     /// A folded session header with these agent counts.
     fn folded(name: &str, counts: &[(State, usize)]) -> Line {
+        let marks: Vec<(Mark, usize)> = counts.iter().map(|&(s, n)| (Mark::Agent(s), n)).collect();
+        folded_marks(name, &marks)
+    }
+
+    fn folded_marks(name: &str, counts: &[(Mark, usize)]) -> Line {
         Line::Session {
             name: name.into(),
             collapsed: true,
@@ -958,15 +1035,35 @@ mod tests {
         }
     }
 
+    /// The fixture with plain panes %10 running since 120s, %11 finished since 65s, and %12
+    /// (vim) interactive since 0.
+    fn status_with_runs() -> Status {
+        let mut s = status();
+        for p in s.windows.iter_mut().flat_map(|w| &mut w.panes) {
+            let (state, since_ms) = match p.id.as_str() {
+                "%10" => (RunState::Running, 120_000),
+                "%11" => (RunState::Finished, 65_000),
+                "%12" => (RunState::Interactive, 0),
+                _ => continue,
+            };
+            p.run = Some(Run { state, since_ms });
+        }
+        s
+    }
+
     fn space() -> KeyEvent {
         KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)
     }
 
-    /// The fixture with these sessions marked collapsed.
-    fn status_collapsed(sessions: &[&str]) -> Status {
-        let mut s = status();
+    /// `s` with these sessions marked collapsed.
+    fn collapse(mut s: Status, sessions: &[&str]) -> Status {
         s.collapsed = sessions.iter().map(|&s| s.to_owned()).collect();
         s
+    }
+
+    /// The fixture with these sessions marked collapsed.
+    fn status_collapsed(sessions: &[&str]) -> Status {
+        collapse(status(), sessions)
     }
 
     /// A plain pane line, in `~/src/<command>` like the fixture's.
@@ -976,6 +1073,8 @@ mod tests {
             place: format!("/s/{command}"),
             window: window.into(),
             active,
+            run: None,
+            age: String::new(),
         }
     }
 
@@ -1029,6 +1128,76 @@ mod tests {
             [
                 '\u{2298}', '\u{003f}', '\u{25cf}', '\u{2717}', '\u{25d0}', '\u{25cb}', '\u{2205}'
             ]
+        );
+        let runs = [RunState::Running, RunState::Finished, RunState::Interactive].map(run_symbol);
+        assert_eq!(runs, ['\u{25b6}', '\u{25a0}', '\u{25b7}']);
+        let mut every: Vec<char> = all.into_iter().chain(runs).collect();
+        every.sort_unstable();
+        every.dedup();
+        assert_eq!(every.len(), 10, "processes never share an agent's shape");
+    }
+
+    #[test]
+    fn plain_pane_rows_carry_their_run_and_age() {
+        let out = all(&status_with_runs());
+        let run_of = |id: &str| {
+            out.iter().find_map(|l| match l {
+                Line::Pane {
+                    id: i, run, age, ..
+                } if i == id => Some((*run, age.clone())),
+                _ => None,
+            })
+        };
+        assert_eq!(
+            run_of("%10"),
+            Some((Some(RunState::Running), fmt_age(5_000)))
+        );
+        assert_eq!(
+            run_of("%11"),
+            Some((Some(RunState::Finished), fmt_age(60_000)))
+        );
+        assert_eq!(
+            run_of("%12"),
+            Some((Some(RunState::Interactive), String::new())),
+            "an editor's age says nothing"
+        );
+        assert_eq!(run_of("%13"), Some((None, String::new())));
+    }
+
+    #[test]
+    fn unknown_run_states_draw_as_no_run() {
+        let mut s = status();
+        s.windows[0].panes[1].run = Some(Run {
+            state: RunState::Unknown,
+            since_ms: 0,
+        });
+        assert_eq!(all(&s), all(&status()));
+    }
+
+    #[test]
+    fn folded_counts_include_running_and_finished_panes() {
+        let out = all(&collapse(status_with_runs(), &["me"]));
+        assert_eq!(
+            out[0],
+            folded_marks(
+                "me",
+                &[
+                    (Mark::Agent(State::Done), 1),
+                    (Mark::Agent(State::Working), 1),
+                    (Mark::Agent(State::Idle), 1),
+                    (Mark::Run(RunState::Finished), 1),
+                    (Mark::Run(RunState::Running), 1),
+                ]
+            ),
+            "agents first, then finished before running; interactive isn't counted"
+        );
+    }
+
+    #[test]
+    fn the_status_view_ignores_runs() {
+        assert_eq!(
+            lines(&status_with_runs(), Mode::Status, "", HOME),
+            lines(&status(), Mode::Status, "", HOME)
         );
     }
 

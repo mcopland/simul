@@ -138,6 +138,28 @@ fn killed_pane_is_dropped() {
 }
 
 #[test]
+fn plain_pane_processes_are_running_then_finished_until_viewed() {
+    let mut h = Harness::new();
+    h.start_daemon();
+    let pane = h.new_pane("sh");
+    h.wait_run(&pane, None);
+    // Long enough for the once-a-second poll to catch on a loaded machine.
+    h.tmux(&["send-keys", "-t", &pane, "sleep 4", "Enter"]);
+    h.wait_run(&pane, Some("running"));
+    // The harness has no client, so nothing is viewed and the finish stays.
+    h.wait_run(&pane, Some("finished"));
+    // A script reads as its interpreter, a shell name, yet it is running.
+    let script = h.dir.path().join("build.sh");
+    std::fs::write(&script, "sleep 4\n").unwrap();
+    let run_script = format!("sh {}", script.display());
+    h.tmux(&["send-keys", "-t", &pane, &run_script, "Enter"]);
+    h.wait_run(&pane, Some("running"));
+    h.wait_run(&pane, Some("finished"));
+    h.tmux(&["send-keys", "-t", &pane, "less /etc/hosts", "Enter"]);
+    h.wait_run(&pane, Some("interactive"));
+}
+
+#[test]
 fn recovery_scan_classifies_running_agents() {
     let mut h = Harness::new();
     let blocked = h.fake_claude_pane("approval");

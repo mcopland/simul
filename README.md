@@ -88,7 +88,7 @@ Sidebar keys:
 
 The sidebar takes a quarter of its window's width and returns to it after you drag its border or resize the terminal. It lists every session, every `window_index:window_name` in it, and every pane in each window, whether or not an agent runs there. An agent pane is one line: a state symbol, where it is, and time in the current state (the agent name stands in when where it is is unknown); any other pane shows only where it is. Where a pane is reads like a starship prompt: in a git repo, the branch (or `HEAD`) followed by status markers, rechecked every 5 seconds while the sidebar is shown; elsewhere, its directory with each parent cut to one letter, from home when under it (`~/dev/simul/examples` is `/d/s/examples`, and home is `~`). The text filter matches session and window names, where panes are, pane commands, and agent details. That is the `all` view; `f` switches to the `status` view, which lists only agents, without session or window headers, ordered `blocked`, `asking`, `failed`, `done`, `working`, `idle`, then `unknown`, and within a state, the one in it longest first. Under each agent it shows the session and window. While the sidebar isn't focused, it highlights the active pane of its own window. Session names are a dim gold, and the highlighted one is bold in the bright gold of tmux's status-left; the sidebar's own window and the highlighted row are bold, and everything else is dimmed; state symbols keep their colors. Focusing the sidebar keeps that row, or selects the first row if none was highlighted.
 
-A collapsed session shrinks to its header, `▸`, and a count of its agents in each state, in the `status` view's order (`me ▸ ⊘1 ?1 ●2`), so a blocked or asking agent stays visible. Collapsing applies to the sidebar in every window. simul remembers it in the tmux session option `@simul-collapsed`, so it lasts through toggling the sidebar and restarting the daemon, and goes away with the session. Only the `all` view folds sessions, and while the text filter is active they open so no match is hidden.
+A collapsed session shrinks to its header, `▸`, and a count of its agents in each state, in the `status` view's order, then of its finished and running panes (`me ▸ ⊘1 ?1 ●2 ■1 ▶2`), so a blocked or asking agent or an unseen finish stays visible. Collapsing applies to the sidebar in every window. simul remembers it in the tmux session option `@simul-collapsed`, so it lasts through toggling the sidebar and restarting the daemon, and goes away with the session. Only the `all` view folds sessions, and while the text filter is active they open so no match is hidden.
 
 The sidebar repeats tmux's session name and window list, so while it is shown simul cuts the first status line (`status-format[0]`) down to `status-right` and restores it when you toggle the sidebar off. Further status lines, such as `status-format[1]`, keep running. Set `hide_status = false` under `[sidebar]` to keep the line as is.
 
@@ -104,6 +104,16 @@ The sidebar repeats tmux's session name and window list, so while it is shown si
 
 `asking` and `failed` stay until your next prompt, even after you look at the pane.
 
+A pane without an agent gets a symbol while its foreground process isn't a shell at its prompt. Running and finished panes also show the time in that state.
+
+| Symbol | Meaning                                                           |
+| ------ | ----------------------------------------------------------------- |
+| `▶`    | A command is running, such as a build, a script, or a server      |
+| `■`    | It finished while you weren't looking, and you haven't looked yet |
+| `▷`    | An interactive program is open, such as an editor, pager, or ssh  |
+
+`■` clears when you look at the pane, like `done`; a command that ends while you watch it leaves nothing. simul checks once a second, so a command that runs for less than about a second may not show. It can't see exit codes, so `■` means ended, not succeeded. A shell started from another shell, such as `bash` typed at a `zsh` prompt, counts as running.
+
 Git status markers follow the branch in this order:
 
 | Marker      | Meaning                                       |
@@ -116,7 +126,7 @@ Git status markers follow the branch in this order:
 | `?`         | Untracked files                               |
 | `≡`         | Stashed changes                               |
 
-When an agent becomes `blocked`, `asking`, `done`, or `failed` in a pane you are not looking at, simul shows a message in the tmux status line. Desktop notifications and the terminal bell are off by default; turn them on under `[notify]`.
+When an agent becomes `blocked`, `asking`, `done`, or `failed` in a pane you are not looking at, simul shows a message in the tmux status line; a pane without an agent shows only its sidebar symbol. Desktop notifications and the terminal bell are off by default; turn them on under `[notify]`.
 
 ### tmux config that counts panes
 
@@ -153,6 +163,10 @@ bell = false     # ring the terminal bell
 
 [kiro]
 approval_patterns = []  # extra text that marks Kiro's approval prompt on screen
+
+[panes]
+# commands shown as ▷, not ▶; a list here replaces the default
+interactive = ["vi", "vim", "nvim", "hx", "helix", "emacs", "nano", "micro", "kak", "less", "more", "man", "ssh", "mosh", "htop", "btop", "top", "watch", "lazygit", "tig"]
 ```
 
 Kiro has no hook for approval prompts, so simul reads them from Kiro's session log (`$KIRO_HOME/sessions`, else `~/.kiro/sessions`). The same log shows when a turn ends, is interrupted, fails, or asks you a question. When the log can't be read, simul falls back to reading the bottom of a busy Kiro pane. That scrape recognizes the classic `Allow this action? ... [y/n/t]:` prompt. If your Kiro shows a different approval dialog, add a line of text unique to it to `approval_patterns`. Pick text that disappears once you answer: a pattern still in the bottom 15 lines keeps the pane `blocked`.

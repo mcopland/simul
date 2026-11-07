@@ -284,9 +284,12 @@ impl Daemon {
                 self.read_live().await;
                 self.scrape().await;
                 // tmux sends no notification when a pane changes directory or foreground
-                // process, which pane rows show.
+                // process, which pane rows show. With the sidebar hidden only processes are
+                // polled, so one that ends meanwhile is still marked when it opens.
                 if self.sidebar_on {
                     self.schedule_reconcile();
+                } else {
+                    self.poll_runs().await;
                 }
             }
             Cmd::Jobs(result) => self.on_jobs(result),
@@ -619,6 +622,18 @@ impl Daemon {
         self.publish();
     }
 
+    /// Takes a snapshot for `apply_runs` alone, without the rest of a reconcile.
+    async fn poll_runs(&mut self) {
+        match self.opts.tmux.snapshot(self.focus_events).await {
+            Ok(snap) => {
+                self.snapshot = snap;
+                self.apply_runs(now_ms());
+                self.fetch_jobs();
+            }
+            Err(e) => log!("failed to read panes to poll their processes: {e:#}"),
+        }
+    }
+
     /// Reads what each plain pane's foreground process is doing in the current snapshot,
     /// with the shells' jobs as last reported by `fetch_jobs`.
     fn apply_runs(&mut self, now: u64) {
@@ -658,11 +673,7 @@ impl Daemon {
 
     fn on_jobs(&mut self, result: Result<HashSet<u32>, String>) {
         self.jobs_inflight = false;
-        let (jobs, error) = match result {
-            Ok(jobs) => (jobs, None),
-            // Without ps, a shell-named job reads as its shell at a prompt.
-            Err(e) => (HashSet::new(), Some(e)),
-        };
+        let (jobs, error) = runs::after_ps(&self.jobs, result);
         if error.is_some() && error != self.jobs_error {
             log!("{}", error.as_deref().unwrap_or_default());
         }

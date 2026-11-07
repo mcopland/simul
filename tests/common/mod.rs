@@ -135,16 +135,41 @@ impl Harness {
         });
     }
 
-    /// The running daemon's reply to `identify`: its `version` and `exe`.
-    pub fn identify(&self) -> Option<Value> {
+    /// The daemon's one-line reply to `request`; `None` if it can't be had right now.
+    pub fn request(&self, request: &str) -> Option<Value> {
         let mut stream = UnixStream::connect(&self.simul_sock).ok()?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        stream.write_all(b"{\"type\":\"identify\"}\n").ok()?;
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+        stream.write_all(format!("{request}\n").as_bytes()).ok()?;
         let mut line = String::new();
         std::io::BufRead::read_line(&mut std::io::BufReader::new(stream), &mut line).ok()?;
         serde_json::from_str(&line).ok()
+    }
+
+    /// The running daemon's reply to `identify`: its `version` and `exe`.
+    pub fn identify(&self) -> Option<Value> {
+        self.request(r#"{"type":"identify"}"#)
+    }
+
+    /// The `run` the daemon publishes for `pane` (`Null` for none); `None` while the daemon
+    /// doesn't list the pane.
+    pub fn run_of(&self, pane: &str) -> Option<Value> {
+        let status = self.request(r#"{"type":"list"}"#)?;
+        status["windows"]
+            .as_array()?
+            .iter()
+            .flat_map(|w| w["panes"].as_array().into_iter().flatten())
+            .find(|p| p["id"] == pane)
+            .map(|p| p["run"].clone())
+    }
+
+    /// Waits until the daemon lists `pane` with run state `want` (`None`: no run).
+    pub fn wait_run(&self, pane: &str, want: Option<&str>) {
+        let mut last = None;
+        let ok = poll(Duration::from_secs(10), || {
+            last = self.run_of(pane);
+            last.as_ref().is_some_and(|r| r["state"].as_str() == want)
+        });
+        assert!(ok, "run of {pane}: want {want:?}, last {last:?}");
     }
 
     /// The daemon's log, beside its socket.

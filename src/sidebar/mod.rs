@@ -15,9 +15,9 @@ use ratatui::widgets::Paragraph;
 use crate::client;
 use crate::daemon::state::State;
 use crate::paths::{self, env_var};
-use crate::protocol::{Ack, Request, Status, now_ms};
+use crate::protocol::{Ack, Request, RunState, Status, now_ms};
 use crate::tmux::Tmux;
-use model::{Action, App, Line};
+use model::{Action, App, Line, Mark};
 
 const LOCATION_REFRESH: Duration = Duration::from_secs(5);
 const RECONNECT: Duration = Duration::from_secs(1);
@@ -184,6 +184,22 @@ fn state_color(state: State) -> Color {
     }
 }
 
+fn run_color(run: RunState) -> Color {
+    match run {
+        RunState::Running => Color::Yellow,
+        RunState::Finished => Color::Green,
+        RunState::Interactive => Color::Blue,
+        RunState::Unknown => Color::DarkGray,
+    }
+}
+
+fn mark_color(mark: Mark) -> Color {
+    match mark {
+        Mark::Agent(s) => state_color(s),
+        Mark::Run(r) => run_color(r),
+    }
+}
+
 /// Indents: window headers sit under their session, agents under their window.
 const WINDOW_INDENT: usize = 1;
 const AGENT_INDENT: usize = 3;
@@ -234,10 +250,10 @@ fn render(f: &mut Frame, view: &mut View) {
                 };
                 let tail: Vec<Span> = counts
                     .iter()
-                    .map(|&(state, n)| {
+                    .map(|&(mark, n)| {
                         Span::styled(
-                            format!(" {}{n}", model::symbol(state)),
-                            Style::new().fg(state_color(state)),
+                            format!(" {}{n}", model::mark_symbol(mark)),
+                            Style::new().fg(mark_color(mark)),
                         )
                     })
                     .collect();
@@ -282,14 +298,28 @@ fn render(f: &mut Frame, view: &mut View) {
                 format!("{:DETAIL_INDENT$}{}", "", model::truncate(text, width)),
                 detail(pane),
             )),
-            Line::Pane { place, .. } => TextLine::from(Span::styled(
-                format!("{:DETAIL_INDENT$}{}", "", model::truncate(place, width)),
-                if selected_line == Some(i) {
+            Line::Pane {
+                place, run, age, ..
+            } => {
+                let style = if selected_line == Some(i) {
                     current
                 } else {
                     muted
-                },
-            )),
+                };
+                let Some(run) = run else {
+                    return TextLine::from(Span::styled(
+                        format!("{:DETAIL_INDENT$}{}", "", model::truncate(place, width)),
+                        style,
+                    ));
+                };
+                TextLine::from(vec![
+                    Span::styled(
+                        format!("{:AGENT_INDENT$}{} ", "", model::run_symbol(*run)),
+                        Style::new().fg(run_color(*run)),
+                    ),
+                    Span::styled(model::text_with_age(place, age, width), style),
+                ])
+            }
         })
         .collect();
     let height = usize::from(list.height);
@@ -328,7 +358,7 @@ fn render(f: &mut Frame, view: &mut View) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{PaneSummary, WindowInfo};
+    use crate::protocol::{PaneSummary, Run, RunState, WindowInfo};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
@@ -417,5 +447,76 @@ mod tests {
         assert!(b.modifier.contains(Modifier::BOLD));
         assert_ne!(a.fg, GOLD, "other session is dimmed");
         assert!(!a.modifier.contains(Modifier::BOLD));
+    }
+
+    /// Draws one window of session `a` whose pane %1 (cwd `/`) has `run`, at time 5s.
+    fn draw_run(run: Option<Run>) -> Buffer {
+        let mut window = plain_window("a", "%1");
+        window.panes[0].run = run;
+        let mut view = View {
+            app: App {
+                status: Some(Status {
+                    now_ms: 5_000,
+                    sidebar: true,
+                    panes: vec![],
+                    windows: vec![window],
+                    collapsed: vec![],
+                }),
+                ..App::default()
+            },
+            error: None,
+            offset: 0,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(20, 4)).unwrap();
+        terminal.draw(|f| render(f, &mut view)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_text(buf: &Buffer, y: u16) -> String {
+        (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    #[test]
+    fn running_pane_shows_its_symbol_like_an_agent_row() {
+        let buf = draw_run(Some(Run {
+            state: RunState::Running,
+            since_ms: 3_000,
+        }));
+        // Lines: a, 1:w, the pane.
+        assert_eq!(buf[(3, 2)].symbol(), "\u{25b6}");
+        assert_eq!(buf[(3, 2)].fg, Color::Yellow);
+        assert_eq!(
+            buf[(5, 2)].symbol(),
+            "/",
+            "the place starts where an agent's does"
+        );
+        assert!(
+            row_text(&buf, 2).trim_end().ends_with("2s"),
+            "{:?}",
+            row_text(&buf, 2)
+        );
+    }
+
+    #[test]
+    fn finished_and_interactive_panes_have_their_own_colors() {
+        let finished = draw_run(Some(Run {
+            state: RunState::Finished,
+            since_ms: 0,
+        }));
+        assert_eq!(finished[(3, 2)].symbol(), "\u{25a0}");
+        assert_eq!(finished[(3, 2)].fg, Color::Green);
+        let editor = draw_run(Some(Run {
+            state: RunState::Interactive,
+            since_ms: 0,
+        }));
+        assert_eq!(editor[(3, 2)].symbol(), "\u{25b7}");
+        assert_eq!(editor[(3, 2)].fg, Color::Blue);
+        assert_eq!(row_text(&editor, 2).trim_end(), "   \u{25b7} /", "no age");
+    }
+
+    #[test]
+    fn idle_pane_keeps_its_plain_layout() {
+        let buf = draw_run(None);
+        assert_eq!(row_text(&buf, 2).trim_end(), "     /");
     }
 }
