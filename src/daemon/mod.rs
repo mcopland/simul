@@ -113,6 +113,8 @@ struct Daemon {
     store: Store,
     /// Foreground processes of panes without an agent.
     runs: Runs,
+    /// When `runs` last read a snapshot.
+    runs_checked: Option<Instant>,
     snapshot: Snapshot,
     /// The snapshot's windows as published, rebuilt at each reconcile.
     windows: Vec<WindowInfo>,
@@ -184,6 +186,7 @@ pub async fn run(opts: Options) -> Result<()> {
         opts,
         store: Store::default(),
         runs: Runs::default(),
+        runs_checked: None,
         snapshot: Snapshot::default(),
         windows: Vec::new(),
         recovered: false,
@@ -274,11 +277,13 @@ impl Daemon {
                 self.read_live().await;
                 self.scrape().await;
                 // tmux sends no notification when a pane changes directory or foreground
-                // process, which pane rows show. With the sidebar hidden only processes are
-                // polled, so one that ends meanwhile is still marked when it opens.
+                // process, which pane rows show. With the sidebar hidden, only processes are
+                // checked, and less often, so one that ends meanwhile is still marked when it
+                // opens without the cost of a check every second.
+                let every = Duration::from_secs(self.opts.config.panes.hidden_check_secs);
                 if self.sidebar_on {
                     self.schedule_reconcile();
-                } else {
+                } else if check_due(self.runs_checked, Instant::now(), every) {
                     self.poll_runs().await;
                 }
             }
@@ -623,6 +628,7 @@ impl Daemon {
 
     /// Reads what each plain pane's foreground process is doing in the current snapshot,
     fn apply_runs(&mut self, now: u64) {
+        self.runs_checked = Some(Instant::now());
         let store = &self.store;
         self.runs.update(
             &self.snapshot,
@@ -1015,5 +1021,28 @@ impl Daemon {
                 log!("failed to resize sidebar {pane} to {cols} columns: {e:#}");
             }
         }
+    }
+}
+
+/// Whether a hidden-sidebar process check is due, `every` after the last look at `last`.
+fn check_due(last: Option<Instant>, now: Instant, every: Duration) -> bool {
+    last.is_none_or(|t| now.duration_since(t) >= every)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hidden_checks_wait_out_their_interval() {
+        let t0 = Instant::now();
+        let every = Duration::from_secs(10);
+        assert!(check_due(None, t0, every), "first check runs at once");
+        assert!(!check_due(Some(t0), t0 + Duration::from_secs(9), every));
+        assert!(check_due(Some(t0), t0 + Duration::from_secs(10), every));
+        assert!(
+            check_due(Some(t0), t0, Duration::ZERO),
+            "0 checks on every tick"
+        );
     }
 }

@@ -139,7 +139,9 @@ fn killed_pane_is_dropped() {
 
 #[test]
 fn plain_pane_processes_are_running_then_finished_until_viewed() {
-    let mut h = Harness::new();
+    // The sidebar is hidden here, so check every second rather than every 10.
+    let mut h =
+        Harness::with_config("blocked_threshold_ms = 100\n[panes]\nhidden_check_secs = 1\n");
     h.start_daemon();
     // zsh, not sh: macOS's sh shows as bash, so an sh pane can't tell a bash script from
     // its own prompt.

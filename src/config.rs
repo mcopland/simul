@@ -48,6 +48,10 @@ pub struct KiroConfig {
 pub struct PanesConfig {
     /// Commands that mark a pane interactive rather than running, matched by name.
     pub interactive: Vec<String>,
+    /// How often panes' processes are checked while the sidebar is hidden; it checks every
+    /// second while shown. Each check costs CPU, so the default trades a command that runs
+    /// and ends unseen between checks for idle cost.
+    pub hidden_check_secs: u64,
 }
 
 impl Default for PanesConfig {
@@ -58,6 +62,7 @@ impl Default for PanesConfig {
         ];
         PanesConfig {
             interactive: names.into_iter().map(str::to_owned).collect(),
+            hidden_check_secs: 10,
         }
     }
 }
@@ -144,6 +149,14 @@ mod tests {
         std::fs::write(&path, "[panes]\ninteractive = [\"k9s\"]\n").unwrap();
         let cfg = load_from(&path).unwrap();
         assert_eq!(cfg.panes.interactive, vec!["k9s".to_string()]);
+        assert_eq!(
+            cfg.panes.hidden_check_secs, 10,
+            "the rest of the table keeps defaults"
+        );
+        std::fs::write(&path, "[panes]\nhidden_check_secs = 3\n").unwrap();
+        let cfg = load_from(&path).unwrap();
+        assert_eq!(cfg.panes.hidden_check_secs, 3);
+        assert!(cfg.panes.interactive.iter().any(|n| n == "hx"));
     }
 
     #[test]
