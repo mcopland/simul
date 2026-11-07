@@ -656,6 +656,14 @@ impl App {
         items(&self.lines())
     }
 
+    /// The session this sidebar's window is in.
+    pub fn own_session(&self) -> Option<&str> {
+        let window = self.own_window.as_deref()?;
+        let status = self.status.as_ref()?;
+        let info = status.windows.iter().find(|w| w.id == window)?;
+        Some(&info.session)
+    }
+
     /// The row for this sidebar's window: its active pane, else its first agent, else the
     /// window itself.
     fn window_row(&self) -> Option<usize> {
@@ -676,8 +684,7 @@ impl App {
             })
             .or_else(|| {
                 // Folded away: the session header stands for the window.
-                let status = self.status.as_ref()?;
-                let session = &status.windows.iter().find(|w| w.id == window)?.session;
+                let session = self.own_session()?;
                 items
                     .iter()
                     .find(|i| matches!(i, Item::Session(s) if s == session))
@@ -1405,6 +1412,15 @@ mod tests {
         app.set_status(s);
         assert_eq!(app.selected, Some(9), "no panes: the window");
         assert_eq!(app_in("@gone").selected, None, "unknown window");
+    }
+
+    #[test]
+    fn own_session_is_the_own_windows_session() {
+        assert_eq!(app_in("@me1").own_session(), Some("me"));
+        assert_eq!(app_in("@gone").own_session(), None, "unknown window");
+        let mut app = App::default();
+        app.set_status(status());
+        assert_eq!(app.own_session(), None, "no window yet");
     }
 
     #[test]

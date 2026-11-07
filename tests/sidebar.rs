@@ -534,7 +534,7 @@ fn space_folds_a_session_in_every_sidebar_and_it_persists() {
 }
 
 #[test]
-fn session_headers_are_dim_gold_and_the_selected_one_bright() {
+fn own_and_selected_session_headers_are_bright_the_rest_dim() {
     const GOLD: &str = "38;2;246;193;119";
     const DIM_GOLD: &str = "38;2;147;115;71";
     let mut h = Harness::new();
@@ -554,13 +554,16 @@ fn session_headers_are_dim_gold_and_the_selected_one_bright() {
         screen = h.tmux(&["capture-pane", "-e", "-p", "-t", &pane]);
         header(&screen, "u").is_some()
     });
-    for session in ["t", "u"] {
-        let sgr = header(&screen, session).unwrap();
-        assert!(
-            !sgr.bold && sgr.fg.as_deref() == Some(DIM_GOLD),
-            "unselected session {session} dim gold, not bold: {screen:?}"
-        );
-    }
+    let own = header(&screen, "t").unwrap();
+    assert!(
+        own.bold && own.fg.as_deref() == Some(GOLD),
+        "the sidebar's own session bright gold and bold, like its window: {screen:?}"
+    );
+    let other = header(&screen, "u").unwrap();
+    assert!(
+        !other.bold && other.fg.as_deref() == Some(DIM_GOLD),
+        "other session u dim gold, not bold: {screen:?}"
+    );
 
     // Folded away, u's sidebar selects u's header.
     let side = sidebar_in(&h, "u");

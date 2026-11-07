@@ -200,9 +200,10 @@ fn render(f: &mut Frame, view: &mut View) {
         Line::Agent(r) => Some(r.pane.as_str()),
         _ => None,
     });
+    let own_session = view.app.own_session();
     let current = Style::new().add_modifier(Modifier::BOLD);
-    // The selected session matches the session name in tmux's status-left; the rest are
-    // dimmed, as unselected windows are muted.
+    // The sidebar's own session and the selected one match the session name in tmux's
+    // status-left; the rest are dimmed, as other windows are muted.
     let session = Style::new().fg(Color::Rgb(0x93, 0x73, 0x47));
     let session_selected = Style::new()
         .fg(Color::Rgb(0xf6, 0xc1, 0x77))
@@ -220,7 +221,7 @@ fn render(f: &mut Frame, view: &mut View) {
         .enumerate()
         .map(|(i, line)| match line {
             Line::Session { name, folded, .. } => {
-                let style = if selected_line == Some(i) {
+                let style = if selected_line == Some(i) || own_session == Some(name.as_str()) {
                     session_selected
                 } else {
                     session
@@ -350,6 +351,11 @@ mod tests {
 
     /// Draws a sidebar listing sessions `a` and `b` with item `selected` chosen.
     fn draw(selected: Option<usize>) -> Buffer {
+        draw_in(None, selected)
+    }
+
+    /// Like `draw`, for a sidebar living in window `own_window`.
+    fn draw_in(own_window: Option<&str>, selected: Option<usize>) -> Buffer {
         let mut view = View {
             app: App {
                 status: Some(Status {
@@ -359,6 +365,7 @@ mod tests {
                     windows: vec![plain_window("a", "%1"), plain_window("b", "%2")],
                     collapsed: vec![],
                 }),
+                own_window: own_window.map(Into::into),
                 selected,
                 ..App::default()
             },
@@ -398,5 +405,16 @@ mod tests {
             assert_ne!(cell.fg, GOLD, "row {row}");
             assert!(!cell.modifier.contains(Modifier::BOLD), "row {row}");
         }
+    }
+
+    #[test]
+    fn own_session_is_bright_gold_and_bold_while_unselected() {
+        let buf = draw_in(Some("@b"), None);
+        let (a, b) = (&buf[(0, 0)], &buf[(0, 3)]);
+        assert_eq!((a.symbol(), b.symbol()), ("a", "b"));
+        assert_eq!(b.fg, GOLD, "own session bright, as the own window is bold");
+        assert!(b.modifier.contains(Modifier::BOLD));
+        assert_ne!(a.fg, GOLD, "other session is dimmed");
+        assert!(!a.modifier.contains(Modifier::BOLD));
     }
 }
