@@ -190,7 +190,11 @@ impl Harness {
         self.tmux(&["display-message", "-p", "-t", "t", "#{pane_id}"])
     }
 
+    /// A new window in session `t` running `command`. It starts in the harness's own dir:
+    /// without `-c` tmux would use this process's, the repo, whose git status would then
+    /// stand in for the plain path tests expect.
     pub fn new_pane(&self, command: &str) -> String {
+        let dir = self.dir.path().to_string_lossy().into_owned();
         self.tmux(&[
             "new-window",
             "-d",
@@ -199,6 +203,8 @@ impl Harness {
             "#{pane_id}",
             "-t",
             "t:",
+            "-c",
+            &dir,
             command,
         ])
     }
