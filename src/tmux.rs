@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use crate::daemon::state::{PaneInfo, Snapshot};
 use crate::protocol::{PaneSummary, WindowInfo};
 
-pub const PANES_FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_id}\t#{pane_active}\t#{window_active}\t#{pane_current_command}\t#{pane_current_path}\t#{@simul-sidebar}\t#{window_panes}\t#{@simul-collapsed}\t#{pane_width}\t#{window_width}\t#{window_zoomed_flag}\t#{pane_pid}\t#{window_name}";
+pub const PANES_FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_id}\t#{pane_active}\t#{window_active}\t#{pane_current_command}\t#{pane_current_path}\t#{@simul-sidebar}\t#{window_panes}\t#{@simul-collapsed}\t#{pane_width}\t#{window_width}\t#{window_zoomed_flag}\t#{?pane_start_command,#{pane_start_command},#{?default-command,#{default-command},#{default-shell}}}\t#{window_name}";
 pub const CLIENTS_FORMAT: &str = "#{client_session}\t#{client_flags}\t#{client_tty}";
 
 #[derive(Clone, Debug)]
@@ -107,7 +107,7 @@ pub fn parse_snapshot(panes: &str, clients: &str, focus_events: bool) -> Snapsho
             width,
             window_width,
             zoomed,
-            pid,
+            launched,
             window_name,
         ] = f[..]
         else {
@@ -133,7 +133,7 @@ pub fn parse_snapshot(panes: &str, clients: &str, focus_events: bool) -> Snapsho
             window,
             window_id: window_id.to_owned(),
             current_command: cmd.to_owned(),
-            pid: pid.parse().unwrap_or(0),
+            launched: launched.to_owned(),
             path: path.to_owned(),
             is_sidebar: sidebar == "1",
             window_panes,
@@ -209,11 +209,11 @@ pub fn tmux_double_quote(s: &str) -> String {
 mod tests {
     use super::*;
 
-    const PANES: &str = "%1\tmain\t1\t@1\t1\t1\t2.1.307\t/w/a\t\t2\t\t120\t200\t0\t101\tapi\n\
-%2\tmain\t1\t@1\t0\t1\tzsh\t/w/a\t\t2\t\t79\t200\t0\t102\tapi\n\
-%3\tmain\t2\t@2\t1\t0\tclaude\t/w/b\t\t1\t\t200\t200\t0\t103\tweb\n\
-%4\twork\t1\t@3\t1\t1\tclaude\t/w/c\t\t2\t1\t150\t200\t1\t104\tmy\ttabbed name\n\
-%5\twork\t1\t@3\t0\t1\tsimul\t/w/c\t1\t2\t1\t49\t200\t1\t105\tmy\ttabbed name\n";
+    const PANES: &str = "%1\tmain\t1\t@1\t1\t1\t2.1.307\t/w/a\t\t2\t\t120\t200\t0\t\tapi\n\
+%2\tmain\t1\t@1\t0\t1\tzsh\t/w/a\t\t2\t\t79\t200\t0\t\tapi\n\
+%3\tmain\t2\t@2\t1\t0\tclaude\t/w/b\t\t1\t\t200\t200\t0\t\tweb\n\
+%4\twork\t1\t@3\t1\t1\tclaude\t/w/c\t\t2\t1\t150\t200\t1\t\tmy\ttabbed name\n\
+%5\twork\t1\t@3\t0\t1\tsimul\t/w/c\t1\t2\t1\t49\t200\t1\t\"exec simul sidebar\"\tmy\ttabbed name\n";
 
     #[test]
     fn parses_panes() {
@@ -227,7 +227,7 @@ mod tests {
                 window: 1,
                 window_id: "@1".into(),
                 current_command: "2.1.307".into(),
-                pid: 101,
+                launched: String::new(),
                 path: "/w/a".into(),
                 is_sidebar: false,
                 window_panes: 2,
@@ -240,6 +240,7 @@ mod tests {
             }
         );
         assert!(snap.panes[4].is_sidebar);
+        assert_eq!(snap.panes[4].launched, "\"exec simul sidebar\"");
         assert_eq!(snap.panes[4].width, 49);
         assert!(snap.panes[4].window_zoomed);
         assert!(snap.panes[3].session_collapsed, "a session option");
@@ -280,7 +281,7 @@ mod tests {
 
     #[test]
     fn linked_windows_are_listed_once() {
-        let panes = "%1\ta\t1\t@1\t1\t0\tclaude\t/w\t\t1\t\t80\t80\t0\t7\tx\n%1\tb\t3\t@1\t1\t1\tclaude\t/w\t\t1\t\t80\t80\t0\t7\tx\n";
+        let panes = "%1\ta\t1\t@1\t1\t0\tclaude\t/w\t\t1\t\t80\t80\t0\t\tx\n%1\tb\t3\t@1\t1\t1\tclaude\t/w\t\t1\t\t80\t80\t0\t\tx\n";
         let snap = parse_snapshot(panes, "b\tattached,focused\t/dev/ttys1\n", true);
         assert_eq!(snap.panes.len(), 1);
         assert_eq!(snap.viewed, HashSet::from(["%1".to_string()]));

@@ -141,14 +141,23 @@ fn killed_pane_is_dropped() {
 fn plain_pane_processes_are_running_then_finished_until_viewed() {
     let mut h = Harness::new();
     h.start_daemon();
-    let pane = h.new_pane("sh");
+    // zsh, not sh: macOS's sh shows as bash, so an sh pane can't tell a bash script from
+    // its own prompt.
+    let zsh = std::process::Command::new("zsh")
+        .args(["-fc", "true"])
+        .status();
+    assert!(
+        zsh.as_ref().is_ok_and(|s| s.success()),
+        "this test needs zsh on PATH: {zsh:?}"
+    );
+    let pane = h.new_pane("zsh -f");
     h.wait_run(&pane, None);
     // Long enough for the once-a-second poll to catch on a loaded machine.
     h.tmux(&["send-keys", "-t", &pane, "sleep 4", "Enter"]);
     h.wait_run(&pane, Some("running"));
     // The harness has no client, so nothing is viewed and the finish stays.
     h.wait_run(&pane, Some("finished"));
-    // A script reads as its interpreter, a shell name, yet it is running.
+    // A script reads as its interpreter, a shell name, yet not this pane's shell.
     let script = h.dir.path().join("build.sh");
     std::fs::write(&script, "sleep 4\n").unwrap();
     let run_script = format!("sh {}", script.display());

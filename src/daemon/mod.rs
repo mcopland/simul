@@ -79,8 +79,6 @@ pub enum Cmd {
         pane: String,
         turn: Option<Turn>,
     },
-    /// Pane shells with a job in the foreground, from `fetch_jobs`.
-    Jobs(Result<HashSet<u32>, String>),
     Identify(oneshot::Sender<Identity>),
     /// The plugin checkout's VERSION file changed.
     PluginChanged,
@@ -141,11 +139,6 @@ struct Daemon {
     kiro_sessions_dir: Option<PathBuf>,
     /// Last failure reading either sessions dir, so a persistent one is logged once.
     live_error: Option<String>,
-    /// Pane shell pids whose terminal belongs to a job, as ps last reported.
-    jobs: HashSet<u32>,
-    jobs_inflight: bool,
-    /// Last failure asking ps about pane shells, so a persistent one is logged once.
-    jobs_error: Option<String>,
     /// The plugin checkout this binary was installed into; `None` for other builds.
     plugin: Option<PathBuf>,
     /// The checkout's VERSION when last read, so repeated change events act once.
@@ -209,9 +202,6 @@ pub async fn run(opts: Options) -> Result<()> {
         sessions_dir: claude_sessions::sessions_dir(crate::paths::env_var),
         kiro_sessions_dir: kiro_sessions::sessions_dir(crate::paths::env_var),
         live_error: None,
-        jobs: HashSet::new(),
-        jobs_inflight: false,
-        jobs_error: None,
         plugin_version: plugin.as_deref().and_then(update::wanted_version),
         plugin,
         updating: false,
@@ -292,7 +282,6 @@ impl Daemon {
                     self.poll_runs().await;
                 }
             }
-            Cmd::Jobs(result) => self.on_jobs(result),
             Cmd::Turn { pane, turn } => {
                 self.turn_inflight.remove(&pane);
                 let turn = turn.unwrap_or_default();
@@ -611,7 +600,6 @@ impl Daemon {
             .collect();
         self.snapshot = snap;
         self.apply_runs(now);
-        self.fetch_jobs();
         self.refresh_git();
         self.maintain_sidebars().await;
         // Layout changes in the control client's session trigger a reconcile, so this also
@@ -628,61 +616,20 @@ impl Daemon {
             Ok(snap) => {
                 self.snapshot = snap;
                 self.apply_runs(now_ms());
-                self.fetch_jobs();
             }
             Err(e) => log!("failed to read panes to poll their processes: {e:#}"),
         }
     }
 
     /// Reads what each plain pane's foreground process is doing in the current snapshot,
-    /// with the shells' jobs as last reported by `fetch_jobs`.
     fn apply_runs(&mut self, now: u64) {
         let store = &self.store;
         self.runs.update(
             &self.snapshot,
             |p| store.get(&p.id).is_some() || Agent::for_process(&p.current_command).is_some(),
             &self.opts.config.panes.interactive,
-            &self.jobs,
             now,
         );
-    }
-
-    /// Asks ps which pane shells have handed their terminal to a job. It runs off the actor:
-    /// ps can stall for seconds on a busy machine, and nothing else should wait on it.
-    fn fetch_jobs(&mut self) {
-        if self.jobs_inflight {
-            return;
-        }
-        let shells: Vec<u32> = self
-            .snapshot
-            .panes
-            .iter()
-            .filter(|p| !p.is_sidebar && p.pid > 0 && runs::is_shell(&p.current_command))
-            .map(|p| p.pid)
-            .collect();
-        self.jobs_inflight = true;
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            let result = runs::shells_with_jobs(&shells)
-                .await
-                .map_err(|e| format!("{e:#}"));
-            // See fetch_git: a closed channel means shutdown.
-            let _ = tx.send(Cmd::Jobs(result)).await;
-        });
-    }
-
-    fn on_jobs(&mut self, result: Result<HashSet<u32>, String>) {
-        self.jobs_inflight = false;
-        let (jobs, error) = runs::after_ps(&self.jobs, result);
-        if error.is_some() && error != self.jobs_error {
-            log!("{}", error.as_deref().unwrap_or_default());
-        }
-        self.jobs_error = error;
-        if jobs != self.jobs {
-            self.jobs = jobs;
-            self.apply_runs(now_ms());
-            self.publish();
-        }
     }
 
     /// Applies Claude's and Kiro's own session status; it covers Esc, denials, interrupts, and

@@ -118,8 +118,9 @@ pub struct PaneInfo {
     pub window: u32,
     pub window_id: String,
     pub current_command: String,
-    /// The process tmux started in the pane, usually its shell; 0 if unknown.
-    pub pid: u32,
+    /// What started the pane: its start command, else tmux's `default-command`, else its
+    /// session's `default-shell`. tmux quotes a start command that has spaces.
+    pub launched: String,
     pub path: String,
     pub is_sidebar: bool,
     pub window_panes: u32,
@@ -626,7 +627,7 @@ mod tests {
             window: 2,
             window_id: "@2".into(),
             current_command: cmd.into(),
-            pid: 0,
+            launched: String::new(),
             path: "/w".into(),
             is_sidebar: false,
             window_panes: 1,

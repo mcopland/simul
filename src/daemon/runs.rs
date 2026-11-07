@@ -1,6 +1,4 @@
-use std::collections::{HashMap, HashSet};
-
-use anyhow::{Context, Result};
+use std::collections::HashMap;
 
 use super::state::{PaneInfo, Snapshot};
 use crate::protocol::{Run, RunState};
@@ -16,49 +14,28 @@ pub fn is_shell(command: &str) -> bool {
     SHELLS.contains(&command.trim_start_matches('-'))
 }
 
-/// Pids from `ps -o pid=,pgid=,tpgid=` whose terminal's foreground group isn't their own. A
-/// tpgid of -1 or 0 means no controlling terminal.
-pub fn parse_jobs(ps: &str) -> HashSet<u32> {
-    ps.lines()
-        .filter_map(|line| {
-            let mut f = line.split_whitespace().map(str::parse::<i64>);
-            let (Some(Ok(pid)), Some(Ok(pgid)), Some(Ok(tpgid))) = (f.next(), f.next(), f.next())
-            else {
-                return None;
-            };
-            (tpgid > 0 && tpgid != pgid).then_some(u32::try_from(pid).ok()?)
-        })
-        .collect()
+/// The shell a pane runs, by the name `pane_current_command` shows for it at its prompt.
+/// `launched` is what started the pane (see `PaneInfo::launched`). `None` when that ran no
+/// shell, or `sh`, which on macOS re-executes as bash, so its name says nothing.
+pub fn pane_shell(launched: &str) -> Option<&str> {
+    // The first shell word gets past `VAR=value`, `exec`, and wrappers such as `env` or
+    // `reattach-to-user-namespace -l zsh`.
+    let name = launched
+        .trim_matches('"')
+        .split_whitespace()
+        .map(|w| w.rsplit('/').next().unwrap_or(w))
+        .find(|w| is_shell(w))?
+        .trim_start_matches('-');
+    (name != "sh").then_some(name)
 }
 
-/// Which of `pids`, pane shells, have handed their terminal to a job.
-pub async fn shells_with_jobs(pids: &[u32]) -> Result<HashSet<u32>> {
-    if pids.is_empty() {
-        return Ok(HashSet::new());
-    }
-    let list = pids
-        .iter()
-        .map(u32::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
-    // ps exits non-zero when a pid has gone, and still lists the others.
-    let out = tokio::process::Command::new("ps")
-        .args(["-o", "pid=,pgid=,tpgid=", "-p", &list])
-        .output()
-        .await
-        .with_context(|| format!("failed to run ps for pane shells {list}"))?;
-    Ok(parse_jobs(&String::from_utf8_lossy(&out.stdout)))
-}
-
-/// The jobs to go on after a ps call that gave `result`, and its error. A failed call keeps
-/// what the last good one said: forgetting would end every running script.
-pub fn after_ps(
-    last: &HashSet<u32>,
-    result: Result<HashSet<u32>, String>,
-) -> (HashSet<u32>, Option<String>) {
-    match result {
-        Ok(jobs) => (jobs, None),
-        Err(e) => (last.clone(), Some(e)),
+/// Whether `command` is the pane's shell waiting at its prompt. Without a known shell, any
+/// shell name counts, so a script run by a shell-named interpreter there reads as idle.
+fn at_prompt(command: &str, shell: Option<&str>) -> bool {
+    let command = command.trim_start_matches('-');
+    match shell {
+        Some(shell) => command == shell,
+        None => is_shell(command),
     }
 }
 
@@ -76,21 +53,19 @@ impl Runs {
     /// Reads each plain pane's foreground command from `snap`, skipping sidebars and panes
     /// `is_agent` claims. A process that ends while its pane isn't viewed stays `Finished`
     /// until it is.
-    /// `jobs` holds the pane pids (see `shells_with_jobs`) whose shell has handed the
-    /// terminal to a job, which tells a running script from a shell at its prompt.
     pub fn update(
         &mut self,
         snap: &Snapshot,
         is_agent: impl Fn(&PaneInfo) -> bool,
         interactive: &[String],
-        jobs: &HashSet<u32>,
         now: u64,
     ) {
         let mut next = HashMap::new();
         for p in snap.panes.iter().filter(|p| !p.is_sidebar && !is_agent(p)) {
             let viewed = snap.viewed.contains(&p.id);
             let prev = self.by_pane.get(&p.id).map(|r| r.state);
-            let state = if is_shell(&p.current_command) && !jobs.contains(&p.pid) {
+            let shell = pane_shell(&p.launched);
+            let state = if at_prompt(&p.current_command, shell) {
                 match prev {
                     Some(RunState::Running | RunState::Interactive) if !viewed => {
                         RunState::Finished
@@ -115,6 +90,8 @@ impl Runs {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     fn pane(id: &str, cmd: &str) -> PaneInfo {
@@ -136,9 +113,10 @@ mod tests {
         vec!["hx".into(), "less".into()]
     }
 
-    /// Applies `snap` at `now`, with no agents and every shell at its prompt.
+    /// Applies `snap` at `now`, with no agents. A pane with no `launched` has no known shell,
+    /// so any shell name reads as its prompt.
     fn step(runs: &mut Runs, snap: &Snapshot, now: u64) {
-        runs.update(snap, |_| false, &interactive(), &HashSet::new(), now);
+        runs.update(snap, |_| false, &interactive(), now);
     }
 
     fn state(runs: &Runs, pane: &str) -> Option<RunState> {
@@ -261,12 +239,12 @@ mod tests {
         let mut r = Runs::default();
         let mut s = snap(&[("%1", "simul"), ("%2", "2.1.319"), ("%3", "cargo")], &[]);
         s.panes[0].is_sidebar = true;
-        r.update(&s, |p| p.id == "%2", &interactive(), &HashSet::new(), 1);
+        r.update(&s, |p| p.id == "%2", &interactive(), 1);
         assert_eq!(state(&r, "%1"), None);
         assert_eq!(state(&r, "%2"), None);
         assert_eq!(state(&r, "%3"), Some(RunState::Running));
         // A pane that turns into an agent drops its run.
-        r.update(&s, |p| p.id != "%1", &interactive(), &HashSet::new(), 2);
+        r.update(&s, |p| p.id != "%1", &interactive(), 2);
         assert_eq!(state(&r, "%3"), None);
     }
 
@@ -281,35 +259,63 @@ mod tests {
     }
 
     #[test]
-    fn shell_named_job_runs_while_its_shell_is_in_the_background() {
-        // `./build.sh` reads as `bash`, but the pane's shell no longer owns the terminal.
+    fn a_panes_shell_is_the_first_shell_in_what_launched_it() {
+        assert_eq!(pane_shell("/bin/zsh"), Some("zsh"));
+        assert_eq!(pane_shell("/opt/homebrew/bin/fish"), Some("fish"));
+        assert_eq!(pane_shell("bash"), Some("bash"));
+        assert_eq!(pane_shell("-zsh"), Some("zsh"), "as a login shell");
+        // tmux quotes a start command that has spaces.
+        assert_eq!(pane_shell("\"FOO=1 exec zsh -f\""), Some("zsh"));
+        // Wrappers in default-command.
+        assert_eq!(pane_shell("reattach-to-user-namespace -l zsh"), Some("zsh"));
+        assert_eq!(pane_shell("/usr/bin/env fish"), Some("fish"));
+        assert_eq!(pane_shell("\"sleep 600\""), None, "not a shell");
+        assert_eq!(pane_shell("nvim ~/.zshrc"), None);
+        assert_eq!(pane_shell("sh"), None, "sh hides behind another name");
+        assert_eq!(pane_shell("/bin/sh -c make"), None);
+        assert_eq!(pane_shell(""), None);
+    }
+
+    /// `snap` with every pane launched by `launched`.
+    fn launched(mut s: Snapshot, launched: &str) -> Snapshot {
+        for p in &mut s.panes {
+            p.launched = launched.into();
+        }
+        s
+    }
+
+    #[test]
+    fn script_under_another_shells_name_is_running() {
+        // `./build.sh` in a zsh pane reads as `bash`.
         let mut r = Runs::default();
-        let mut s = snap(&[("%1", "bash"), ("%2", "zsh")], &[]);
-        s.panes[0].pid = 41;
-        s.panes[1].pid = 42;
-        r.update(&s, |_| false, &interactive(), &HashSet::from([41]), 1);
+        let s = launched(
+            snap(&[("%1", "bash"), ("%2", "zsh"), ("%3", "-zsh")], &[]),
+            "/bin/zsh",
+        );
+        step(&mut r, &s, 1);
         assert_eq!(state(&r, "%1"), Some(RunState::Running));
         assert_eq!(state(&r, "%2"), None);
-        r.update(&s, |_| false, &interactive(), &HashSet::new(), 2);
+        assert_eq!(state(&r, "%3"), None, "a login shell");
+        step(
+            &mut r,
+            &launched(snap(&[("%1", "zsh")], &[]), "/bin/zsh"),
+            2,
+        );
         assert_eq!(state(&r, "%1"), Some(RunState::Finished));
     }
 
     #[test]
-    fn ps_output_names_shells_whose_terminal_belongs_to_another_group() {
-        let out = "  97454 97454 97454\n  98275 98275 98301\n  500   500    -1\n garbage\n";
-        assert_eq!(parse_jobs(out), HashSet::from([98275]));
-    }
-
-    #[test]
-    fn a_failed_ps_call_keeps_the_last_jobs() {
-        let last = HashSet::from([7]);
+    fn each_pane_is_judged_by_its_own_shell() {
+        let mut r = Runs::default();
+        let mut s = snap(&[("%1", "bash"), ("%2", "zsh")], &[]);
+        s.panes[0].launched = "/bin/bash".into();
+        s.panes[1].launched = "\"exec bash\"".into();
+        step(&mut r, &s, 1);
+        assert_eq!(state(&r, "%1"), None, "bash at its own prompt");
         assert_eq!(
-            after_ps(&last, Err("ps: boom".into())),
-            (last.clone(), Some("ps: boom".into()))
-        );
-        assert_eq!(
-            after_ps(&last, Ok(HashSet::from([8]))),
-            (HashSet::from([8]), None)
+            state(&r, "%2"),
+            Some(RunState::Running),
+            "zsh run from bash"
         );
     }
 }
