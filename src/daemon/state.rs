@@ -1,102 +1,25 @@
-use std::collections::{BTreeMap, HashSet};
-
-use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::claude_sessions::{Live, LiveStatus};
-use crate::hook::{Agent, AgentEvent, Parsed, Screen};
+use crate::hook::{AgentEvent, Parsed, Screen};
 use crate::kiro_sessions;
+use crate::protocol::{Agent, PaneRecord, State};
+use crate::tmux::{PaneInfo, Snapshot};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum State {
-    Working,
-    Blocked,
-    /// The agent asked a question; lasts until the next prompt.
-    Asking,
-    Done,
-    /// The turn ended in an error; lasts until the next prompt.
-    Failed,
-    Idle,
-    /// Also any state a newer daemon reports that this build doesn't know.
-    #[serde(other)]
-    Unknown,
-}
-
-impl State {
-    pub fn name(self) -> &'static str {
-        match self {
-            State::Working => "working",
-            State::Blocked => "blocked",
-            State::Asking => "asking",
-            State::Done => "done",
-            State::Failed => "failed",
-            State::Idle => "idle",
-            State::Unknown => "unknown",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PaneRecord {
-    pub pane: String,
-    pub agent: Agent,
-    pub state: State,
-    /// Unix ms of the last state change.
-    pub since_ms: u64,
-    /// Unix ms of the last hook event; 0 if none yet (recovered panes).
-    pub last_event_ms: u64,
-    pub session_id: Option<String>,
-    pub cwd: Option<String>,
-    pub branch: Option<String>,
-    pub pending_tool: Option<String>,
-    /// Why the last turn failed, while the pane is `failed`.
-    #[serde(default)]
-    pub error: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub effort: Option<String>,
-    /// Transcript file, read after each turn for the current model.
-    #[serde(default)]
-    pub transcript: Option<String>,
-    pub session: Option<String>,
-    pub window: Option<u32>,
-    #[serde(default)]
-    pub window_id: Option<String>,
-    #[serde(default)]
-    pub window_name: Option<String>,
-    /// Whether this is the active pane of its window.
-    #[serde(default)]
-    pub active: bool,
+/// A pane's published record plus bookkeeping that never leaves the daemon.
+#[derive(Debug)]
+struct Tracked {
+    rec: PaneRecord,
     /// Consecutive scrapes suggesting a busy pane has settled (idle, or no prompt left).
-    #[serde(skip)]
     idle_scrapes: u8,
     /// Time and status last read from the agent's own live session files, while it has them.
-    #[serde(skip)]
     live: Option<(u64, LiveStatus)>,
 }
 
-impl PaneRecord {
-    fn new(pane: &str, agent: Agent, state: State, now: u64) -> PaneRecord {
-        PaneRecord {
-            pane: pane.to_owned(),
-            agent,
-            state,
-            since_ms: now,
-            last_event_ms: 0,
-            session_id: None,
-            cwd: None,
-            branch: None,
-            pending_tool: None,
-            error: None,
-            model: None,
-            effort: None,
-            transcript: None,
-            session: None,
-            window: None,
-            window_id: None,
-            window_name: None,
-            active: false,
+impl Tracked {
+    fn new(pane: &str, agent: Agent, state: State, now: u64) -> Tracked {
+        Tracked {
+            rec: PaneRecord::new(pane, agent, state, now),
             idle_scrapes: 0,
             live: None,
         }
@@ -111,39 +34,6 @@ pub struct Transition {
     pub to: State,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct PaneInfo {
-    pub id: String,
-    pub session: String,
-    pub window: u32,
-    pub window_id: String,
-    pub current_command: String,
-    /// What started the pane: its start command, else tmux's `default-command`, else its
-    /// session's `default-shell`. tmux quotes a start command that has spaces.
-    pub launched: String,
-    pub path: String,
-    pub is_sidebar: bool,
-    pub window_panes: u32,
-    /// Whether this is the active pane of its window.
-    pub active: bool,
-    /// Whether the pane's session carries `@simul-collapsed`, folding it in the sidebar.
-    pub session_collapsed: bool,
-    /// Columns: the pane's, and its window's.
-    pub width: u16,
-    pub window_width: u16,
-    /// Whether a pane in this window is zoomed.
-    pub window_zoomed: bool,
-    pub window_name: String,
-}
-
-/// A point-in-time view of the tmux server used to reconcile tracked panes.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Snapshot {
-    pub panes: Vec<PaneInfo>,
-    /// Panes the user is looking at right now.
-    pub viewed: HashSet<String>,
-}
-
 /// How much later than Claude's own clock a hook can reach the daemon (shim start plus socket).
 const HOOK_LAG_MS: u64 = 1000;
 
@@ -152,16 +42,16 @@ const IDLE_SCRAPES_TO_DEMOTE: u8 = 2;
 
 #[derive(Debug, Default)]
 pub struct Store {
-    panes: BTreeMap<String, PaneRecord>,
+    panes: BTreeMap<String, Tracked>,
 }
 
 impl Store {
     pub fn records(&self) -> Vec<PaneRecord> {
-        self.panes.values().cloned().collect()
+        self.panes.values().map(|t| t.rec.clone()).collect()
     }
 
     pub fn get(&self, pane: &str) -> Option<&PaneRecord> {
-        self.panes.get(pane)
+        self.panes.get(pane).map(|t| &t.rec)
     }
 
     pub fn apply(
@@ -177,15 +67,16 @@ impl Store {
             return None;
         }
         let created = !self.panes.contains_key(pane);
-        let rec = self
+        let t = self
             .panes
             .entry(pane.to_owned())
-            .or_insert_with(|| PaneRecord::new(pane, agent, State::Unknown, now));
+            .or_insert_with(|| Tracked::new(pane, agent, State::Unknown, now));
+        let rec = &mut t.rec;
         rec.agent = agent;
         // A hook that changes nothing (e.g. a subagent's) must not outrank the live status.
         if parsed.event != AgentEvent::NoChange {
             rec.last_event_ms = now;
-            rec.idle_scrapes = 0;
+            t.idle_scrapes = 0;
         }
         if parsed.meta.session_id.is_some() {
             rec.session_id.clone_from(&parsed.meta.session_id);
@@ -237,7 +128,7 @@ impl Store {
             AgentEvent::NoChange | AgentEvent::SessionEnd => None,
         };
         let from = (!created).then_some(rec.state);
-        set_state(rec, next?, now, from)
+        set_state(t, next?, now, from)
     }
 
     pub fn reconcile(&mut self, snap: &Snapshot, now: u64) -> Vec<Transition> {
@@ -245,13 +136,13 @@ impl Store {
             snap.panes.iter().map(|p| (p.id.as_str(), p)).collect();
         self.panes.retain(|id, _| live.contains_key(id.as_str()));
         let mut out = Vec::new();
-        for rec in self.panes.values_mut() {
-            if let Some(info) = live.get(rec.pane.as_str()) {
-                place(rec, info);
+        for t in self.panes.values_mut() {
+            if let Some(info) = live.get(t.rec.pane.as_str()) {
+                place(&mut t.rec, info);
             }
-            if rec.state == State::Done && snap.viewed.contains(&rec.pane) {
-                let from = Some(rec.state);
-                out.extend(set_state(rec, State::Idle, now, from));
+            if t.rec.state == State::Done && snap.viewed.contains(&t.rec.pane) {
+                let from = Some(t.rec.state);
+                out.extend(set_state(t, State::Idle, now, from));
             }
         }
         out
@@ -267,10 +158,10 @@ impl Store {
             let Some(agent) = Agent::for_process(&info.current_command) else {
                 continue;
             };
-            let mut rec = PaneRecord::new(&info.id, agent, State::Unknown, now);
-            rec.cwd = Some(info.path.clone());
-            place(&mut rec, info);
-            self.panes.insert(info.id.clone(), rec);
+            let mut t = Tracked::new(&info.id, agent, State::Unknown, now);
+            t.rec.cwd = Some(info.path.clone());
+            place(&mut t.rec, info);
+            self.panes.insert(info.id.clone(), t);
             added.push(info.id.clone());
         }
         added
@@ -280,19 +171,19 @@ impl Store {
     /// than the pane's last hook.
     pub fn apply_live(&mut self, live: &[Live], now: u64) -> Vec<Transition> {
         let mut out = Vec::new();
-        for rec in self.panes.values_mut() {
+        for t in self.panes.values_mut() {
+            let rec = &mut t.rec;
             let Some(l) = live
                 .iter()
                 .filter(|l| l.pane == rec.pane && rec.session.as_deref() == Some(&l.session))
                 .max_by_key(|l| l.updated_ms)
             else {
-                rec.live = None;
+                t.live = None;
                 continue;
             };
             // Status counts too: Kiro's question can land a read after the turn_end it follows.
             let seen = (l.updated_ms, l.status);
-            if rec.live.replace(seen) == Some(seen)
-                || l.updated_ms + HOOK_LAG_MS < rec.last_event_ms
+            if t.live.replace(seen) == Some(seen) || l.updated_ms + HOOK_LAG_MS < rec.last_event_ms
             {
                 continue;
             }
@@ -311,7 +202,7 @@ impl Store {
                 LiveStatus::Idle => State::Idle,
             };
             let from = Some(rec.state);
-            out.extend(set_state(rec, next, now, from));
+            out.extend(set_state(t, next, now, from));
         }
         out
     }
@@ -320,6 +211,7 @@ impl Store {
     pub fn kiro_panes(&self) -> Vec<kiro_sessions::Pane> {
         self.panes
             .values()
+            .map(|t| &t.rec)
             .filter(|r| r.agent == Agent::Kiro)
             .filter_map(|r| {
                 Some(kiro_sessions::Pane {
@@ -336,7 +228,8 @@ impl Store {
     pub fn needs_scrape(&self, now: u64, threshold_ms: u64) -> Vec<(String, Agent)> {
         self.panes
             .values()
-            .filter(|r| r.live.is_none())
+            .filter(|t| t.live.is_none())
+            .map(|t| &t.rec)
             .filter(|r| match r.state {
                 State::Working | State::Blocked => {
                     now.saturating_sub(r.last_event_ms) >= threshold_ms
@@ -349,40 +242,40 @@ impl Store {
     }
 
     pub fn apply_screen(&mut self, pane: &str, screen: Screen, now: u64) -> Option<Transition> {
-        let rec = self.panes.get_mut(pane)?;
+        let t = self.panes.get_mut(pane)?;
         if !matches!(screen, Screen::Idle | Screen::NoPrompt) {
-            rec.idle_scrapes = 0;
+            t.idle_scrapes = 0;
         }
-        let next = match (rec.state, screen) {
+        let next = match (t.rec.state, screen) {
             (_, Screen::Unknown)
             | (State::Asking | State::Done | State::Failed | State::Idle, _) => None,
             (_, Screen::Blocked) => Some(State::Blocked),
             (_, Screen::Working) => Some(State::Working),
             (State::Unknown, Screen::Idle) => Some(State::Idle),
             (State::Working | State::Blocked, Screen::Idle) => {
-                rec.idle_scrapes += 1;
-                (rec.idle_scrapes >= IDLE_SCRAPES_TO_DEMOTE).then_some(State::Idle)
+                t.idle_scrapes += 1;
+                (t.idle_scrapes >= IDLE_SCRAPES_TO_DEMOTE).then_some(State::Idle)
             }
             // The prompt was answered or dismissed; the turn's next hook says what happened.
             (State::Blocked, Screen::NoPrompt) => {
-                rec.idle_scrapes += 1;
-                (rec.idle_scrapes >= IDLE_SCRAPES_TO_DEMOTE).then_some(State::Working)
+                t.idle_scrapes += 1;
+                (t.idle_scrapes >= IDLE_SCRAPES_TO_DEMOTE).then_some(State::Working)
             }
             (State::Working | State::Unknown, Screen::NoPrompt) => None,
         };
-        let from = Some(rec.state);
-        set_state(rec, next?, now, from)
+        let from = Some(t.rec.state);
+        set_state(t, next?, now, from)
     }
 
     pub fn locate(&mut self, info: &PaneInfo) {
-        if let Some(rec) = self.panes.get_mut(&info.id) {
-            place(rec, info);
+        if let Some(t) = self.panes.get_mut(&info.id) {
+            place(&mut t.rec, info);
         }
     }
 
     /// Records the model and effort a pane last ran with; `None` keeps the previous value.
     pub fn set_model(&mut self, pane: &str, model: Option<String>, effort: Option<String>) -> bool {
-        let Some(rec) = self.panes.get_mut(pane) else {
+        let Some(rec) = self.panes.get_mut(pane).map(|t| &mut t.rec) else {
             return false;
         };
         let mut changed = false;
@@ -397,7 +290,7 @@ impl Store {
 
     pub fn set_branch(&mut self, cwd: &str, branch: Option<String>) -> bool {
         let mut changed = false;
-        for rec in self.panes.values_mut() {
+        for rec in self.panes.values_mut().map(|t| &mut t.rec) {
             if rec.cwd.as_deref() == Some(cwd) && rec.branch != branch {
                 rec.branch.clone_from(&branch);
                 changed = true;
@@ -416,12 +309,8 @@ fn place(rec: &mut PaneRecord, info: &PaneInfo) {
     rec.active = info.active;
 }
 
-fn set_state(
-    rec: &mut PaneRecord,
-    next: State,
-    now: u64,
-    from: Option<State>,
-) -> Option<Transition> {
+fn set_state(t: &mut Tracked, next: State, now: u64, from: Option<State>) -> Option<Transition> {
+    let rec = &mut t.rec;
     if next != State::Failed {
         rec.error = None;
     }
@@ -430,7 +319,7 @@ fn set_state(
     }
     rec.state = next;
     rec.since_ms = now;
-    rec.idle_scrapes = 0;
+    t.idle_scrapes = 0;
     Some(Transition {
         pane: rec.pane.clone(),
         agent: rec.agent,
@@ -443,7 +332,10 @@ fn set_state(
 mod tests {
     use super::*;
     use crate::claude_sessions::{Live, LiveStatus};
-    use crate::hook::{Envelope, Meta};
+    use std::collections::HashSet;
+
+    use crate::hook::Meta;
+    use crate::protocol::Envelope;
 
     fn ev(event: AgentEvent) -> Parsed {
         Parsed {

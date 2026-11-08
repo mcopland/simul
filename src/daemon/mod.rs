@@ -17,13 +17,13 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use crate::claude_metrics::{Turn, last_turn};
 use crate::claude_sessions;
 use crate::config::Config;
-use crate::hook::{Agent, AgentEvent, Envelope};
+use crate::hook::AgentEvent;
 use crate::kiro_sessions;
 use crate::log;
-use crate::protocol::{GitStatus, Identity, Status, WindowInfo, now_ms};
-use crate::tmux::{self, Tmux, shell_quote, tmux_double_quote};
+use crate::protocol::{Agent, Envelope, GitStatus, Identity, Status, WindowInfo, now_ms};
+use crate::tmux::{self, PaneInfo, Snapshot, Tmux, shell_quote, tmux_double_quote};
 use runs::Runs;
-use state::{PaneInfo, Snapshot, Store, Transition};
+use state::{Store, Transition};
 
 const RECONCILE_DEBOUNCE: Duration = Duration::from_millis(50);
 const TICK: Duration = Duration::from_secs(1);

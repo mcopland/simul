@@ -2,9 +2,10 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 
-use super::state::{PaneRecord, State, Transition};
+use super::state::Transition;
 use crate::config::NotifyConfig;
 use crate::log;
+use crate::protocol::{PaneRecord, State};
 use crate::tmux::Tmux;
 
 /// Decides which transitions notify: entering blocked, asking, done, or failed, while unseen, not
@@ -223,7 +224,7 @@ fn ring_bell(tty: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hook::Agent;
+    use crate::protocol::Agent;
 
     fn t(pane: &str, to: State) -> Transition {
         Transition {

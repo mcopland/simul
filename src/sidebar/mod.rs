@@ -13,9 +13,8 @@ use ratatui::text::{Line as TextLine, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::client;
-use crate::daemon::state::State;
 use crate::paths::{self, env_var};
-use crate::protocol::{Ack, Request, RunState, Status, now_ms};
+use crate::protocol::{Ack, Request, RunState, State, Status, now_ms};
 use crate::tmux::Tmux;
 use model::{Action, App, Line, Mark};
 

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use super::state::PaneInfo;
+use crate::tmux::PaneInfo;
 
 /// The share of its window a sidebar takes, in percent.
 const SHARE: u32 = 25;

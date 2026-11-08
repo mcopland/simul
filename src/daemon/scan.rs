@@ -1,7 +1,8 @@
 use anyhow::Result;
 
 use crate::config::Config;
-use crate::hook::{Agent, Screen};
+use crate::hook::Screen;
+use crate::protocol::Agent;
 use crate::tmux::Tmux;
 
 /// Captures the visible pane and classifies it with the agent's recorded screen signatures.

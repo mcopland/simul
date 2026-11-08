@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use super::{Envelope, slim_payload};
+use super::slim_payload;
 use crate::paths::{self, env_var};
-use crate::protocol::Request;
+use crate::protocol::{Envelope, Request};
 
 const BUDGET: Duration = Duration::from_millis(200);
 const MAX_PAYLOAD: u64 = 16 * 1024 * 1024;

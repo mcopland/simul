@@ -2,52 +2,13 @@ pub mod claude;
 pub mod kiro;
 pub mod shim;
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::Config;
+use crate::protocol::Agent;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Agent {
-    Claude,
-    Kiro,
-}
-
+// The type is wire data in `protocol`; how each agent's hooks and screens read lives here.
 impl Agent {
-    pub fn from_name(name: &str) -> Option<Agent> {
-        match name {
-            "claude" => Some(Agent::Claude),
-            "kiro" => Some(Agent::Kiro),
-            _ => None,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Agent::Claude => "claude",
-            Agent::Kiro => "kiro",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Agent::Claude => "Claude",
-            Agent::Kiro => "Kiro",
-        }
-    }
-
-    pub fn tag(self) -> char {
-        match self {
-            Agent::Claude => 'C',
-            Agent::Kiro => 'K',
-        }
-    }
-
-    pub fn all() -> &'static [Agent] {
-        &[Agent::Claude, Agent::Kiro]
-    }
-
     pub fn matches_process(self, pane_current_command: &str) -> bool {
         match self {
             Agent::Claude => claude::matches_process(pane_current_command),
@@ -125,16 +86,6 @@ pub enum Screen {
     /// No approval prompt is showing, and nothing else about the pane is known.
     NoPrompt,
     Unknown,
-}
-
-/// What the shim sends to the daemon for one hook invocation.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Envelope {
-    pub agent: String,
-    pub event: String,
-    pub pane: Option<String>,
-    pub tmux: Option<String>,
-    pub payload: Value,
 }
 
 /// Largest JSON size of a top-level field the shim forwards.

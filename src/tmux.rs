@@ -4,8 +4,40 @@ use std::process::Output;
 
 use anyhow::{Context, Result, bail};
 
-use crate::daemon::state::{PaneInfo, Snapshot};
 use crate::protocol::{PaneSummary, WindowInfo};
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PaneInfo {
+    pub id: String,
+    pub session: String,
+    pub window: u32,
+    pub window_id: String,
+    pub current_command: String,
+    /// What started the pane: its start command, else tmux's `default-command`, else its
+    /// session's `default-shell`. tmux quotes a start command that has spaces.
+    pub launched: String,
+    pub path: String,
+    pub is_sidebar: bool,
+    pub window_panes: u32,
+    /// Whether this is the active pane of its window.
+    pub active: bool,
+    /// Whether the pane's session carries `@simul-collapsed`, folding it in the sidebar.
+    pub session_collapsed: bool,
+    /// Columns: the pane's, and its window's.
+    pub width: u16,
+    pub window_width: u16,
+    /// Whether a pane in this window is zoomed.
+    pub window_zoomed: bool,
+    pub window_name: String,
+}
+
+/// A point-in-time view of the tmux server used to reconcile tracked panes.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Snapshot {
+    pub panes: Vec<PaneInfo>,
+    /// Panes the user is looking at right now.
+    pub viewed: HashSet<String>,
+}
 
 pub const PANES_FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_id}\t#{pane_active}\t#{window_active}\t#{pane_current_command}\t#{pane_current_path}\t#{@simul-sidebar}\t#{window_panes}\t#{@simul-collapsed}\t#{pane_width}\t#{window_width}\t#{window_zoomed_flag}\t#{?pane_start_command,#{pane_start_command},#{?default-command,#{default-command},#{default-shell}}}\t#{window_name}";
 pub const CLIENTS_FORMAT: &str = "#{client_session}\t#{client_flags}\t#{client_tty}";

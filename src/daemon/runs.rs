@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use super::state::{PaneInfo, Snapshot};
 use crate::protocol::{Run, RunState};
+use crate::tmux::{PaneInfo, Snapshot};
 
 /// What `pane_current_command` reads while a shell waits at its prompt. A login shell shows
 /// with a leading `-`.

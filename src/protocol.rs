@@ -1,7 +1,148 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use crate::daemon::state::PaneRecord;
-use crate::hook::Envelope;
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Agent {
+    Claude,
+    Kiro,
+}
+
+impl Agent {
+    pub fn from_name(name: &str) -> Option<Agent> {
+        match name {
+            "claude" => Some(Agent::Claude),
+            "kiro" => Some(Agent::Kiro),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Agent::Claude => "claude",
+            Agent::Kiro => "kiro",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Agent::Claude => "Claude",
+            Agent::Kiro => "Kiro",
+        }
+    }
+
+    pub fn tag(self) -> char {
+        match self {
+            Agent::Claude => 'C',
+            Agent::Kiro => 'K',
+        }
+    }
+
+    pub fn all() -> &'static [Agent] {
+        &[Agent::Claude, Agent::Kiro]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum State {
+    Working,
+    Blocked,
+    /// The agent asked a question; lasts until the next prompt.
+    Asking,
+    Done,
+    /// The turn ended in an error; lasts until the next prompt.
+    Failed,
+    Idle,
+    /// Also any state a newer daemon reports that this build doesn't know.
+    #[serde(other)]
+    Unknown,
+}
+
+impl State {
+    pub fn name(self) -> &'static str {
+        match self {
+            State::Working => "working",
+            State::Blocked => "blocked",
+            State::Asking => "asking",
+            State::Done => "done",
+            State::Failed => "failed",
+            State::Idle => "idle",
+            State::Unknown => "unknown",
+        }
+    }
+}
+
+/// One tracked agent pane, as the daemon reports it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PaneRecord {
+    pub pane: String,
+    pub agent: Agent,
+    pub state: State,
+    /// Unix ms of the last state change.
+    pub since_ms: u64,
+    /// Unix ms of the last hook event; 0 if none yet (recovered panes).
+    pub last_event_ms: u64,
+    pub session_id: Option<String>,
+    pub cwd: Option<String>,
+    pub branch: Option<String>,
+    pub pending_tool: Option<String>,
+    /// Why the last turn failed, while the pane is `failed`.
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Transcript file, read after each turn for the current model.
+    #[serde(default)]
+    pub transcript: Option<String>,
+    pub session: Option<String>,
+    pub window: Option<u32>,
+    #[serde(default)]
+    pub window_id: Option<String>,
+    #[serde(default)]
+    pub window_name: Option<String>,
+    /// Whether this is the active pane of its window.
+    #[serde(default)]
+    pub active: bool,
+}
+
+impl PaneRecord {
+    /// A pane first seen at `now`, with nothing known about it yet.
+    pub fn new(pane: &str, agent: Agent, state: State, now: u64) -> PaneRecord {
+        PaneRecord {
+            pane: pane.to_owned(),
+            agent,
+            state,
+            since_ms: now,
+            last_event_ms: 0,
+            session_id: None,
+            cwd: None,
+            branch: None,
+            pending_tool: None,
+            error: None,
+            model: None,
+            effort: None,
+            transcript: None,
+            session: None,
+            window: None,
+            window_id: None,
+            window_name: None,
+            active: false,
+        }
+    }
+}
+
+/// What the shim sends to the daemon for one hook invocation.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Envelope {
+    pub agent: String,
+    pub event: String,
+    pub pane: Option<String>,
+    pub tmux: Option<String>,
+    pub payload: Value,
+}
 
 /// One newline-delimited JSON request on the daemon socket.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

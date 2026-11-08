@@ -3,9 +3,10 @@ use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::cli::ls::fmt_age;
-use crate::daemon::state::{PaneRecord, State};
-use crate::protocol::{GitStatus, PaneSummary, Run, RunState, Status, WindowInfo};
+use crate::protocol::{
+    GitStatus, PaneRecord, PaneSummary, Run, RunState, State, Status, WindowInfo,
+};
+use crate::text::fmt_age;
 
 /// What the sidebar lists; `f` switches between the two.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
