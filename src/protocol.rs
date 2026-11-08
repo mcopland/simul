@@ -179,6 +179,50 @@ mod tests {
         assert_eq!(r.state, RunState::Unknown);
     }
 
+    /// Asserts `json` survives a parse into `T` and back byte for byte.
+    fn round_trips<T: Serialize + serde::de::DeserializeOwned>(json: &str) {
+        let parsed: T = serde_json::from_str(json).unwrap();
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+    }
+
+    // Sidebars and `ls` of one build read daemons of another, so the bytes on the socket must
+    // not shift when types move between modules.
+    #[test]
+    fn status_wire_format_is_pinned() {
+        round_trips::<Status>(concat!(
+            r#"{"now_ms":1700000000000,"sidebar":true,"panes":["#,
+            r#"{"pane":"%1","agent":"claude","state":"failed","since_ms":10,"last_event_ms":20,"#,
+            r#""session_id":"abc","cwd":"/w","branch":"main","pending_tool":"Bash","#,
+            r#""error":"rate_limit","model":"claude-opus-5-5","effort":"high","#,
+            r#""transcript":"/t.jsonl","session":"me","window":2,"window_id":"@2","#,
+            r#""window_name":"code","active":true},"#,
+            r#"{"pane":"%2","agent":"kiro","state":"unknown","since_ms":0,"last_event_ms":0,"#,
+            r#""session_id":null,"cwd":null,"branch":null,"pending_tool":null,"error":null,"#,
+            r#""model":null,"effort":null,"transcript":null,"session":null,"window":null,"#,
+            r#""window_id":null,"window_name":null,"active":false}],"#,
+            r#""windows":[{"id":"@2","session":"me","index":2,"name":"code","panes":["#,
+            r#"{"id":"%3","command":"cargo","active":true,"cwd":"/w","#,
+            r#""git":{"branch":"main","ahead":1,"behind":2,"conflicted":3,"staged":4,"#,
+            r#""deleted":5,"modified":6,"untracked":7,"stashed":8},"#,
+            r#""run":{"state":"running","since_ms":30}},"#,
+            r#"{"id":"%4","command":"zsh","active":false,"cwd":"/x","#,
+            r#""git":{"branch":null,"ahead":0,"behind":0,"conflicted":0,"staged":0,"#,
+            r#""deleted":0,"modified":0,"untracked":0,"stashed":0},"run":null}]}],"#,
+            r#""collapsed":["other"]}"#,
+        ));
+    }
+
+    #[test]
+    fn hook_wire_format_is_pinned() {
+        round_trips::<Request>(concat!(
+            r#"{"type":"hook","agent":"claude","event":"Stop","pane":"%1","#,
+            r#""tmux":"/tmp/t,1,0","payload":{"session_id":"abc","cwd":"/w"}}"#,
+        ));
+        round_trips::<Request>(
+            r#"{"type":"hook","agent":"kiro","event":"Stop","pane":null,"tmux":null,"payload":null}"#,
+        );
+    }
+
     #[test]
     fn wire_format_is_tagged() {
         let hook = Request::Hook(Envelope {
