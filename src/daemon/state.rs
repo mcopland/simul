@@ -207,6 +207,11 @@ impl Store {
         out
     }
 
+    /// Every tracked pane's working directory, where one is known.
+    pub fn cwds(&self) -> impl Iterator<Item = &str> {
+        self.panes.values().filter_map(|t| t.rec.cwd.as_deref())
+    }
+
     /// Placed Kiro panes whose hooks reported a session id, to look up in Kiro's session files.
     pub fn kiro_panes(&self) -> Vec<kiro_sessions::Pane> {
         self.panes
@@ -346,6 +351,16 @@ mod tests {
 
     fn state(store: &Store, pane: &str) -> Option<State> {
         store.get(pane).map(|r| r.state)
+    }
+
+    #[test]
+    fn cwds_lists_known_directories() {
+        let mut s = Store::default();
+        let mut start = ev(AgentEvent::SessionStart);
+        start.meta.cwd = Some("/w".into());
+        s.apply("%1", Agent::Claude, &start, 1, false);
+        s.apply("%2", Agent::Claude, &ev(AgentEvent::SessionStart), 1, false);
+        assert_eq!(s.cwds().collect::<Vec<_>>(), ["/w"]);
     }
 
     #[test]

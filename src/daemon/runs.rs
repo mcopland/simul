@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use crate::protocol::{Run, RunState};
 use crate::tmux::{PaneInfo, Snapshot};
@@ -43,9 +44,20 @@ fn at_prompt(command: &str, shell: Option<&str>) -> bool {
 #[derive(Debug, Default)]
 pub struct Runs {
     by_pane: HashMap<String, Run>,
+    /// When a snapshot was last read.
+    checked: Option<Instant>,
 }
 
 impl Runs {
+    /// Whether a hidden-sidebar check is due, `every` after the last one.
+    pub fn due(&self, now: Instant, every: Duration) -> bool {
+        check_due(self.checked, now, every)
+    }
+
+    pub fn mark_checked(&mut self, at: Instant) {
+        self.checked = Some(at);
+    }
+
     pub fn get(&self, pane: &str) -> Option<&Run> {
         self.by_pane.get(pane)
     }
@@ -86,6 +98,11 @@ impl Runs {
         }
         self.by_pane = next;
     }
+}
+
+/// Whether a hidden-sidebar process check is due, `every` after the last look at `last`.
+fn check_due(last: Option<Instant>, now: Instant, every: Duration) -> bool {
+    last.is_none_or(|t| now.duration_since(t) >= every)
 }
 
 #[cfg(test)]
@@ -317,5 +334,29 @@ mod tests {
             Some(RunState::Running),
             "zsh run from bash"
         );
+    }
+
+    #[test]
+    fn hidden_checks_wait_out_their_interval() {
+        let t0 = Instant::now();
+        let every = Duration::from_secs(10);
+        assert!(check_due(None, t0, every), "first check runs at once");
+        assert!(!check_due(Some(t0), t0 + Duration::from_secs(9), every));
+        assert!(check_due(Some(t0), t0 + Duration::from_secs(10), every));
+        assert!(
+            check_due(Some(t0), t0, Duration::ZERO),
+            "0 checks on every tick"
+        );
+    }
+
+    #[test]
+    fn runs_are_due_by_their_last_check() {
+        let mut runs = Runs::default();
+        let t0 = Instant::now();
+        let every = Duration::from_secs(10);
+        assert!(runs.due(t0, every), "never checked");
+        runs.mark_checked(t0);
+        assert!(!runs.due(t0 + Duration::from_secs(9), every));
+        assert!(runs.due(t0 + every, every));
     }
 }

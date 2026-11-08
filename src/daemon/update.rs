@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use tokio::sync::mpsc;
 
-use super::Cmd;
+use super::{Cmd, Daemon};
 use crate::client;
 use crate::log;
 use crate::protocol::{Ack, Identity, Request};
@@ -30,6 +30,44 @@ pub fn plugin_dir(exe: &Path) -> Option<PathBuf> {
 
 fn installer(plugin: &Path) -> PathBuf {
     plugin.join("scripts/install-binary.sh")
+}
+
+/// What the daemon knows about updating itself from its plugin checkout.
+#[derive(Debug)]
+pub struct Updater {
+    /// The plugin checkout this binary was installed into; `None` for other builds.
+    pub plugin: Option<PathBuf>,
+    /// The checkout's VERSION when last read, so repeated change events act once.
+    version: Option<String>,
+    /// An installer is running.
+    installing: bool,
+}
+
+impl Updater {
+    /// For the checkout at `plugin`, starting from the VERSION it names now.
+    pub fn new(plugin: Option<PathBuf>) -> Updater {
+        Updater {
+            version: plugin.as_deref().and_then(wanted_version),
+            plugin,
+            installing: false,
+        }
+    }
+
+    /// The version to install now that the checkout names `wanted`, if any: once per VERSION
+    /// change, never while an install runs, and never the `running` one.
+    pub fn on_change(&mut self, wanted: Option<String>, running: &str) -> Option<String> {
+        if self.installing || wanted.is_none() || wanted == self.version {
+            return None;
+        }
+        self.version.clone_from(&wanted);
+        let version = wanted.filter(|v| v != running)?;
+        self.installing = true;
+        Some(version)
+    }
+
+    pub fn finished(&mut self) {
+        self.installing = false;
+    }
 }
 
 /// The version the plugin checkout names; `None` if VERSION can't be read or is empty.
@@ -133,9 +171,97 @@ pub fn replace(socket: &Path, me: &Identity) -> Result<()> {
     Ok(())
 }
 
+impl Daemon {
+    /// Installs the release the plugin checkout now names, once per VERSION change.
+    pub(super) fn on_plugin_changed(&mut self) {
+        let Some(plugin) = self.updater.plugin.clone() else {
+            return;
+        };
+        let wanted = wanted_version(&plugin);
+        let Some(version) = self.updater.on_change(wanted, env!("CARGO_PKG_VERSION")) else {
+            return;
+        };
+        log!("plugin updated to {version}; installing it");
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let result = install(&plugin).await.map_err(|e| format!("{e:#}"));
+            // The daemon loop only stops at shutdown, when the install no longer matters.
+            let _ = tx.send(Cmd::Installed { version, result }).await;
+        });
+    }
+
+    /// Re-executes into the freshly installed binary, which takes over from tmux's state.
+    pub(super) fn on_installed(&mut self, version: &str, result: Result<(), String>) {
+        self.updater.finished();
+        if let Err(e) = result {
+            log!("failed to install {version}: {e}");
+            return;
+        }
+        log!(
+            "installed {version}; restarting as {}",
+            self.opts.exe.display()
+        );
+        let e = exec(&self.opts.exe);
+        log!("{e:#}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ver(v: &str) -> Option<String> {
+        Some(v.to_owned())
+    }
+
+    /// An updater whose checkout last named `version`.
+    fn at(version: &str) -> Updater {
+        Updater {
+            plugin: None,
+            version: ver(version),
+            installing: false,
+        }
+    }
+
+    #[test]
+    fn a_new_version_installs_once() {
+        let mut u = at("1.0.0");
+        assert_eq!(u.on_change(ver("1.0.0"), "1.0.0"), None, "unchanged");
+        assert_eq!(u.on_change(None, "1.0.0"), None, "unreadable VERSION");
+        assert_eq!(u.on_change(ver("2.0.0"), "1.0.0"), ver("2.0.0"));
+        assert_eq!(
+            u.on_change(ver("2.0.0"), "1.0.0"),
+            None,
+            "already installing"
+        );
+        assert_eq!(
+            u.on_change(ver("3.0.0"), "1.0.0"),
+            None,
+            "busy until finished"
+        );
+        u.finished();
+        assert_eq!(
+            u.on_change(ver("2.0.0"), "1.0.0"),
+            None,
+            "2.0.0 was handled"
+        );
+        assert_eq!(
+            u.on_change(ver("3.0.0"), "1.0.0"),
+            ver("3.0.0"),
+            "3.0.0 arrived while busy, so it was never recorded"
+        );
+    }
+
+    #[test]
+    fn going_back_to_the_running_version_installs_nothing() {
+        let mut u = at("2.0.0");
+        assert_eq!(u.on_change(ver("1.0.0"), "1.0.0"), None);
+        assert_eq!(
+            u.on_change(ver("2.0.0"), "1.0.0"),
+            ver("2.0.0"),
+            "1.0.0 was recorded and nothing is installing"
+        );
+    }
 
     fn plugin_at(root: &Path) -> PathBuf {
         let exe = root.join("bin/simul");
