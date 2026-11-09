@@ -48,6 +48,9 @@ enum Command {
         /// this; hooks don't, so an old hook path never displaces the plugin's build).
         #[arg(long)]
         replace: bool,
+        /// Set by a self-update's restart: the version the binary was installed as.
+        #[arg(long, hide = true)]
+        restarted_for: Option<String>,
     },
     /// Called by tmux hooks.
     #[command(hide = true)]
@@ -92,7 +95,8 @@ fn run(cli: Cli) -> Result<()> {
         Command::Daemon {
             tmux_socket,
             replace,
-        } => run_daemon(tmux_socket, replace),
+            restarted_for,
+        } => run_daemon(tmux_socket, replace, restarted_for),
         Command::Internal { what } => {
             let req = match what {
                 Internal::Refresh => Request::Refresh,
@@ -104,7 +108,11 @@ fn run(cli: Cli) -> Result<()> {
     }
 }
 
-fn run_daemon(tmux_socket: Option<PathBuf>, replace: bool) -> Result<()> {
+fn run_daemon(
+    tmux_socket: Option<PathBuf>,
+    replace: bool,
+    restarted_for: Option<String>,
+) -> Result<()> {
     let tmux_socket = tmux_socket
         .or_else(paths::current_tmux_socket)
         .context("daemon needs a tmux server: pass --tmux-socket or run inside tmux")?;
@@ -127,6 +135,7 @@ fn run_daemon(tmux_socket: Option<PathBuf>, replace: bool) -> Result<()> {
         exe,
         identity,
         config: config::load()?,
+        restarted_for,
     };
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

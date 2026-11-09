@@ -134,6 +134,36 @@ fn a_new_plugin_version_installs_the_release_and_restarts() {
 }
 
 #[test]
+fn a_daemon_behind_its_checkout_installs_at_startup() {
+    let mut h = Harness::new();
+    let root = plugin(&h);
+    let releases = h.dir.path().join("releases");
+    publish(&releases, "9.9.9");
+    // TPM updated the checkout while no daemon watched it; bin/simul is still the old build.
+    fs::write(root.join("VERSION"), "9.9.9\n").unwrap();
+    let mut cmd = h.simul_at(&root.join("bin/simul"));
+    cmd.env("SIMUL_OS", "Darwin")
+        .env("SIMUL_ARCH", "arm64")
+        .env(
+            "SIMUL_RELEASE_BASE_URL",
+            format!("file://{}", releases.display()),
+        );
+    h.start_daemon_with(cmd, &[]);
+    eventually("restarted into the new binary", || {
+        h.daemon_log().matches("daemon started").count() == 2
+    });
+    // The test release reports this crate's version, not 9.9.9, so the restarted daemon must
+    // see the mismatch rather than install again and restart forever.
+    eventually("the restart notices the mismatch", || {
+        h.daemon_log().contains("leaving it until VERSION changes")
+    });
+    let log = h.daemon_log();
+    assert!(log.contains("installed 9.9.9"), "{log}");
+    assert_eq!(log.matches("installing").count(), 1, "{log}");
+    assert_eq!(log.matches("daemon started").count(), 2, "{log}");
+}
+
+#[test]
 fn a_failed_install_keeps_the_daemon() {
     let mut h = Harness::new();
     let root = plugin(&h);

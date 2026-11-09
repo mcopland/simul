@@ -72,6 +72,8 @@ pub enum Cmd {
     Identify(oneshot::Sender<Identity>),
     /// The plugin checkout's VERSION file changed.
     PluginChanged,
+    /// A retry armed after a failed install or restart (see `Updater::retry_due`).
+    RetryInstall(u64),
     /// The installer for `version` finished.
     Installed {
         version: String,
@@ -96,6 +98,8 @@ pub struct Options {
     /// This build, as read at startup (see `Identity::of`).
     pub identity: Identity,
     pub config: Config,
+    /// The version this daemon was installed as before an update restarted it.
+    pub restarted_for: Option<String>,
 }
 
 struct Daemon {
@@ -170,10 +174,20 @@ pub async fn run(opts: Options) -> Result<()> {
             claude_sessions::sessions_dir(crate::paths::env_var),
             kiro_sessions::sessions_dir(crate::paths::env_var),
         ),
-        updater: Updater::new(plugin),
+        updater: Updater::new(plugin, env!("CARGO_PKG_VERSION")),
     };
     d.install_tmux_hooks().await;
     d.reconcile().await;
+    if let Some(version) = d.opts.restarted_for.clone()
+        && d.updater.restarted_for(&version)
+    {
+        log!(
+            "installed {version}, but the new build reports {}; leaving it until VERSION changes",
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+    // The checkout may have moved on while no daemon was watching it.
+    d.on_plugin_changed();
     let exit = loop {
         match rx.recv().await {
             Some(Cmd::Shutdown(why)) => break why,
@@ -290,6 +304,7 @@ impl Daemon {
                 let _ = reply.send(self.opts.identity.clone());
             }
             Cmd::PluginChanged => self.on_plugin_changed(),
+            Cmd::RetryInstall(retry) => self.on_retry_install(retry),
             Cmd::Installed { version, result } => self.on_installed(&version, result),
             Cmd::Shutdown(_) => {}
         }

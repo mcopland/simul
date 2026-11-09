@@ -1,7 +1,9 @@
-//! Updating in place. A daemon running from a plugin checkout watches the checkout's VERSION
-//! file; when an update (TPM's `git pull`) changes it, the daemon installs the matching release
-//! and re-executes into it. Loading the plugin replaces a daemon of another build the same way.
+//! Updating in place. A daemon running from a plugin checkout installs the release the
+//! checkout's VERSION names and re-executes into it: at startup, whenever an update (TPM's
+//! `git pull`) changes VERSION, and on a backoff after a failed install or restart. Loading the
+//! plugin replaces a daemon of another build the same way.
 
+use std::ffi::OsString;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -32,42 +34,159 @@ fn installer(plugin: &Path) -> PathBuf {
     plugin.join("scripts/install-binary.sh")
 }
 
+/// First wait before retrying a failed install or restart; each failure in a row doubles it.
+const RETRY_FIRST: Duration = Duration::from_secs(60);
+const RETRY_MAX: Duration = Duration::from_secs(3600);
+
+/// The hidden `simul daemon` flag naming the version a daemon restarted into after installing
+/// it. A flag rather than an environment variable, so the daemon's children don't inherit it.
+pub const RESTARTED_FOR: &str = "--restarted-for";
+
+/// What to do once an install ends.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Next {
+    /// Re-execute into `bin/simul`, installed as this version.
+    Restart(String),
+    /// The checkout moved on during the install; install this version before restarting.
+    Install(String),
+    /// Nothing usable was installed; look at the checkout again after `delay`, if `retry` is
+    /// still the latest by then (see `Updater::retry_due`).
+    RetryIn { delay: Duration, retry: u64 },
+}
+
 /// What the daemon knows about updating itself from its plugin checkout.
 #[derive(Debug)]
 pub struct Updater {
     /// The plugin checkout this binary was installed into; `None` for other builds.
     pub plugin: Option<PathBuf>,
-    /// The checkout's VERSION when last read, so repeated change events act once.
-    version: Option<String>,
-    /// An installer is running.
-    installing: bool,
+    /// This process's version.
+    running: String,
+    /// The version an installer is fetching now.
+    installing: Option<String>,
+    /// The version this process put in `bin/simul` and hasn't restarted into yet.
+    installed: Option<String>,
+    /// A version whose release came back reporting another version; installing it again would
+    /// only loop.
+    skip: Option<String>,
+    /// The version last tried, so a newly named one starts its backoff afresh.
+    attempted: Option<String>,
+    /// Failed installs and restarts in a row, for backoff.
+    failures: u32,
+    /// Numbers retries; starting an install or arming a newer retry makes older ones stale.
+    retry: u64,
+    /// A retry is armed for `attempted`; until it fires, events naming it again wait for it.
+    backing_off: bool,
 }
 
 impl Updater {
-    /// For the checkout at `plugin`, starting from the VERSION it names now.
-    pub fn new(plugin: Option<PathBuf>) -> Updater {
+    pub fn new(plugin: Option<PathBuf>, running: &str) -> Updater {
         Updater {
-            version: plugin.as_deref().and_then(wanted_version),
             plugin,
-            installing: false,
+            running: running.to_owned(),
+            installing: None,
+            installed: None,
+            skip: None,
+            attempted: None,
+            failures: 0,
+            retry: 0,
+            backing_off: false,
         }
     }
 
-    /// The version to install now that the checkout names `wanted`, if any: once per VERSION
-    /// change, never while an install runs, and never the `running` one.
-    pub fn on_change(&mut self, wanted: Option<String>, running: &str) -> Option<String> {
-        if self.installing || wanted.is_none() || wanted == self.version {
+    /// Records that this process is the restart after installing `version`. Returns true if it
+    /// reports another version, in which case installing `version` again would only loop.
+    pub fn restarted_for(&mut self, version: &str) -> bool {
+        let mismatch = version != self.running;
+        if mismatch {
+            self.skip = Some(version.to_owned());
+        }
+        mismatch
+    }
+
+    /// What to do now that the checkout names `wanted`: restart into a build already waiting
+    /// in `bin/simul`, or install it. Nothing for the running version, one that came back
+    /// mismatched, one an armed retry will try, or while an install runs.
+    pub fn on_change(&mut self, wanted: Option<String>) -> Option<Next> {
+        if self.installing.is_some() {
             return None;
         }
-        self.version.clone_from(&wanted);
-        let version = wanted.filter(|v| v != running)?;
-        self.installing = true;
-        Some(version)
+        let version = wanted.filter(|v| *v != self.running && self.skip.as_ref() != Some(v))?;
+        if self.installed.as_ref() == Some(&version) {
+            return Some(Next::Restart(version));
+        }
+        if self.attempted.as_ref() == Some(&version) {
+            if self.backing_off {
+                return None;
+            }
+        } else {
+            self.failures = 0;
+        }
+        self.attempted = Some(version.clone());
+        self.installing = Some(version.clone());
+        self.backing_off = false;
+        self.retry += 1;
+        Some(Next::Install(version))
     }
 
-    pub fn finished(&mut self) {
-        self.installing = false;
+    /// Settles the running install; `wanted` is what the checkout names now. A failure backs
+    /// off, keeping any build an earlier install left in `bin/simul` for `on_change` to use.
+    pub fn finished(&mut self, ok: bool, wanted: Option<String>) -> Next {
+        match (self.installing.take(), ok) {
+            (Some(done), true) => {
+                self.installed = Some(done.clone());
+                self.on_change(wanted).unwrap_or(Next::Restart(done))
+            }
+            _ => self.back_off(),
+        }
     }
+
+    /// The restart into `bin/simul` failed; installs again after a backoff.
+    pub fn restart_failed(&mut self) -> Next {
+        self.installed = None;
+        self.back_off()
+    }
+
+    /// Whether retry `retry` is still the latest; if so, the next `on_change` may install.
+    pub fn take_retry(&mut self, retry: u64) -> bool {
+        let due = retry == self.retry && self.installing.is_none();
+        if due {
+            self.backing_off = false;
+        }
+        due
+    }
+
+    fn back_off(&mut self) -> Next {
+        self.failures = self.failures.saturating_add(1);
+        self.retry += 1;
+        self.backing_off = true;
+        Next::RetryIn {
+            delay: retry_delay(self.failures),
+            retry: self.retry,
+        }
+    }
+}
+
+/// How long to wait after the `failures`th failure in a row.
+fn retry_delay(failures: u32) -> Duration {
+    let doublings = failures.saturating_sub(1).min(16);
+    (RETRY_FIRST * 2u32.pow(doublings)).min(RETRY_MAX)
+}
+
+/// The daemon's arguments for a restart as `version`: `args` with any earlier
+/// `--restarted-for` dropped and the new one appended.
+pub fn restart_args(args: &[OsString], version: &str) -> Vec<OsString> {
+    let prefix = format!("{RESTARTED_FOR}=");
+    let mut out = Vec::with_capacity(args.len() + 2);
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if arg == RESTARTED_FOR {
+            rest.next();
+        } else if !arg.to_string_lossy().starts_with(&prefix) {
+            out.push(arg.clone());
+        }
+    }
+    out.extend([OsString::from(RESTARTED_FOR), OsString::from(version)]);
+    out
 }
 
 /// The version the plugin checkout names; `None` if VERSION can't be read or is empty.
@@ -124,12 +243,14 @@ pub async fn install(plugin: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Replaces this process with `exe`, keeping its arguments. The daemon's socket is closed on
-/// exec, so the new image's `bind` finds it stale and takes it over. Returns only on failure.
-pub fn exec(exe: &Path) -> anyhow::Error {
+/// Replaces this process with `exe`, keeping its arguments, and tells it which `version` it
+/// was installed as. The daemon's socket is closed on exec, so the new image's `bind` finds it
+/// stale and takes it over. Returns only on failure.
+pub fn exec(exe: &Path, version: &str) -> anyhow::Error {
     use std::os::unix::process::CommandExt;
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let err = std::process::Command::new(exe)
-        .args(std::env::args_os().skip(1))
+        .args(restart_args(&args, version))
         .exec();
     anyhow::Error::new(err).context(format!("failed to run {}", exe.display()))
 }
@@ -172,16 +293,19 @@ pub fn replace(socket: &Path, me: &Identity) -> Result<()> {
 }
 
 impl Daemon {
-    /// Installs the release the plugin checkout now names, once per VERSION change.
+    /// Installs the release the plugin checkout names, or restarts into it if it is already
+    /// in `bin/simul`, unless this build already is it.
     pub(super) fn on_plugin_changed(&mut self) {
         let Some(plugin) = self.updater.plugin.clone() else {
             return;
         };
-        let wanted = wanted_version(&plugin);
-        let Some(version) = self.updater.on_change(wanted, env!("CARGO_PKG_VERSION")) else {
-            return;
-        };
-        log!("plugin updated to {version}; installing it");
+        if let Some(next) = self.updater.on_change(wanted_version(&plugin)) {
+            self.follow(plugin, next);
+        }
+    }
+
+    fn start_install(&self, plugin: PathBuf, version: String) {
+        log!("plugin names {version}; installing it");
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = install(&plugin).await.map_err(|e| format!("{e:#}"));
@@ -190,19 +314,49 @@ impl Daemon {
         });
     }
 
-    /// Re-executes into the freshly installed binary, which takes over from tmux's state.
+    /// Re-executes into the freshly installed binary, which takes over from tmux's state;
+    /// first installs again if the checkout moved on, and retries later if the install failed.
     pub(super) fn on_installed(&mut self, version: &str, result: Result<(), String>) {
-        self.updater.finished();
-        if let Err(e) = result {
-            log!("failed to install {version}: {e}");
+        let Some(plugin) = self.updater.plugin.clone() else {
             return;
+        };
+        match &result {
+            Ok(()) => log!("installed {version}"),
+            Err(e) => log!("failed to install {version}: {e}"),
         }
-        log!(
-            "installed {version}; restarting as {}",
-            self.opts.exe.display()
-        );
-        let e = exec(&self.opts.exe);
-        log!("{e:#}");
+        let next = self
+            .updater
+            .finished(result.is_ok(), wanted_version(&plugin));
+        self.follow(plugin, next);
+    }
+
+    fn follow(&mut self, plugin: PathBuf, next: Next) {
+        match next {
+            Next::RetryIn { delay, retry } => {
+                log!("looking at the plugin again in {}s", delay.as_secs());
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    // The daemon loop only stops at shutdown, when the retry no longer matters.
+                    let _ = tx.send(Cmd::RetryInstall(retry)).await;
+                });
+            }
+            Next::Install(version) => self.start_install(plugin, version),
+            Next::Restart(version) => {
+                log!("restarting into {version} as {}", self.opts.exe.display());
+                let e = exec(&self.opts.exe, &version);
+                log!("{e:#}");
+                let next = self.updater.restart_failed();
+                self.follow(plugin, next);
+            }
+        }
+    }
+
+    /// A retry armed after a failure, unless something newer has happened since.
+    pub(super) fn on_retry_install(&mut self, retry: u64) {
+        if self.updater.take_retry(retry) {
+            self.on_plugin_changed();
+        }
     }
 }
 
@@ -214,52 +368,215 @@ mod tests {
         Some(v.to_owned())
     }
 
-    /// An updater whose checkout last named `version`.
-    fn at(version: &str) -> Updater {
-        Updater {
-            plugin: None,
-            version: ver(version),
-            installing: false,
+    fn running(version: &str) -> Updater {
+        Updater::new(None, version)
+    }
+
+    fn install(v: &str) -> Option<Next> {
+        Some(Next::Install(v.to_owned()))
+    }
+
+    fn restart(v: &str) -> Next {
+        Next::Restart(v.to_owned())
+    }
+
+    fn delay(next: &Next) -> Duration {
+        match next {
+            Next::RetryIn { delay, .. } => *delay,
+            other => panic!("expected a retry, got {other:?}"),
         }
     }
 
+    fn retry(next: &Next) -> u64 {
+        match next {
+            Next::RetryIn { retry, .. } => *retry,
+            other => panic!("expected a retry, got {other:?}"),
+        }
+    }
+
+    /// Fails the running install, lets its retry fire, and returns the backoff it waited.
+    fn fail_and_retry(u: &mut Updater, v: &str) -> Duration {
+        let next = u.finished(false, ver(v));
+        assert!(u.take_retry(retry(&next)));
+        delay(&next)
+    }
+
     #[test]
-    fn a_new_version_installs_once() {
-        let mut u = at("1.0.0");
-        assert_eq!(u.on_change(ver("1.0.0"), "1.0.0"), None, "unchanged");
-        assert_eq!(u.on_change(None, "1.0.0"), None, "unreadable VERSION");
-        assert_eq!(u.on_change(ver("2.0.0"), "1.0.0"), ver("2.0.0"));
+    fn a_new_version_installs_and_restarts() {
+        let mut u = running("1.0.0");
+        assert_eq!(u.on_change(None), None, "unreadable VERSION");
+        assert_eq!(u.on_change(ver("1.0.0")), None, "already running it");
+        assert_eq!(u.on_change(ver("2.0.0")), install("2.0.0"));
+        assert_eq!(u.on_change(ver("2.0.0")), None, "one install at a time");
+        assert_eq!(u.finished(true, ver("2.0.0")), restart("2.0.0"));
+    }
+
+    #[test]
+    fn a_daemon_behind_its_checkout_installs_it() {
+        // A daemon started from a stale bin/simul: the checkout already names a newer release.
+        assert_eq!(running("1.0.0").on_change(ver("2.0.0")), install("2.0.0"));
+    }
+
+    #[test]
+    fn a_version_named_during_an_install_is_installed_before_restarting() {
+        let mut u = running("1.0.0");
+        assert_eq!(u.on_change(ver("2.0.0")), install("2.0.0"));
+        assert_eq!(u.on_change(ver("3.0.0")), None, "busy");
         assert_eq!(
-            u.on_change(ver("2.0.0"), "1.0.0"),
-            None,
-            "already installing"
+            u.finished(true, ver("3.0.0")),
+            Next::Install("3.0.0".into())
         );
+        assert_eq!(u.finished(true, ver("3.0.0")), restart("3.0.0"));
+    }
+
+    #[test]
+    fn a_failed_follow_up_install_backs_off_and_keeps_the_installed_build() {
+        let mut u = running("1.0.0");
+        assert_eq!(u.on_change(ver("2.0.0")), install("2.0.0"));
         assert_eq!(
-            u.on_change(ver("3.0.0"), "1.0.0"),
-            None,
-            "busy until finished"
+            u.finished(true, ver("3.0.0")),
+            Next::Install("3.0.0".into())
         );
-        u.finished();
+        assert_eq!(delay(&u.finished(false, ver("3.0.0"))), RETRY_FIRST);
         assert_eq!(
-            u.on_change(ver("2.0.0"), "1.0.0"),
-            None,
-            "2.0.0 was handled"
+            u.on_change(ver("2.0.0")),
+            Some(restart("2.0.0")),
+            "back to the build already in bin/simul"
         );
+    }
+
+    #[test]
+    fn a_failure_after_a_restart_waits_instead_of_restarting_again() {
+        // The restarted daemon must not treat its own version as a build waiting to run, or
+        // each failed install would restart it into a fresh attempt with no backoff.
+        let mut u = running("2.0.0");
+        assert!(!u.restarted_for("2.0.0"));
+        assert_eq!(u.on_change(ver("3.0.0")), install("3.0.0"));
+        assert_eq!(delay(&u.finished(false, ver("3.0.0"))), RETRY_FIRST);
+    }
+
+    #[test]
+    fn a_failed_install_is_retried_with_backoff() {
+        let mut u = running("1.0.0");
+        assert_eq!(u.on_change(ver("2.0.0")), install("2.0.0"));
+        assert_eq!(fail_and_retry(&mut u, "2.0.0"), RETRY_FIRST);
         assert_eq!(
-            u.on_change(ver("3.0.0"), "1.0.0"),
-            ver("3.0.0"),
-            "3.0.0 arrived while busy, so it was never recorded"
+            u.on_change(ver("2.0.0")),
+            install("2.0.0"),
+            "the retry installs"
         );
+        assert_eq!(fail_and_retry(&mut u, "2.0.0"), RETRY_FIRST * 2);
+        assert_eq!(u.on_change(ver("2.0.0")), install("2.0.0"));
+        assert_eq!(u.finished(true, ver("2.0.0")), restart("2.0.0"));
+    }
+
+    #[test]
+    fn a_repeated_version_event_waits_for_the_armed_retry() {
+        let mut u = running("1.0.0");
+        u.on_change(ver("2.0.0"));
+        let next = u.finished(false, ver("2.0.0"));
+        assert_eq!(u.on_change(ver("2.0.0")), None, "the retry will try it");
+        assert!(u.take_retry(retry(&next)));
+        assert_eq!(u.on_change(ver("2.0.0")), install("2.0.0"));
+    }
+
+    #[test]
+    fn a_newly_named_version_starts_its_backoff_afresh() {
+        let mut u = running("1.0.0");
+        for _ in 0..3 {
+            assert_eq!(u.on_change(ver("2.0.0")), install("2.0.0"));
+            fail_and_retry(&mut u, "2.0.0");
+        }
+        assert_eq!(u.on_change(ver("2.0.1")), install("2.0.1"));
+        assert_eq!(delay(&u.finished(false, ver("2.0.1"))), RETRY_FIRST);
+    }
+
+    #[test]
+    fn only_the_latest_retry_is_due() {
+        let mut u = running("1.0.0");
+        u.on_change(ver("2.0.0"));
+        let first = retry(&u.finished(false, ver("2.0.0")));
+        assert_eq!(
+            u.on_change(ver("2.1.0")),
+            install("2.1.0"),
+            "a newly named version doesn't wait for the old retry"
+        );
+        assert!(!u.take_retry(first), "an install is running");
+        let second = retry(&u.finished(false, ver("2.1.0")));
+        assert!(!u.take_retry(first), "superseded");
+        assert!(u.take_retry(second));
+    }
+
+    #[test]
+    fn a_failed_restart_backs_off_further_each_time() {
+        let mut u = running("1.0.0");
+        let mut waits = Vec::new();
+        for _ in 0..3 {
+            assert_eq!(u.on_change(ver("2.0.0")), install("2.0.0"));
+            assert_eq!(u.finished(true, ver("2.0.0")), restart("2.0.0"));
+            let next = u.restart_failed();
+            waits.push(delay(&next));
+            assert!(u.take_retry(retry(&next)));
+        }
+        assert_eq!(waits, [RETRY_FIRST, RETRY_FIRST * 2, RETRY_FIRST * 4]);
+    }
+
+    #[test]
+    fn retries_back_off_to_an_hour() {
+        assert_eq!(retry_delay(1), RETRY_FIRST);
+        assert_eq!(retry_delay(3), RETRY_FIRST * 4);
+        assert_eq!(retry_delay(7), RETRY_MAX);
+        assert_eq!(retry_delay(u32::MAX), RETRY_MAX);
     }
 
     #[test]
     fn going_back_to_the_running_version_installs_nothing() {
-        let mut u = at("2.0.0");
-        assert_eq!(u.on_change(ver("1.0.0"), "1.0.0"), None);
+        let mut u = running("1.0.0");
+        assert_eq!(u.on_change(ver("1.0.0")), None);
         assert_eq!(
-            u.on_change(ver("2.0.0"), "1.0.0"),
-            ver("2.0.0"),
-            "1.0.0 was recorded and nothing is installing"
+            u.on_change(ver("2.0.0")),
+            install("2.0.0"),
+            "nothing was recorded"
+        );
+    }
+
+    #[test]
+    fn a_restart_that_runs_another_version_does_not_install_again() {
+        // The release named 2.0.0 reports 1.0.0, so each restart would install it again.
+        let mut u = running("1.0.0");
+        assert!(u.restarted_for("2.0.0"), "mismatch is reported");
+        assert_eq!(u.on_change(ver("2.0.0")), None);
+        assert_eq!(
+            u.on_change(ver("3.0.0")),
+            install("3.0.0"),
+            "a newer one still installs"
+        );
+    }
+
+    #[test]
+    fn a_restart_into_the_installed_version_is_quiet() {
+        let mut u = running("2.0.0");
+        assert!(!u.restarted_for("2.0.0"));
+        assert_eq!(u.on_change(ver("2.0.0")), None);
+    }
+
+    #[test]
+    fn restart_args_carry_only_the_latest_version() {
+        let args = |a: &[&str]| a.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(
+            restart_args(&args(&["daemon", "--replace"]), "2.0.0"),
+            args(&["daemon", "--replace", "--restarted-for", "2.0.0"])
+        );
+        assert_eq!(
+            restart_args(
+                &args(&["daemon", "--restarted-for", "1.0.0", "--tmux-socket", "/t"]),
+                "2.0.0"
+            ),
+            args(&["daemon", "--tmux-socket", "/t", "--restarted-for", "2.0.0"])
+        );
+        assert_eq!(
+            restart_args(&args(&["daemon", "--restarted-for=1.0.0"]), "2.0.0"),
+            args(&["daemon", "--restarted-for", "2.0.0"])
         );
     }
 
