@@ -504,6 +504,8 @@ fn space_folds_a_session_in_every_sidebar_and_it_persists() {
         screen.lines().any(|l| l.trim_end() == line)
     };
     eventually("u listed", || shows(&h, "t", "u"));
+    // Space acts on what u's sidebar has drawn, which may lag t's.
+    eventually("u listed in u's own sidebar", || shows(&h, "u", "u"));
     // Unfocused, u's sidebar has its own window's pane selected, so Space folds u.
     h.tmux(&["send-keys", "-t", &sidebar_in(&h, "u"), "Space"]);
     if !poll(Duration::from_secs(5), || shows(&h, "t", folded)) {
@@ -573,6 +575,11 @@ fn own_and_selected_session_headers_are_bright_the_rest_dim() {
 
     // Folded away, u's sidebar selects u's header.
     let side = sidebar_in(&h, "u");
+    // Space acts on what u's sidebar has drawn, which may lag t's.
+    eventually("u listed in u's own sidebar", || {
+        let screen = h.tmux(&["capture-pane", "-e", "-p", "-t", &side]);
+        header(&screen, "u").is_some()
+    });
     h.tmux(&["send-keys", "-t", &side, "Space"]);
     let folded = "u \u{25b8}";
     eventually("u folded and selected", || {
