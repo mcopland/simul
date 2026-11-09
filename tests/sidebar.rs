@@ -514,7 +514,8 @@ fn space_folds_a_session_in_every_sidebar_and_it_persists() {
             screen("u")
         );
     }
-    assert!(shows(&h, "u", folded), "and in u's own");
+    // Each sidebar draws the fold when its own status arrives, so u's may lag t's.
+    eventually("u folded in u's own sidebar too", || shows(&h, "u", folded));
     assert_eq!(collapsed_option(&h, "u"), "1");
     assert_eq!(collapsed_option(&h, "t"), "");
 
@@ -526,6 +527,10 @@ fn space_folds_a_session_in_every_sidebar_and_it_persists() {
     eventually("sidebars back", || sidebars(&h).len() == 2);
     eventually("still folded after a daemon restart", || {
         shows(&h, "t", folded)
+    });
+    // Space acts on what u's sidebar has drawn, so it must show the fold first.
+    eventually("u's own sidebar folded after the restart", || {
+        shows(&h, "u", folded)
     });
 
     // Folded away, u's sidebar selects u's header, so Space unfolds it.
