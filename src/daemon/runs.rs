@@ -100,9 +100,13 @@ impl Runs {
     }
 }
 
+/// How early a check may run. A check is marked when its snapshot returns, partway into the
+/// tick that ran it, so the tick its interval ends on comes slightly short of the interval.
+const SLACK: Duration = Duration::from_millis(super::TICK.as_millis() as u64 / 2);
+
 /// Whether a hidden-sidebar process check is due, `every` after the last look at `last`.
 fn check_due(last: Option<Instant>, now: Instant, every: Duration) -> bool {
-    last.is_none_or(|t| now.duration_since(t) >= every)
+    last.is_none_or(|t| now.duration_since(t) + SLACK >= every)
 }
 
 #[cfg(test)]
@@ -346,6 +350,28 @@ mod tests {
         assert!(
             check_due(Some(t0), t0, Duration::ZERO),
             "0 checks on every tick"
+        );
+    }
+
+    #[test]
+    fn checks_land_on_the_tick_their_interval_ends_on() {
+        // A check is marked when its snapshot returns, a little after the tick that ran it.
+        let t0 = Instant::now();
+        let late = Duration::from_millis(50);
+        let second = Duration::from_secs(1);
+        assert!(
+            check_due(Some(t0), t0 + second - late, second),
+            "every second means every tick"
+        );
+        let ten = Duration::from_secs(10);
+        assert!(check_due(Some(t0), t0 + ten - late, ten), "the 10th tick");
+        assert!(
+            !check_due(Some(t0), t0 + ten - second - late, ten),
+            "not the 9th"
+        );
+        assert!(
+            !check_due(Some(t0), t0 + Duration::from_millis(400), second),
+            "not twice in one tick"
         );
     }
 
