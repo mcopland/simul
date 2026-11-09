@@ -22,16 +22,18 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
-      # The integration tests drive a real tmux server and need tmux 3.3 or newer.
-      - name: Install tmux
+      # The integration tests drive a real tmux server and need tmux 3.3 or newer; the
+      # plain-pane test runs zsh, which macOS ships and Ubuntu doesn't.
+      - name: Install tmux and zsh
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
             sudo apt-get update
-            sudo apt-get install -y tmux
+            sudo apt-get install -y tmux zsh
           else
             brew install tmux
           fi
           tmux -V
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      # Every suite runs even after one fails, so a single run shows all failures.
+      - run: cargo test --no-fail-fast
