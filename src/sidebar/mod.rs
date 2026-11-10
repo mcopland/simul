@@ -16,7 +16,7 @@ use crate::client;
 use crate::paths::{self, env_var};
 use crate::protocol::{Ack, Request, RunState, State, Status, now_ms};
 use crate::tmux::Tmux;
-use model::{Action, App, Line, Mark};
+use model::{Action, App, Line, Lit, Mark};
 
 const LOCATION_REFRESH: Duration = Duration::from_secs(5);
 const RECONNECT: Duration = Duration::from_secs(1);
@@ -216,30 +216,34 @@ fn render(f: &mut Frame, view: &mut View) {
         _ => None,
     });
     let own_session = view.app.own_session();
+    let lit = view.app.status.as_ref().map(Lit::of).unwrap_or_default();
     let current = Style::new().add_modifier(Modifier::BOLD);
-    // The sidebar's own session and the selected one match the session name in tmux's
-    // status-left; the rest are dimmed, as other windows are muted.
-    let session = Style::new().fg(Color::Rgb(0x93, 0x73, 0x47));
-    let session_selected = Style::new()
-        .fg(Color::Rgb(0xf6, 0xc1, 0x77))
-        .add_modifier(Modifier::BOLD);
     let muted = Style::new().fg(Color::DarkGray);
-    let detail = |pane: &str| {
-        if selected_pane == Some(pane) {
+    // Bold marks the selected row and the sidebar's own window; of the rest, only what is
+    // inactive is dimmed.
+    let row_style = |line: &Line, bold: bool| {
+        if bold {
+            current
+        } else if lit.line(line) {
             Style::new()
         } else {
             muted
         }
     };
+    // Lit sessions take the gold of the session name in tmux's status-left; the rest dim it.
+    let gold = Style::new().fg(Color::Rgb(0xf6, 0xc1, 0x77));
+    let session_dim = Style::new().fg(Color::Rgb(0x93, 0x73, 0x47));
     let rendered: Vec<TextLine> = lines
         .iter()
         .enumerate()
         .map(|(i, line)| match line {
             Line::Session { name, folded, .. } => {
                 let style = if selected_line == Some(i) || own_session == Some(name.as_str()) {
-                    session_selected
+                    gold.add_modifier(Modifier::BOLD)
+                } else if lit.line(line) {
+                    gold
                 } else {
-                    session
+                    session_dim
                 };
                 let Some(counts) = folded else {
                     return TextLine::from(Span::styled(
@@ -273,11 +277,10 @@ fn render(f: &mut Frame, view: &mut View) {
                     "",
                     model::truncate(label, usize::from(list.width).saturating_sub(WINDOW_INDENT))
                 ),
-                if selected_line == Some(i) || view.app.own_window.as_deref() == Some(id) {
-                    current
-                } else {
-                    muted
-                },
+                row_style(
+                    line,
+                    selected_line == Some(i) || view.app.own_window.as_deref() == Some(id),
+                ),
             )),
             Line::Agent(row) => TextLine::from(vec![
                 Span::styled(
@@ -286,25 +289,22 @@ fn render(f: &mut Frame, view: &mut View) {
                 ),
                 Span::styled(
                     model::agent_text(row, width),
-                    if selected_line == Some(i) {
-                        current
-                    } else {
-                        muted
-                    },
+                    row_style(line, selected_line == Some(i)),
                 ),
             ]),
+            // The selected agent's place line is lit, not bold.
             Line::Place { pane, text } => TextLine::from(Span::styled(
                 format!("{:DETAIL_INDENT$}{}", "", model::truncate(text, width)),
-                detail(pane),
+                if selected_pane == Some(pane.as_str()) {
+                    Style::new()
+                } else {
+                    row_style(line, false)
+                },
             )),
             Line::Pane {
                 place, run, age, ..
             } => {
-                let style = if selected_line == Some(i) {
-                    current
-                } else {
-                    muted
-                };
+                let style = row_style(line, selected_line == Some(i));
                 let Some(run) = run else {
                     return TextLine::from(Span::styled(
                         format!("{:DETAIL_INDENT$}{}", "", model::truncate(place, width)),
@@ -368,6 +368,8 @@ mod tests {
             session: session.into(),
             index: 1,
             name: "w".into(),
+            active: false,
+            attached: false,
             panes: vec![PaneSummary {
                 id: pane.into(),
                 command: "zsh".into(),
@@ -384,17 +386,26 @@ mod tests {
         draw_in(None, selected)
     }
 
+    /// Sessions `a` and `b`, each one window with one idle shell, `%1` and `%2`.
+    fn two_sessions() -> Status {
+        Status {
+            now_ms: 0,
+            sidebar: true,
+            panes: vec![],
+            windows: vec![plain_window("a", "%1"), plain_window("b", "%2")],
+            collapsed: vec![],
+        }
+    }
+
     /// Like `draw`, for a sidebar living in window `own_window`.
     fn draw_in(own_window: Option<&str>, selected: Option<usize>) -> Buffer {
+        draw_status(two_sessions(), own_window, selected)
+    }
+
+    fn draw_status(status: Status, own_window: Option<&str>, selected: Option<usize>) -> Buffer {
         let mut view = View {
             app: App {
-                status: Some(Status {
-                    now_ms: 0,
-                    sidebar: true,
-                    panes: vec![],
-                    windows: vec![plain_window("a", "%1"), plain_window("b", "%2")],
-                    collapsed: vec![],
-                }),
+                status: Some(status),
                 own_window: own_window.map(Into::into),
                 selected,
                 ..App::default()
@@ -446,6 +457,73 @@ mod tests {
         assert!(b.modifier.contains(Modifier::BOLD));
         assert_ne!(a.fg, GOLD, "other session is dimmed");
         assert!(!a.modifier.contains(Modifier::BOLD));
+    }
+
+    const DIM_GOLD: Color = Color::Rgb(0x93, 0x73, 0x47);
+
+    fn agent(pane: &str, state: State, session: &str) -> crate::protocol::PaneRecord {
+        serde_json::from_value(serde_json::json!({
+            "pane": pane, "agent": "claude", "state": state, "since_ms": 0,
+            "last_event_ms": 0, "session_id": null, "cwd": "/", "branch": null,
+            "pending_tool": null, "session": session, "window": 1,
+            "window_id": format!("@{session}"), "window_name": "w", "active": false,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn attached_session_is_bright_gold_but_not_bold() {
+        let mut s = two_sessions();
+        s.windows[0].attached = true;
+        let buf = draw_status(s, None, None);
+        let (a, b) = (&buf[(0, 0)], &buf[(0, 3)]);
+        assert_eq!(a.fg, GOLD);
+        assert!(!a.modifier.contains(Modifier::BOLD));
+        assert_eq!(b.fg, DIM_GOLD, "detached and idle");
+    }
+
+    #[test]
+    fn session_and_window_with_work_are_normal_the_idle_ones_dim() {
+        let mut s = two_sessions();
+        s.panes.push(agent("%1", State::Working, "a"));
+        let buf = draw_status(s, None, None);
+        // Lines: a, 1:w, the agent, b, 1:w, the shell.
+        assert_eq!(buf[(0, 0)].fg, GOLD, "session a holds work");
+        assert!(!buf[(0, 0)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buf[(1, 1)].fg, Color::Reset, "window with work");
+        assert!(!buf[(1, 1)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buf[(5, 2)].fg, Color::Reset, "working agent");
+        assert_eq!(buf[(0, 3)].fg, DIM_GOLD);
+        assert_eq!(
+            buf[(1, 4)].fg,
+            Color::DarkGray,
+            "idle, not the current window"
+        );
+    }
+
+    #[test]
+    fn current_window_is_normal() {
+        let mut s = two_sessions();
+        s.windows[1].active = true;
+        let buf = draw_status(s, None, None);
+        assert_eq!(buf[(1, 1)].fg, Color::DarkGray);
+        assert_eq!(buf[(1, 4)].fg, Color::Reset);
+        assert!(!buf[(1, 4)].modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn active_pane_is_normal_inactive_idle_pane_dim_selected_bold() {
+        let mut s = two_sessions();
+        let mut second = s.windows[0].panes[0].clone();
+        second.id = "%3".into();
+        second.active = false;
+        s.windows[0].panes.push(second);
+        // Lines: a, 1:w, %1, %3, b, 1:w, %2; item 6 is %2.
+        let buf = draw_status(s, None, Some(6));
+        assert_eq!(buf[(5, 2)].fg, Color::Reset, "active pane");
+        assert!(!buf[(5, 2)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buf[(5, 3)].fg, Color::DarkGray, "inactive idle pane");
+        assert!(buf[(5, 6)].modifier.contains(Modifier::BOLD), "selected");
     }
 
     /// Draws one window of session `a` whose pane %1 (cwd `/`) has `run`, at time 5s.

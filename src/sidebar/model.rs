@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -150,6 +150,75 @@ fn counted_run(p: &PaneSummary) -> Option<Run> {
 /// The pane's run, if this build knows how to draw it.
 fn pane_run(p: &PaneSummary) -> Option<RunState> {
     p.run.map(|r| r.state).filter(|s| *s != RunState::Unknown)
+}
+
+/// The window header an agent sits under; one the daemon has not placed in a known window
+/// still gets a header of its own.
+fn window_key(r: &PaneRecord) -> String {
+    match (&r.window_id, &r.session, r.window) {
+        (Some(id), _, _) => id.clone(),
+        // `=` makes tmux match the session name exactly, even one like "3".
+        (None, Some(session), Some(window)) => format!("={session}:{window}"),
+        _ => r.pane.clone(),
+    }
+}
+
+/// What the sidebar draws at full color rather than dimmed: a pane that is its window's active
+/// pane or is at work (an agent not idle, a process running, open, or newly finished), a window
+/// that is its session's current one or holds work, and a session a client shows or that holds
+/// work.
+#[derive(Debug, Default)]
+pub struct Lit {
+    panes: HashSet<String>,
+    windows: HashSet<String>,
+    sessions: HashSet<String>,
+}
+
+impl Lit {
+    pub fn of(status: &Status) -> Lit {
+        let mut lit = Lit::default();
+        for r in &status.panes {
+            if !matches!(r.state, State::Idle | State::Unknown) {
+                lit.work(&r.pane, &window_key(r), r.session.as_deref());
+            }
+            if r.active {
+                lit.panes.insert(r.pane.clone());
+            }
+        }
+        for w in &status.windows {
+            if w.active {
+                lit.windows.insert(w.id.clone());
+            }
+            if w.attached {
+                lit.sessions.insert(w.session.clone());
+            }
+            for p in &w.panes {
+                if pane_run(p).is_some() {
+                    lit.work(&p.id, &w.id, Some(&w.session));
+                }
+                if p.active {
+                    lit.panes.insert(p.id.clone());
+                }
+            }
+        }
+        lit
+    }
+
+    /// Lights `pane` at work, with its window and session.
+    fn work(&mut self, pane: &str, window: &str, session: Option<&str>) {
+        self.panes.insert(pane.to_owned());
+        self.windows.insert(window.to_owned());
+        self.sessions.extend(session.map(str::to_owned));
+    }
+
+    pub fn line(&self, line: &Line) -> bool {
+        match line {
+            Line::Session { name, .. } => self.sessions.contains(name),
+            Line::Window { id, .. } => self.windows.contains(id),
+            Line::Agent(r) => self.panes.contains(&r.pane),
+            Line::Pane { id, .. } | Line::Place { pane: id, .. } => self.panes.contains(id),
+        }
+    }
 }
 
 /// A selectable line: what j/k step over and Enter acts on.
@@ -338,13 +407,7 @@ fn tree_lines(status: &Status, needle: &str, home: &str) -> Vec<Line> {
     let fold = needle.is_empty();
     let mut windows: Vec<Window> = status.windows.iter().map(window_of).collect();
     for r in &status.panes {
-        // An agent the daemon has not placed in a known window still gets a header.
-        let id = match (&r.window_id, &r.session, r.window) {
-            (Some(id), _, _) => id.clone(),
-            // `=` makes tmux match the session name exactly, even one like "3".
-            (None, Some(session), Some(window)) => format!("={session}:{window}"),
-            _ => r.pane.clone(),
-        };
+        let id = window_key(r);
         let pos = match windows.iter().position(|w| w.id == id) {
             Some(pos) => pos,
             None => {
@@ -993,6 +1056,8 @@ mod tests {
             session: session.into(),
             index,
             name: name.into(),
+            active: false,
+            attached: false,
             panes: panes
                 .iter()
                 .map(|&(id, command, active)| PaneSummary {
@@ -1985,5 +2050,107 @@ mod tests {
         assert_eq!(app.on_key(enter()), Action::None);
         app.on_focus(true);
         assert_eq!(app.selected, None);
+    }
+
+    /// Whether each line of `status` in the tree view is lit, keyed by its first word or pane.
+    fn lit_lines(status: &Status) -> Vec<(String, bool)> {
+        let lit = Lit::of(status);
+        all(status)
+            .iter()
+            .map(|l| {
+                let key = match l {
+                    Line::Session { name, .. } => name.clone(),
+                    Line::Window { id, .. } => id.clone(),
+                    Line::Agent(r) => r.pane.clone(),
+                    Line::Pane { id, .. } | Line::Place { pane: id, .. } => id.clone(),
+                };
+                (key, lit.line(l))
+            })
+            .collect()
+    }
+
+    fn lit_keys(status: &Status) -> Vec<String> {
+        lit_lines(status)
+            .into_iter()
+            .filter_map(|(k, on)| on.then_some(k))
+            .collect()
+    }
+
+    #[test]
+    fn lights_active_panes_and_work_dims_the_rest() {
+        assert_eq!(
+            lit_keys(&status()),
+            [
+                // me: %3 working; %11 its window's active pane but idle, so notes stays dim;
+                // %2 done; %12 vim is active but at rest.
+                "me", "@me1", "%3", "%11", "@me3", "%2", "%12", // ops: %1 blocked.
+                "ops", "@ops2", "%1",
+                // web: %5 idle in its active pane; zz: tail at rest in its active pane.
+                "%5", "%13",
+            ]
+        );
+    }
+
+    #[test]
+    fn running_open_and_finished_processes_light_their_window_and_session() {
+        let lit = lit_keys(&status_with_runs());
+        for key in ["%10", "@me2", "@me9"] {
+            assert!(lit.contains(&key.to_owned()), "{key} in {lit:?}");
+        }
+    }
+
+    #[test]
+    fn current_window_and_attached_session_are_lit_while_idle() {
+        let mut s = status();
+        for w in &mut s.windows {
+            w.active = w.session == "zz";
+            w.attached = w.session == "web";
+        }
+        let lit = lit_keys(&s);
+        assert!(lit.contains(&"@zz1".to_owned()), "{lit:?}");
+        assert!(
+            !lit.contains(&"zz".to_owned()),
+            "zz is not attached: {lit:?}"
+        );
+        assert!(lit.contains(&"web".to_owned()), "{lit:?}");
+        assert!(
+            !lit.contains(&"@web1".to_owned()),
+            "not web's current window: {lit:?}"
+        );
+    }
+
+    #[test]
+    fn folded_session_with_work_stays_lit() {
+        let s = status_collapsed(&["ops", "web"]);
+        let lit = Lit::of(&s);
+        assert!(lit.line(&folded("ops", &[(State::Blocked, 1)])));
+        assert!(!lit.line(&folded("web", &[(State::Idle, 1)])));
+    }
+
+    #[test]
+    fn agent_outside_known_windows_lights_its_own_header() {
+        let mut s = status();
+        let mut r = rec("%20", State::Working, "x", 4, false);
+        r.window_id = None;
+        s.panes.push(r);
+        let lit = lit_keys(&s);
+        for key in ["x", "=x:4", "%20"] {
+            assert!(lit.contains(&key.to_owned()), "{key} in {lit:?}");
+        }
+    }
+
+    #[test]
+    fn place_line_follows_its_agent() {
+        let s = status();
+        let lit = Lit::of(&s);
+        let lines = lines(&s, Mode::Status, "", HOME);
+        let place = |pane: &str| {
+            lines
+                .iter()
+                .find(|l| matches!(l, Line::Place { pane: p, .. } if p == pane))
+                .unwrap()
+        };
+        assert!(lit.line(place("%3")), "working");
+        assert!(!lit.line(place("%4")), "idle, not its window's active pane");
     }
 }

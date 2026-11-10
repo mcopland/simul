@@ -439,6 +439,7 @@ mod tests {
         let snap = Snapshot {
             panes: vec![pane("%1", "claude")],
             viewed: HashSet::from(["%1".to_string()]),
+            ..Snapshot::default()
         };
         assert!(s.reconcile(&snap, 3).is_empty());
         assert_eq!(state(&s, "%1"), Some(State::Failed));
@@ -539,6 +540,7 @@ mod tests {
             is_sidebar: false,
             window_panes: 1,
             active: true,
+            window_active: true,
             session_collapsed: false,
             width: 80,
             window_width: 80,
@@ -556,6 +558,7 @@ mod tests {
         let snap = Snapshot {
             panes: vec![pane("%1", "claude"), pane("%2", "claude")],
             viewed: HashSet::from(["%1".to_string()]),
+            ..Snapshot::default()
         };
         let ts = s.reconcile(&snap, 7);
         assert_eq!(ts.len(), 1);
@@ -585,6 +588,7 @@ mod tests {
                 side,
             ],
             viewed: HashSet::new(),
+            ..Snapshot::default()
         };
         assert_eq!(s.recover(&snap, 5), vec!["%2".to_string()]);
         assert_eq!(state(&s, "%1"), Some(State::Done));
@@ -702,6 +706,7 @@ mod tests {
         let snap = Snapshot {
             panes: vec![pane("%2", "kiro-cli")],
             viewed: HashSet::new(),
+            ..Snapshot::default()
         };
         s.recover(&snap, 1);
         for at in 2..6 {
@@ -728,6 +733,7 @@ mod tests {
         let snap = Snapshot {
             panes: vec![pane("%2", "claude")],
             viewed: HashSet::new(),
+            ..Snapshot::default()
         };
         s.recover(&snap, 1);
         assert_eq!(
@@ -895,6 +901,7 @@ mod tests {
         let snap = Snapshot {
             panes: vec![pane("%1", "claude")],
             viewed: HashSet::new(),
+            ..Snapshot::default()
         };
         s.recover(&snap, 1);
         s.apply_live(&[live(LiveStatus::Busy, 0)], 2);
@@ -931,6 +938,7 @@ mod tests {
         let snap = Snapshot {
             panes: vec![pane("%1", "kiro-cli")],
             viewed: HashSet::from(["%1".to_string()]),
+            ..Snapshot::default()
         };
         assert!(s.reconcile(&snap, 8).is_empty(), "stays while viewed");
         s.apply_live(&[], 9);

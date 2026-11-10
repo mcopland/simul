@@ -220,6 +220,12 @@ pub struct WindowInfo {
     pub session: String,
     pub index: u32,
     pub name: String,
+    /// Whether this is the current window of its session.
+    #[serde(default)]
+    pub active: bool,
+    /// Whether a client shows this window's session.
+    #[serde(default)]
+    pub attached: bool,
     /// Non-sidebar panes in tmux's order; absent from daemons before 0.2.
     #[serde(default)]
     pub panes: Vec<PaneSummary>,
@@ -313,6 +319,14 @@ mod tests {
     }
 
     #[test]
+    fn windows_from_older_daemons_are_inactive_and_detached() {
+        let w: WindowInfo =
+            serde_json::from_value(json!({"id": "@1", "session": "s", "index": 1, "name": "w"}))
+                .unwrap();
+        assert!(!w.active && !w.attached);
+    }
+
+    #[test]
     fn run_states_read_forward_compatibly() {
         let r: Run = serde_json::from_value(json!({"state": "finished", "since_ms": 5})).unwrap();
         assert_eq!(r.state, RunState::Finished);
@@ -341,7 +355,8 @@ mod tests {
             r#""session_id":null,"cwd":null,"branch":null,"pending_tool":null,"error":null,"#,
             r#""model":null,"effort":null,"transcript":null,"session":null,"window":null,"#,
             r#""window_id":null,"window_name":null,"active":false}],"#,
-            r#""windows":[{"id":"@2","session":"me","index":2,"name":"code","panes":["#,
+            r#""windows":[{"id":"@2","session":"me","index":2,"name":"code","active":true,"#,
+            r#""attached":true,"panes":["#,
             r#"{"id":"%3","command":"cargo","active":true,"cwd":"/w","#,
             r#""git":{"branch":"main","ahead":1,"behind":2,"conflicted":3,"staged":4,"#,
             r#""deleted":5,"modified":6,"untracked":7,"stashed":8},"#,

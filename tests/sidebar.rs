@@ -420,6 +420,10 @@ fn selected_row_is_bold_without_a_block() {
     let other = h.new_pane("sleep 600");
     h.tmux(&["rename-window", "-t", &mine, "mine"]);
     h.tmux(&["rename-window", "-t", &other, "other"]);
+    // An idle window with a second, inactive idle shell in `/`.
+    let idle = h.new_pane("sh");
+    h.tmux(&["rename-window", "-t", &idle, "idle"]);
+    h.tmux(&["split-window", "-d", "-t", &idle, "-c", "/", "sh"]);
     h.start_daemon();
     h.hook_fixture(&mine, "UserPromptSubmit", "UserPromptSubmit");
     h.hook_fixture(&other, "UserPromptSubmit", "UserPromptSubmit");
@@ -432,7 +436,9 @@ fn selected_row_is_bold_without_a_block() {
     let mut screen = String::new();
     eventually("selected row bold", || {
         screen = h.tmux(&["capture-pane", "-e", "-p", "-t", &pane]);
-        style_of(&screen, "other").is_some() && style_of(&screen, "mine").is_some_and(|s| s.bold)
+        style_of(&screen, "other").is_some()
+            && header(&screen, "/").is_some()
+            && style_of(&screen, "mine").is_some_and(|s| s.bold)
     });
     assert!(!screen.contains("\x1b[7m"), "no reverse video: {screen:?}");
     let label = style_of(&screen, "mine").unwrap();
@@ -453,13 +459,23 @@ fn selected_row_is_bold_without_a_block() {
     );
     let rest = style_of(&screen, "other").unwrap();
     assert!(
-        !rest.bold && rest.muted(),
-        "other windows are muted: {screen:?}"
+        !rest.bold && !rest.muted(),
+        "a window with a working agent is not dimmed: {screen:?}"
     );
     let plain = header(&screen, &place_of(&h, "t:0")).unwrap();
     assert!(
-        !plain.bold && plain.muted(),
-        "plain panes are muted: {screen:?}"
+        !plain.bold && !plain.muted(),
+        "its window's active pane is not dimmed: {screen:?}"
+    );
+    let quiet = style_of(&screen, "idle").unwrap();
+    assert!(
+        !quiet.bold && quiet.muted(),
+        "an idle window that is not current is dimmed: {screen:?}"
+    );
+    let inactive = header(&screen, "/").unwrap();
+    assert!(
+        !inactive.bold && inactive.muted(),
+        "an idle pane that is not active is dimmed: {screen:?}"
     );
 }
 
@@ -548,6 +564,7 @@ fn own_and_selected_session_headers_are_bright_the_rest_dim() {
     let mut h = Harness::new();
     let agent = h.new_pane("sleep 600");
     h.tmux(&["new-session", "-d", "-s", "u", "sleep 600"]);
+    h.tmux(&["new-session", "-d", "-s", "v", "sh"]);
     h.start_daemon();
     h.hook_fixture(&agent, "UserPromptSubmit", "UserPromptSubmit");
     let other = h.tmux(&["display-message", "-p", "-t", "u:", "#{pane_id}"]);
@@ -558,9 +575,9 @@ fn own_and_selected_session_headers_are_bright_the_rest_dim() {
         .find(|s| s.1 == h.tmux(&["display-message", "-p", "-t", &agent, "#{window_id}"]))
         .unwrap();
     let mut screen = String::new();
-    eventually("both sessions listed", || {
+    eventually("all sessions listed", || {
         screen = h.tmux(&["capture-pane", "-e", "-p", "-t", &pane]);
-        header(&screen, "u").is_some()
+        header(&screen, "u").is_some() && header(&screen, "v").is_some()
     });
     let own = header(&screen, "t").unwrap();
     assert!(
@@ -569,8 +586,13 @@ fn own_and_selected_session_headers_are_bright_the_rest_dim() {
     );
     let other = header(&screen, "u").unwrap();
     assert!(
-        !other.bold && other.fg.as_deref() == Some(DIM_GOLD),
-        "other session u dim gold, not bold: {screen:?}"
+        !other.bold && other.fg.as_deref() == Some(GOLD),
+        "session u holds a working agent, so bright gold, not bold: {screen:?}"
+    );
+    let idle = header(&screen, "v").unwrap();
+    assert!(
+        !idle.bold && idle.fg.as_deref() == Some(DIM_GOLD),
+        "detached idle session v dim gold, not bold: {screen:?}"
     );
 
     // Folded away, u's sidebar selects u's header.
@@ -593,8 +615,13 @@ fn own_and_selected_session_headers_are_bright_the_rest_dim() {
     );
     let rest = header(&screen, "t").unwrap();
     assert!(
-        !rest.bold && rest.fg.as_deref() == Some(DIM_GOLD),
-        "unselected session dim gold: {screen:?}"
+        !rest.bold && rest.fg.as_deref() == Some(GOLD),
+        "unselected session with a working agent bright gold, not bold: {screen:?}"
+    );
+    let idle = header(&screen, "v").unwrap();
+    assert!(
+        !idle.bold && idle.fg.as_deref() == Some(DIM_GOLD),
+        "unselected idle session dim gold: {screen:?}"
     );
     assert!(!screen.contains("\x1b[7m"), "no reverse video: {screen:?}");
 }
