@@ -16,7 +16,7 @@ use crate::client;
 use crate::paths::{self, env_var};
 use crate::protocol::{Ack, Request, RunState, State, Status, now_ms};
 use crate::tmux::Tmux;
-use model::{Action, App, Line, Lit, Mark, Mode};
+use model::{Action, App, Line, Mark, Mode, Tone};
 
 const LOCATION_REFRESH: Duration = Duration::from_secs(5);
 /// Lines one wheel notch scrolls.
@@ -260,40 +260,25 @@ fn render(f: &mut Frame, view: &mut View) {
     let width = usize::from(list.width).saturating_sub(DETAIL_INDENT);
     let lines = view.app.lines();
     let highlighted = view.app.highlighted_line(&lines);
-    let highlighted_pane = highlighted.and_then(|i| match &lines[i] {
-        Line::Agent(r) => Some(r.pane.as_str()),
-        _ => None,
-    });
-    let own_session = view.app.own_session();
-    let lit = view.app.status.as_ref().map(Lit::of).unwrap_or_default();
-    let current = Style::new().add_modifier(Modifier::BOLD);
-    let muted = Style::new().fg(Color::DarkGray);
-    // Bold marks the highlighted row and the sidebar's own window; of the rest, only what is
-    // inactive is dimmed.
-    let row_style = |line: &Line, bold: bool| {
-        if bold {
-            current
-        } else if lit.line(line) {
-            Style::new()
-        } else {
-            muted
-        }
+    let tones = view.app.tones();
+    let row_style = |line: &Line| match tones.of(line) {
+        Tone::Dim => Style::new().fg(Color::DarkGray),
+        Tone::Active => Style::new(),
+        Tone::Highlighted => Style::new().add_modifier(Modifier::BOLD),
     };
-    // Lit sessions take the gold of the session name in tmux's status-left; the rest dim it.
-    let gold = Style::new().fg(Color::Rgb(0xf6, 0xc1, 0x77));
-    let session_dim = Style::new().fg(Color::Rgb(0x93, 0x73, 0x47));
+    // Session names take the gold of the session name in tmux's status-left; dim ones darken it.
+    let session_style = |line: &Line| {
+        let gold = match tones.of(line) {
+            Tone::Dim => Color::Rgb(0x93, 0x73, 0x47),
+            Tone::Active | Tone::Highlighted => Color::Rgb(0xf6, 0xc1, 0x77),
+        };
+        row_style(line).fg(gold)
+    };
     let rendered: Vec<TextLine> = lines
         .iter()
-        .enumerate()
-        .map(|(i, line)| match line {
+        .map(|line| match line {
             Line::Session { name, folded, .. } => {
-                let style = if highlighted == Some(i) || own_session == Some(name.as_str()) {
-                    gold.add_modifier(Modifier::BOLD)
-                } else if lit.line(line) {
-                    gold
-                } else {
-                    session_dim
-                };
+                let style = session_style(line);
                 let Some(counts) = folded else {
                     return TextLine::from(Span::styled(
                         model::truncate(name, usize::from(list.width)),
@@ -319,41 +304,29 @@ fn render(f: &mut Frame, view: &mut View) {
                 spans.extend(tail);
                 TextLine::from(spans)
             }
-            // Like tmux's current window, the sidebar's own window stays bold.
-            Line::Window { id, label } => TextLine::from(Span::styled(
+            Line::Window { label, .. } => TextLine::from(Span::styled(
                 format!(
                     "{:WINDOW_INDENT$}{}",
                     "",
                     model::truncate(label, usize::from(list.width).saturating_sub(WINDOW_INDENT))
                 ),
-                row_style(
-                    line,
-                    highlighted == Some(i) || view.app.own_window.as_deref() == Some(id),
-                ),
+                row_style(line),
             )),
             Line::Agent(row) => TextLine::from(vec![
                 Span::styled(
                     format!("{:AGENT_INDENT$}{} ", "", model::symbol(row.state)),
                     Style::new().fg(state_color(row.state)),
                 ),
-                Span::styled(
-                    model::agent_text(row, width),
-                    row_style(line, highlighted == Some(i)),
-                ),
+                Span::styled(model::agent_text(row, width), row_style(line)),
             ]),
-            // The selected agent's place line is lit, not bold.
-            Line::Place { pane, text } => TextLine::from(Span::styled(
+            Line::Place { text, .. } => TextLine::from(Span::styled(
                 format!("{:DETAIL_INDENT$}{}", "", model::truncate(text, width)),
-                if highlighted_pane == Some(pane.as_str()) {
-                    Style::new()
-                } else {
-                    row_style(line, false)
-                },
+                row_style(line),
             )),
             Line::Pane {
                 place, run, age, ..
             } => {
-                let style = row_style(line, highlighted == Some(i));
+                let style = row_style(line);
                 let Some(run) = run else {
                     return TextLine::from(Span::styled(
                         format!("{:DETAIL_INDENT$}{}", "", model::truncate(place, width)),
@@ -415,8 +388,6 @@ mod tests {
             session: session.into(),
             index: 1,
             name: "w".into(),
-            active: false,
-            attached: false,
             panes: vec![PaneSummary {
                 id: pane.into(),
                 command: "zsh".into(),
@@ -531,14 +502,21 @@ mod tests {
     }
 
     #[test]
-    fn attached_session_is_bright_gold_but_not_bold() {
+    fn an_idle_agent_lights_its_window_and_session_without_bold() {
         let mut s = two_sessions();
-        s.windows[0].attached = true;
+        s.panes.push(agent("%1", State::Idle, "a"));
         let buf = draw_status(s, None);
-        let (a, b) = (&buf[(0, 0)], &buf[(0, 3)]);
-        assert_eq!(a.fg, GOLD);
-        assert!(!a.modifier.contains(Modifier::BOLD));
-        assert_eq!(b.fg, DIM_GOLD, "detached and idle");
+        // Lines: a, 1:w, the agent, b, 1:w, the shell.
+        assert_eq!(buf[(0, 0)].fg, GOLD);
+        for row in [0, 1, 2] {
+            assert!(
+                !first_cell(&buf, row).modifier.contains(Modifier::BOLD),
+                "row {row}"
+            );
+        }
+        assert_eq!(buf[(1, 1)].fg, Color::Reset, "window");
+        assert_eq!(buf[(5, 2)].fg, Color::Reset, "agent");
+        assert_eq!(buf[(0, 3)].fg, DIM_GOLD, "nothing runs in b");
     }
 
     #[test]
@@ -556,33 +534,43 @@ mod tests {
         assert_eq!(
             buf[(1, 4)].fg,
             Color::DarkGray,
-            "idle, not the current window"
+            "nothing runs in b's window"
         );
     }
 
     #[test]
-    fn current_window_is_normal() {
+    fn a_running_process_lights_its_pane_window_and_session() {
         let mut s = two_sessions();
-        s.windows[1].active = true;
+        s.windows[1].panes[0].run = Some(Run {
+            state: RunState::Running,
+            since_ms: 0,
+        });
         let buf = draw_status(s, None);
-        assert_eq!(buf[(1, 1)].fg, Color::DarkGray);
-        assert_eq!(buf[(1, 4)].fg, Color::Reset);
-        assert!(!buf[(1, 4)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buf[(0, 3)].fg, GOLD, "session b");
+        assert_eq!(buf[(1, 4)].fg, Color::Reset, "its window");
+        assert_eq!(buf[(5, 5)].fg, Color::Reset, "the pane");
+        assert_eq!(buf[(1, 1)].fg, Color::DarkGray, "a's window runs nothing");
+        assert_eq!(buf[(5, 2)].fg, Color::DarkGray, "a's shell at its prompt");
     }
 
     #[test]
-    fn active_pane_is_normal_inactive_idle_pane_dim_highlighted_bold() {
-        let mut s = two_sessions();
-        let mut second = s.windows[0].panes[0].clone();
-        second.id = "%3".into();
-        second.active = false;
-        s.windows[0].panes.push(second);
-        // Lines: a, 1:w, %1, %3, b, 1:w, %2; item 6 is %2.
-        let buf = draw_status(s, Some("@b"));
-        assert_eq!(buf[(5, 2)].fg, Color::Reset, "active pane");
+    fn idle_shells_are_dim_even_as_their_windows_active_pane_but_bold_when_focused() {
+        let buf = draw_status(two_sessions(), Some("@b"));
+        // Lines: a, 1:w, %1, b, 1:w, %2; %1 is its window's active pane.
+        assert_eq!(
+            buf[(5, 2)].fg,
+            Color::DarkGray,
+            "active pane, nothing running"
+        );
         assert!(!buf[(5, 2)].modifier.contains(Modifier::BOLD));
-        assert_eq!(buf[(5, 3)].fg, Color::DarkGray, "inactive idle pane");
-        assert!(buf[(5, 6)].modifier.contains(Modifier::BOLD), "highlighted");
+        for row in [3, 4, 5] {
+            let cell = first_cell(&buf, row);
+            assert!(
+                cell.modifier.contains(Modifier::BOLD),
+                "row {row} highlighted"
+            );
+            assert_ne!(cell.fg, Color::DarkGray, "row {row} not dimmed");
+        }
     }
 
     /// Twelve sessions, `s0` to `s11`, each one window with one idle shell: 36 lines.

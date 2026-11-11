@@ -127,7 +127,6 @@ mod tests {
         Snapshot {
             panes: panes.iter().map(|&(id, cmd)| pane(id, cmd)).collect(),
             viewed: viewed.iter().map(|&v| v.to_owned()).collect::<HashSet<_>>(),
-            ..Snapshot::default()
         }
     }
 

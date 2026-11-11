@@ -21,8 +21,6 @@ pub struct PaneInfo {
     pub window_panes: u32,
     /// Whether this is the active pane of its window.
     pub active: bool,
-    /// Whether the pane's window is the current window of its session.
-    pub window_active: bool,
     /// Whether the pane's session carries `@simul-collapsed`, folding it in the sidebar.
     pub session_collapsed: bool,
     /// Columns: the pane's, and its window's.
@@ -39,8 +37,6 @@ pub struct Snapshot {
     pub panes: Vec<PaneInfo>,
     /// Panes the user is looking at right now.
     pub viewed: HashSet<String>,
-    /// Sessions shown by a client, focused or not; control-mode clients don't count.
-    pub attached: HashSet<String>,
 }
 
 pub const PANES_FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_id}\t#{pane_active}\t#{window_active}\t#{pane_current_command}\t#{pane_current_path}\t#{@simul-sidebar}\t#{window_panes}\t#{@simul-collapsed}\t#{pane_width}\t#{window_width}\t#{window_zoomed_flag}\t#{?pane_start_command,#{pane_start_command},#{?default-command,#{default-command},#{default-shell}}}\t#{window_name}";
@@ -112,22 +108,18 @@ impl Tmux {
 /// client that has terminal focus. Without `focus-events` tmux cannot know focus, so any
 /// attached client counts.
 pub fn parse_snapshot(panes: &str, clients: &str, focus_events: bool) -> Snapshot {
+    let viewing_sessions: HashSet<&str> = clients
+        .lines()
+        .filter_map(|line| {
+            let mut f = line.split('\t');
+            let session = f.next()?;
+            let flags: Vec<&str> = f.next()?.split(',').collect();
+            let counts =
+                !flags.contains(&"control-mode") && (!focus_events || flags.contains(&"focused"));
+            (counts && !session.is_empty()).then_some(session)
+        })
+        .collect();
     let mut snap = Snapshot::default();
-    let mut viewing_sessions: HashSet<&str> = HashSet::new();
-    for line in clients.lines() {
-        let mut f = line.split('\t');
-        let (Some(session), Some(flags)) = (f.next(), f.next()) else {
-            continue;
-        };
-        let flags: Vec<&str> = flags.split(',').collect();
-        if session.is_empty() || flags.contains(&"control-mode") {
-            continue;
-        }
-        snap.attached.insert(session.to_owned());
-        if !focus_events || flags.contains(&"focused") {
-            viewing_sessions.insert(session);
-        }
-    }
     let mut seen = HashSet::new();
     for line in panes.lines() {
         // The window name comes last so a tab inside it stays part of the name.
@@ -178,7 +170,6 @@ pub fn parse_snapshot(panes: &str, clients: &str, focus_events: bool) -> Snapsho
             is_sidebar: sidebar == "1",
             window_panes,
             active: pane_active == "1",
-            window_active: window_active == "1",
             session_collapsed: collapsed == "1",
             width,
             window_width,
@@ -201,8 +192,6 @@ pub fn windows(snap: &Snapshot) -> Vec<WindowInfo> {
                     session: p.session.clone(),
                     index: p.window,
                     name: p.window_name.clone(),
-                    active: p.window_active,
-                    attached: snap.attached.contains(&p.session),
                     panes: Vec::new(),
                 });
                 out.len() - 1
@@ -275,7 +264,6 @@ mod tests {
                 is_sidebar: false,
                 window_panes: 2,
                 active: true,
-                window_active: true,
                 session_collapsed: false,
                 width: 120,
                 window_width: 200,
@@ -289,7 +277,6 @@ mod tests {
         assert!(snap.panes[4].window_zoomed);
         assert!(snap.panes[3].session_collapsed, "a session option");
         assert!(!snap.panes[1].active);
-        assert!(!snap.panes[2].window_active);
         assert_eq!(snap.panes[3].window_name, "my\ttabbed name");
     }
 
@@ -325,13 +312,6 @@ mod tests {
     }
 
     #[test]
-    fn attached_sessions_ignore_focus_but_not_control_mode() {
-        let clients = "main\tattached,UTF-8\t/dev/ttys001\nwork\tattached,focused,control-mode\t\n";
-        let snap = parse_snapshot(PANES, clients, true);
-        assert_eq!(snap.attached, HashSet::from(["main".to_string()]));
-    }
-
-    #[test]
     fn linked_windows_are_listed_once() {
         let panes = "%1\ta\t1\t@1\t1\t0\tclaude\t/w\t\t1\t\t80\t80\t0\t\tx\n%1\tb\t3\t@1\t1\t1\tclaude\t/w\t\t1\t\t80\t80\t0\t\tx\n";
         let snap = parse_snapshot(panes, "b\tattached,focused\t/dev/ttys1\n", true);
@@ -349,11 +329,7 @@ mod tests {
             git: None,
             run: None,
         };
-        let w = windows(&parse_snapshot(
-            PANES,
-            "main\tattached\t/dev/ttys001\n",
-            true,
-        ));
+        let w = windows(&parse_snapshot(PANES, "", true));
         assert_eq!(
             w,
             [
@@ -362,8 +338,6 @@ mod tests {
                     session: "main".into(),
                     index: 1,
                     name: "api".into(),
-                    active: true,
-                    attached: true,
                     panes: vec![
                         pane("%1", "2.1.307", true, "/w/a"),
                         pane("%2", "zsh", false, "/w/a"),
@@ -374,8 +348,6 @@ mod tests {
                     session: "main".into(),
                     index: 2,
                     name: "web".into(),
-                    active: false,
-                    attached: true,
                     panes: vec![pane("%3", "claude", true, "/w/b")],
                 },
                 WindowInfo {
@@ -383,8 +355,6 @@ mod tests {
                     session: "work".into(),
                     index: 1,
                     name: "my\ttabbed name".into(),
-                    active: true,
-                    attached: false,
                     panes: vec![pane("%4", "claude", true, "/w/c")],
                 },
             ]

@@ -414,7 +414,7 @@ fn each_sidebar_highlights_its_own_windows_agent() {
 }
 
 #[test]
-fn selected_row_is_bold_without_a_block() {
+fn focused_pane_is_bold_running_ones_normal_idle_ones_dim() {
     let mut h = Harness::new();
     let mine = h.new_pane("sleep 600");
     let other = h.new_pane("sleep 600");
@@ -434,7 +434,7 @@ fn selected_row_is_bold_without_a_block() {
         .find(|s| s.1 == mine_window)
         .unwrap();
     let mut screen = String::new();
-    eventually("selected row bold", || {
+    eventually("focused row bold", || {
         screen = h.tmux(&["capture-pane", "-e", "-p", "-t", &pane]);
         style_of(&screen, "other").is_some()
             && header(&screen, "/").is_some()
@@ -442,7 +442,7 @@ fn selected_row_is_bold_without_a_block() {
     });
     assert!(!screen.contains("\x1b[7m"), "no reverse video: {screen:?}");
     let label = style_of(&screen, "mine").unwrap();
-    assert_eq!(label.fg, None, "selected label in default fg: {screen:?}");
+    assert_eq!(label.fg, None, "focused window in default fg: {screen:?}");
     let row = screen
         .lines()
         .skip_while(|l| !l.contains("mine"))
@@ -450,12 +450,12 @@ fn selected_row_is_bold_without_a_block() {
         .unwrap();
     assert!(
         style_of(row, &place_of(&h, &mine)).is_some_and(|s| s.bold),
-        "the agent under its window header is selected: {row:?}"
+        "the agent under its window header is highlighted: {row:?}"
     );
     let symbol = style_of(row, "\u{25d0}").unwrap();
     assert!(
         symbol.fg.is_some() && !symbol.muted(),
-        "selected symbol keeps its state color: {row:?}"
+        "the highlighted symbol keeps its state color: {row:?}"
     );
     let rest = style_of(&screen, "other").unwrap();
     assert!(
@@ -464,18 +464,23 @@ fn selected_row_is_bold_without_a_block() {
     );
     let plain = header(&screen, &place_of(&h, "t:0")).unwrap();
     assert!(
-        !plain.bold && !plain.muted(),
-        "its window's active pane is not dimmed: {screen:?}"
+        !plain.bold && plain.muted(),
+        "a shell at its prompt is dimmed, even as its window's active pane: {screen:?}"
+    );
+    let shell_window = style_of(&screen, "0:").unwrap();
+    assert!(
+        !shell_window.bold && shell_window.muted(),
+        "a window running nothing is dimmed: {screen:?}"
     );
     let quiet = style_of(&screen, "idle").unwrap();
     assert!(
         !quiet.bold && quiet.muted(),
-        "an idle window that is not current is dimmed: {screen:?}"
+        "an idle window is dimmed: {screen:?}"
     );
     let inactive = header(&screen, "/").unwrap();
     assert!(
         !inactive.bold && inactive.muted(),
-        "an idle pane that is not active is dimmed: {screen:?}"
+        "an idle pane is dimmed: {screen:?}"
     );
 }
 
@@ -608,7 +613,7 @@ fn focus_returns_to_an_earlier_pane_when_the_last_one_is_gone() {
 }
 
 #[test]
-fn own_and_selected_session_headers_are_bright_the_rest_dim() {
+fn own_session_is_bold_gold_running_ones_gold_idle_ones_dim() {
     const GOLD: &str = "38;2;246;193;119";
     const DIM_GOLD: &str = "38;2;147;115;71";
     let mut h = Harness::new();
@@ -661,12 +666,12 @@ fn own_and_selected_session_headers_are_bright_the_rest_dim() {
     let rest = header(&screen, "t").unwrap();
     assert!(
         !rest.bold && rest.fg.as_deref() == Some(GOLD),
-        "unselected session with a working agent bright gold, not bold: {screen:?}"
+        "another session with a working agent bright gold, not bold: {screen:?}"
     );
     let idle = header(&screen, "v").unwrap();
     assert!(
         !idle.bold && idle.fg.as_deref() == Some(DIM_GOLD),
-        "unselected idle session dim gold: {screen:?}"
+        "another idle session dim gold: {screen:?}"
     );
     assert!(!screen.contains("\x1b[7m"), "no reverse video: {screen:?}");
 }

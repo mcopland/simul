@@ -159,60 +159,76 @@ fn window_key(r: &PaneRecord) -> String {
     }
 }
 
-/// What the sidebar draws at full color rather than dimmed: a pane that is its window's active
-/// pane or is at work (an agent not idle, a process running, open, or newly finished), a window
-/// that is its session's current one or holds work, and a session a client shows or that holds
-/// work.
+/// How a line is drawn: dimmed when nothing runs in it, at full color when something does,
+/// and bold for the pane you are in with its window and session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Dim,
+    Active,
+    Highlighted,
+}
+
+/// The panes that run something (any agent, or a process running, open, or newly finished),
+/// with their windows and sessions.
 #[derive(Debug, Default)]
-pub struct Lit {
+struct Running {
     panes: HashSet<String>,
     windows: HashSet<String>,
     sessions: HashSet<String>,
 }
 
-impl Lit {
-    pub fn of(status: &Status) -> Lit {
-        let mut lit = Lit::default();
+impl Running {
+    fn of(status: &Status) -> Running {
+        let mut running = Running::default();
         for r in &status.panes {
-            if !matches!(r.state, State::Idle | State::Unknown) {
-                lit.work(&r.pane, &window_key(r), r.session.as_deref());
-            }
-            if r.active {
-                lit.panes.insert(r.pane.clone());
-            }
+            running.add(&r.pane, &window_key(r), r.session.as_deref());
         }
         for w in &status.windows {
-            if w.active {
-                lit.windows.insert(w.id.clone());
-            }
-            if w.attached {
-                lit.sessions.insert(w.session.clone());
-            }
-            for p in &w.panes {
-                if pane_run(p).is_some() {
-                    lit.work(&p.id, &w.id, Some(&w.session));
-                }
-                if p.active {
-                    lit.panes.insert(p.id.clone());
-                }
+            for p in w.panes.iter().filter(|p| pane_run(p).is_some()) {
+                running.add(&p.id, &w.id, Some(&w.session));
             }
         }
-        lit
+        running
     }
 
-    /// Lights `pane` at work, with its window and session.
-    fn work(&mut self, pane: &str, window: &str, session: Option<&str>) {
+    fn add(&mut self, pane: &str, window: &str, session: Option<&str>) {
         self.panes.insert(pane.to_owned());
         self.windows.insert(window.to_owned());
         self.sessions.extend(session.map(str::to_owned));
     }
 
-    pub fn line(&self, line: &Line) -> bool {
-        match line {
-            Line::Session { name, .. } => self.sessions.contains(name),
-            Line::Window { id, .. } => self.windows.contains(id),
-            Line::Agent(r) => self.panes.contains(&r.pane),
-            Line::Pane { id, .. } | Line::Place { pane: id, .. } => self.panes.contains(id),
+    fn line(&self, line: &Line) -> bool {
+        let set = match line.kind() {
+            Kind::Session => &self.sessions,
+            Kind::Window => &self.windows,
+            Kind::Pane => &self.panes,
+        };
+        set.contains(line.target())
+    }
+}
+
+/// The tone of each line, from `App::tones`.
+#[derive(Debug, Default)]
+pub struct Tones {
+    running: Running,
+    pane: Option<String>,
+    window: Option<String>,
+    session: Option<String>,
+}
+
+impl Tones {
+    pub fn of(&self, line: &Line) -> Tone {
+        let focused = match line.kind() {
+            Kind::Session => &self.session,
+            Kind::Window => &self.window,
+            Kind::Pane => &self.pane,
+        };
+        if focused.as_deref() == Some(line.target()) {
+            Tone::Highlighted
+        } else if self.running.line(line) {
+            Tone::Active
+        } else {
+            Tone::Dim
         }
     }
 }
@@ -547,7 +563,23 @@ fn pane_number(pane: &str) -> u32 {
         .unwrap_or(u32::MAX)
 }
 
+/// What a line stands for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Session,
+    Window,
+    Pane,
+}
+
 impl Line {
+    fn kind(&self) -> Kind {
+        match self {
+            Line::Session { .. } => Kind::Session,
+            Line::Window { .. } => Kind::Window,
+            Line::Agent(_) | Line::Pane { .. } | Line::Place { .. } => Kind::Pane,
+        }
+    }
+
     /// What this line stands for: a session name, a window id, or a pane id.
     pub fn target(&self) -> &str {
         match self {
@@ -776,6 +808,34 @@ impl App {
         line_of(lines, items.iter().position(|i| i == pick)?)
     }
 
+    /// The tones of the lines: the pane you are in, this sidebar's window's active pane, stands
+    /// out with its window and session. No other line stands in for a pane that has none.
+    pub fn tones(&self) -> Tones {
+        let window = self.own_window.as_deref();
+        let pane = self.status.as_ref().and_then(|s| {
+            let summary = s
+                .windows
+                .iter()
+                .filter(|w| Some(w.id.as_str()) == window)
+                .flat_map(|w| &w.panes)
+                .find(|p| p.active)
+                .map(|p| p.id.clone());
+            summary.or_else(|| {
+                let agent = s
+                    .panes
+                    .iter()
+                    .find(|r| r.active && r.window_id.as_deref() == window);
+                agent.map(|r| r.pane.clone())
+            })
+        });
+        Tones {
+            running: self.status.as_ref().map(Running::of).unwrap_or_default(),
+            pane,
+            window: self.own_window.clone(),
+            session: self.own_session().map(str::to_owned),
+        }
+    }
+
     pub fn set_status(&mut self, status: Status) {
         self.status = Some(status);
     }
@@ -893,8 +953,6 @@ mod tests {
             session: session.into(),
             index,
             name: name.into(),
-            active: false,
-            attached: false,
             panes: panes
                 .iter()
                 .map(|&(id, command, active)| PaneSummary {
@@ -1620,105 +1678,120 @@ mod tests {
         assert_eq!(highlight(&app), None);
     }
 
-    /// Whether each line of `status` in the tree view is lit, keyed by its first word or pane.
-    fn lit_lines(status: &Status) -> Vec<(String, bool)> {
-        let lit = Lit::of(status);
-        all(status)
+    /// Each line of `app` with its tone, keyed by what it stands for.
+    fn tones(app: &App) -> Vec<(String, Tone)> {
+        let lines = app.lines();
+        let tones = app.tones();
+        lines
             .iter()
-            .map(|l| {
-                let key = match l {
-                    Line::Session { name, .. } => name.clone(),
-                    Line::Window { id, .. } => id.clone(),
-                    Line::Agent(r) => r.pane.clone(),
-                    Line::Pane { id, .. } | Line::Place { pane: id, .. } => id.clone(),
-                };
-                (key, lit.line(l))
-            })
+            .map(|l| (l.target().to_owned(), tones.of(l)))
             .collect()
     }
 
-    fn lit_keys(status: &Status) -> Vec<String> {
-        lit_lines(status)
+    fn with_tone(app: &App, tone: Tone) -> Vec<String> {
+        tones(app)
             .into_iter()
-            .filter_map(|(k, on)| on.then_some(k))
+            .filter_map(|(k, t)| (t == tone).then_some(k))
             .collect()
     }
 
     #[test]
-    fn lights_active_panes_and_work_dims_the_rest() {
+    fn the_focused_pane_and_its_parents_are_highlighted() {
+        let app = app_in("@me3");
+        assert_eq!(with_tone(&app, Tone::Highlighted), ["me", "@me3", "%2"]);
+    }
+
+    #[test]
+    fn agents_light_their_window_and_session_and_idle_shells_are_dim() {
+        let app = app_in("@me3");
         assert_eq!(
-            lit_keys(&status()),
+            with_tone(&app, Tone::Active),
             [
-                // me: %3 working; %11 its window's active pane but idle, so notes stays dim;
-                // %2 done; %12 vim is active but at rest.
-                "me", "@me1", "%3", "%11", "@me3", "%2", "%12", // ops: %1 blocked.
-                "ops", "@ops2", "%1",
-                // web: %5 idle in its active pane; zz: tail at rest in its active pane.
-                "%5", "%13",
+                // An agent counts as running in any state, idle included.
+                "@me1", "%3", "%4", "ops", "@ops2", "%1", "web", "@web1", "%5",
+            ]
+        );
+        assert_eq!(
+            with_tone(&app, Tone::Dim),
+            [
+                // Shells at their prompt and programs simul doesn't report, even in a
+                // window's active pane.
+                "%10", "@me2", "%11", "@me9", "%12", "zz", "@zz1", "%13",
             ]
         );
     }
 
     #[test]
-    fn running_open_and_finished_processes_light_their_window_and_session() {
-        let lit = lit_keys(&status_with_runs());
-        for key in ["%10", "@me2", "@me9"] {
-            assert!(lit.contains(&key.to_owned()), "{key} in {lit:?}");
+    fn running_open_and_finished_processes_are_active_with_their_parents() {
+        let mut app = app_in("@ops2");
+        app.set_status(status_with_runs());
+        let active = with_tone(&app, Tone::Active);
+        for key in ["me", "@me1", "%10", "@me2", "%11", "@me9", "%12"] {
+            assert!(active.contains(&key.to_owned()), "{key} in {active:?}");
         }
     }
 
     #[test]
-    fn current_window_and_attached_session_are_lit_while_idle() {
+    fn folded_sessions_take_the_tone_of_what_they_hold() {
+        let mut app = app_in("@me3");
+        app.set_status(status_collapsed(&["me", "ops", "zz"]));
+        let tones = tones(&app);
+        let tone = |name: &str| tones.iter().find(|(k, _)| k == name).unwrap().1;
+        assert_eq!(tone("me"), Tone::Highlighted, "the own session");
+        assert_eq!(tone("ops"), Tone::Active);
+        assert_eq!(tone("zz"), Tone::Dim);
+    }
+
+    #[test]
+    fn only_the_pane_you_are_in_is_highlighted_never_a_stand_in() {
         let mut s = status();
-        for w in &mut s.windows {
-            w.active = w.session == "zz";
-            w.attached = w.session == "web";
+        // In 1:w1, focus moves from agent %3 to shell %10.
+        for p in &mut s.windows[0].panes {
+            p.active = p.id == "%10";
         }
-        let lit = lit_keys(&s);
-        assert!(lit.contains(&"@zz1".to_owned()), "{lit:?}");
+        s.panes.iter_mut().find(|r| r.pane == "%3").unwrap().active = false;
+        let mut app = app_in("@me1");
+        app.set_status(s);
+        assert_eq!(with_tone(&app, Tone::Highlighted), ["me", "@me1", "%10"]);
+        app.toggle_mode();
         assert!(
-            !lit.contains(&"zz".to_owned()),
-            "zz is not attached: {lit:?}"
-        );
-        assert!(lit.contains(&"web".to_owned()), "{lit:?}");
-        assert!(
-            !lit.contains(&"@web1".to_owned()),
-            "not web's current window: {lit:?}"
+            with_tone(&app, Tone::Highlighted).is_empty(),
+            "the status view lists no shells, so no agent stands in for one"
         );
     }
 
     #[test]
-    fn folded_session_with_work_stays_lit() {
-        let s = status_collapsed(&["ops", "web"]);
-        let lit = Lit::of(&s);
-        assert!(lit.line(&folded("ops", &[(State::Blocked, 1)])));
-        assert!(!lit.line(&folded("web", &[(State::Idle, 1)])));
+    fn without_a_window_nothing_is_highlighted() {
+        assert!(with_tone(&app_in("@gone"), Tone::Highlighted).is_empty());
     }
 
     #[test]
-    fn agent_outside_known_windows_lights_its_own_header() {
+    fn an_agent_outside_known_windows_lights_its_own_header() {
         let mut s = status();
-        let mut r = rec("%20", State::Working, "x", 4, false);
+        let mut r = rec("%20", State::Idle, "x", 4, false);
         r.window_id = None;
         s.panes.push(r);
-        let lit = lit_keys(&s);
+        let mut app = app_in("@me3");
+        app.set_status(s);
+        let active = with_tone(&app, Tone::Active);
         for key in ["x", "=x:4", "%20"] {
-            assert!(lit.contains(&key.to_owned()), "{key} in {lit:?}");
+            assert!(active.contains(&key.to_owned()), "{key} in {active:?}");
         }
     }
 
     #[test]
-    fn place_line_follows_its_agent() {
-        let s = status();
-        let lit = Lit::of(&s);
-        let lines = lines(&s, Mode::Status, HOME);
+    fn place_lines_take_their_agents_tone() {
+        let mut app = app_in("@me3");
+        app.toggle_mode();
+        let lines = app.lines();
+        let tones = app.tones();
         let place = |pane: &str| {
-            lines
+            tones.of(lines
                 .iter()
                 .find(|l| matches!(l, Line::Place { pane: p, .. } if p == pane))
-                .unwrap()
+                .unwrap())
         };
-        assert!(lit.line(place("%3")), "working");
-        assert!(!lit.line(place("%4")), "idle, not its window's active pane");
+        assert_eq!(place("%2"), Tone::Highlighted);
+        assert_eq!(place("%4"), Tone::Active);
     }
 }
