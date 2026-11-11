@@ -1,8 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
 use crate::protocol::{
     GitStatus, PaneRecord, PaneSummary, Run, RunState, State, Status, WindowInfo,
 };
@@ -62,8 +60,6 @@ pub struct Row {
 pub enum Line {
     Session {
         name: String,
-        /// Whether the session is marked collapsed; the text filter still shows it open.
-        collapsed: bool,
         /// While folded, its agents by state and its running or finished panes, in
         /// `mark_rank` order; `None` while open.
         folded: Option<Vec<(Mark, usize)>>,
@@ -221,10 +217,10 @@ impl Lit {
     }
 }
 
-/// A selectable line: what j/k step over and Enter acts on.
+/// A clickable line: what a click jumps to or folds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Item {
-    /// A session header, which Enter folds or unfolds.
+    /// A session header, which a click folds or unfolds.
     Session(String),
     Window(String),
     Agent(Row),
@@ -236,12 +232,6 @@ pub enum Item {
 }
 
 impl Item {
-    /// The same row: a placeholder header can share its target with the agent under it.
-    fn same(&self, other: &Item) -> bool {
-        std::mem::discriminant(self) == std::mem::discriminant(other)
-            && self.target() == other.target()
-    }
-
     pub fn target(&self) -> &str {
         match self {
             Item::Session(id) | Item::Window(id) | Item::Pane { id, .. } => id,
@@ -381,30 +371,20 @@ enum Entry<'a> {
 /// An entry with its `place` text.
 type Placed<'a> = (Entry<'a>, Option<String>);
 
-impl Window<'_> {
-    fn haystack(&self) -> String {
-        format!("{} {}", self.session.unwrap_or_default(), self.label).to_lowercase()
-    }
-}
-
-/// The sidebar's lines in `mode`, keeping those that match `text`. `home` shortens paths (see
-/// `short_path`).
-pub fn lines(status: &Status, mode: Mode, text: &str, home: &str) -> Vec<Line> {
-    let needle = text.to_lowercase();
+/// The sidebar's lines in `mode`. `home` shortens paths (see `short_path`).
+pub fn lines(status: &Status, mode: Mode, home: &str) -> Vec<Line> {
     match mode {
-        Mode::All => tree_lines(status, &needle, home),
-        Mode::Status => status_lines(status, &needle, home),
+        Mode::All => tree_lines(status, home),
+        Mode::Status => status_lines(status, home),
     }
 }
 
 /// Lists every window under its session, and each pane under its window, as an agent row when
-/// an agent runs there. Sessions sort by name, numbers in numeric order, so rows don't jump as focus moves. A collapsed
-/// session is just its header, with its agents counted by state, unless the text filter is
-/// active, so matches are never hidden.
-fn tree_lines(status: &Status, needle: &str, home: &str) -> Vec<Line> {
+/// an agent runs there. Sessions sort by name, numbers in numeric order, so rows don't jump as
+/// focus moves. A collapsed session is just its header, with its agents counted by state.
+fn tree_lines(status: &Status, home: &str) -> Vec<Line> {
     let collapsed =
         |session: Option<&str>| session.is_some_and(|s| status.collapsed.iter().any(|c| c == s));
-    let fold = needle.is_empty();
     let mut windows: Vec<Window> = status.windows.iter().map(window_of).collect();
     for r in &status.panes {
         let id = window_key(r);
@@ -426,24 +406,15 @@ fn tree_lines(status: &Status, needle: &str, home: &str) -> Vec<Line> {
     }
     let mut windows: Vec<(Window, Vec<Placed>)> = windows
         .into_iter()
-        .filter_map(|w| {
-            let hit = needle.is_empty() || w.haystack().contains(needle);
+        .map(|w| {
             let entries: Vec<Placed> = entries(&w)
                 .into_iter()
                 .map(|e| {
                     let place = entry_place(&e, home);
                     (e, place)
                 })
-                .filter(|(e, place)| {
-                    let found = |s: &str| s.to_lowercase().contains(needle);
-                    hit || place.as_deref().is_some_and(found)
-                        || match e {
-                            Entry::Agent(r, _) => found(&haystack(r)),
-                            Entry::Pane(p) => found(&p.command),
-                        }
-                })
                 .collect();
-            (hit || !entries.is_empty()).then_some((w, entries))
+            (w, entries)
         })
         .collect();
     windows.sort_by(|(a, _), (b, _)| {
@@ -474,8 +445,7 @@ fn tree_lines(status: &Status, needle: &str, home: &str) -> Vec<Line> {
     for (w, entries) in windows {
         if current != Some(w.session) {
             current = Some(w.session);
-            let marked = collapsed(w.session);
-            open = !(fold && marked);
+            open = !collapsed(w.session);
             let folded = (!open).then(|| {
                 let mut counts: Vec<(Mark, usize)> = Vec::new();
                 for &m in marks.get(&w.session).into_iter().flatten() {
@@ -489,7 +459,6 @@ fn tree_lines(status: &Status, needle: &str, home: &str) -> Vec<Line> {
             });
             out.push(Line::Session {
                 name: w.session.unwrap_or("?").to_owned(),
-                collapsed: marked,
                 folded,
             });
         }
@@ -527,7 +496,7 @@ fn tree_lines(status: &Status, needle: &str, home: &str) -> Vec<Line> {
 
 /// Lists only agents, without headers: by `rank`, then longest in its state first. Under each
 /// agent, its session and window.
-fn status_lines(status: &Status, needle: &str, home: &str) -> Vec<Line> {
+fn status_lines(status: &Status, home: &str) -> Vec<Line> {
     let mut agents: Vec<(&PaneRecord, String, Option<String>)> = status
         .panes
         .iter()
@@ -546,13 +515,6 @@ fn status_lines(status: &Status, needle: &str, home: &str) -> Vec<Line> {
             };
             let place = entry_place(&Entry::Agent(r, found.map(|(_, p)| p)), home);
             (r, location, place)
-        })
-        .filter(|(r, location, place)| {
-            let found = |s: &str| s.to_lowercase().contains(needle);
-            needle.is_empty()
-                || found(location)
-                || place.as_deref().is_some_and(found)
-                || found(&haystack(r))
         })
         .collect();
     agents.sort_by_key(|(r, ..)| (rank(r.state), r.since_ms, pane_number(&r.pane)));
@@ -583,6 +545,18 @@ fn pane_number(pane: &str) -> u32 {
     pane.trim_start_matches('%')
         .parse::<u32>()
         .unwrap_or(u32::MAX)
+}
+
+impl Line {
+    /// What this line stands for: a session name, a window id, or a pane id.
+    pub fn target(&self) -> &str {
+        match self {
+            Line::Session { name, .. } => name,
+            Line::Window { id, .. } | Line::Pane { id, .. } => id,
+            Line::Agent(r) => &r.pane,
+            Line::Place { pane, .. } => pane,
+        }
+    }
 }
 
 /// Orders names with runs of digits compared as numbers, so `6267` comes before `11212`.
@@ -669,21 +643,6 @@ fn entries<'a>(w: &Window<'a>) -> Vec<Entry<'a>> {
     out
 }
 
-fn haystack(r: &PaneRecord) -> String {
-    // Session and window names are matched per window.
-    [
-        Some(r.agent.name().to_owned()),
-        r.branch.clone(),
-        r.cwd.clone(),
-        Some(r.state.name().to_owned()),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join(" ")
-    .to_lowercase()
-}
-
 fn selectable(line: &Line) -> bool {
     matches!(
         line,
@@ -767,15 +726,9 @@ pub enum Action {
 #[derive(Debug, Default)]
 pub struct App {
     pub status: Option<Status>,
-    /// The window this sidebar lives in; its active pane's row is selected while unfocused.
+    /// The window this sidebar lives in; its active pane's row is highlighted.
     pub own_window: Option<String>,
     pub mode: Mode,
-    pub text: String,
-    pub editing: bool,
-    /// Whether the sidebar pane has keyboard focus.
-    pub focused: bool,
-    /// Index among selectable rows (see `items`), not lines.
-    pub selected: Option<usize>,
     /// `$HOME`, which shortened paths start from.
     pub home: String,
 }
@@ -783,13 +736,9 @@ pub struct App {
 impl App {
     pub fn lines(&self) -> Vec<Line> {
         match &self.status {
-            Some(s) => lines(s, self.mode, &self.text, &self.home),
+            Some(s) => lines(s, self.mode, &self.home),
             None => Vec::new(),
         }
-    }
-
-    fn items(&self) -> Vec<Item> {
-        items(&self.lines())
     }
 
     /// The session this sidebar's window is in.
@@ -800,11 +749,11 @@ impl App {
         Some(&info.session)
     }
 
-    /// The row for this sidebar's window: its active pane, else its first agent, else the
-    /// window itself.
-    fn window_row(&self) -> Option<usize> {
+    /// The line in `lines` for the pane you are in: this sidebar's window's active pane, else
+    /// its first agent, else the window itself, else its folded session's header.
+    pub fn highlighted_line(&self, lines: &[Line]) -> Option<usize> {
         let window = self.own_window.as_deref()?;
-        let items = self.items();
+        let items = items(lines);
         let pick = items
             .iter()
             .find(|i| i.in_window(window) && i.active())
@@ -819,155 +768,33 @@ impl App {
                     .find(|i| matches!(i, Item::Window(id) if id == window))
             })
             .or_else(|| {
-                // Folded away: the session header stands for the window.
                 let session = self.own_session()?;
                 items
                     .iter()
                     .find(|i| matches!(i, Item::Session(s) if s == session))
             })?;
-        items.iter().position(|i| i == pick)
+        line_of(lines, items.iter().position(|i| i == pick)?)
     }
 
-    /// Folds or unfolds the session that line `line` is in, and selects its header so the
-    /// selection survives the rows under it going away.
-    fn toggle_session(&mut self, lines: &[Line], line: usize) -> Action {
-        let Some(head) = (0..=line)
-            .rev()
-            .find(|&i| matches!(lines[i], Line::Session { .. }))
-        else {
-            return Action::None;
-        };
-        let Line::Session {
-            name, collapsed, ..
-        } = &lines[head]
-        else {
-            return Action::None;
-        };
-        self.selected = Some(lines[..head].iter().filter(|l| selectable(l)).count());
-        Action::Collapse {
-            session: name.clone(),
-            collapsed: !collapsed,
-        }
-    }
-
-    /// Unfocused, selection mirrors the window; focused, it stays where the user put it.
-    fn refresh(&mut self) {
-        if self.focused {
-            let len = self.items().len();
-            self.selected = self.selected.filter(|_| len > 0).map(|i| i.min(len - 1));
-        } else {
-            self.selected = self.window_row();
-        }
-    }
-
-    /// While focused, the selection stays on its window or agent as rows above it come and go.
     pub fn set_status(&mut self, status: Status) {
-        let kept = self
-            .focused
-            .then(|| self.selected.and_then(|i| self.items().into_iter().nth(i)))
-            .flatten();
         self.status = Some(status);
-        if let Some(item) = kept
-            && let Some(i) = self.items().iter().position(|i| i.same(&item))
-        {
-            self.selected = Some(i);
-            return;
-        }
-        self.refresh();
     }
 
     pub fn set_location(&mut self, window: String) {
         self.own_window = Some(window);
-        self.refresh();
     }
 
-    pub fn on_focus(&mut self, gained: bool) {
-        self.focused = gained;
-        self.selected = self.window_row();
-        if gained && self.selected.is_none() && !self.items().is_empty() {
-            self.selected = Some(0);
-        }
+    pub fn toggle_mode(&mut self) {
+        self.mode = self.mode.next();
     }
 
-    fn step(&mut self, down: bool) {
-        let len = self.items().len();
-        if len == 0 {
-            return;
-        }
-        self.selected = Some(match self.selected {
-            None => 0,
-            Some(i) if down => (i + 1).min(len - 1),
-            Some(i) => i.saturating_sub(1),
-        });
-    }
-
-    pub fn on_key(&mut self, key: KeyEvent) -> Action {
-        if self.editing {
-            match key.code {
-                KeyCode::Enter => self.editing = false,
-                KeyCode::Esc => {
-                    self.editing = false;
-                    self.text.clear();
-                }
-                KeyCode::Backspace => {
-                    self.text.pop();
-                }
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.text.push(c);
-                }
-                _ => {}
-            }
-            self.refresh();
-            return Action::None;
-        }
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => self.step(true),
-            KeyCode::Char('k') | KeyCode::Up => self.step(false),
-            KeyCode::Char('/') => self.editing = true,
-            KeyCode::Char('f') => {
-                self.mode = self.mode.next();
-                self.selected = Some(0);
-                self.refresh();
-            }
-            KeyCode::Char(' ') => {
-                let lines = self.lines();
-                if let Some(line) = self.selected.and_then(|n| line_of(&lines, n)) {
-                    return self.toggle_session(&lines, line);
-                }
-            }
-            KeyCode::Enter => {
-                let lines = self.lines();
-                if let Some(line) = self.selected.and_then(|n| line_of(&lines, n)) {
-                    return self.act_on(&lines, line);
-                }
-            }
-            _ => {}
-        }
-        Action::None
-    }
-
-    /// Enter or a click on selectable line `line`: a session header folds or unfolds, and
-    /// anything else jumps to its window or pane.
-    fn act_on(&mut self, lines: &[Line], line: usize) -> Action {
-        if matches!(lines[line], Line::Session { .. }) {
-            return self.toggle_session(lines, line);
-        }
-        let n = lines[..line].iter().filter(|l| selectable(l)).count();
-        let Some(item) = items(lines).into_iter().nth(n) else {
-            return Action::None;
-        };
-        self.selected = Some(n);
-        Action::Jump(item.target().to_owned())
-    }
-
-    /// Clicking line `index` (0-based, as rendered) acts on it like Enter: it selects and jumps
-    /// to that window or pane, or folds or unfolds that session.
-    pub fn on_click(&mut self, index: usize) -> Action {
+    /// Clicking line `index` (0-based, as rendered): a session header folds or unfolds, and
+    /// anything else jumps to its window or pane; a place line acts for its agent.
+    pub fn on_click(&self, index: usize) -> Action {
         let lines = self.lines();
         if index >= lines.len() {
             return Action::None;
         }
-        // Detail lines follow their agent.
         let Some(line) = lines[..=index]
             .iter()
             .rposition(|l| !matches!(l, Line::Place { .. }))
@@ -975,7 +802,17 @@ impl App {
         else {
             return Action::None;
         };
-        self.act_on(&lines, line)
+        if let Line::Session { name, folded } = &lines[line] {
+            return Action::Collapse {
+                session: name.clone(),
+                collapsed: folded.is_none(),
+            };
+        }
+        let n = lines[..line].iter().filter(|l| selectable(l)).count();
+        match items(&lines).into_iter().nth(n) {
+            Some(item) => Action::Jump(item.target().to_owned()),
+            None => Action::None,
+        }
     }
 }
 
@@ -1082,7 +919,6 @@ mod tests {
     fn session(name: &str) -> Line {
         Line::Session {
             name: name.into(),
-            collapsed: false,
             folded: None,
         }
     }
@@ -1096,7 +932,6 @@ mod tests {
     fn folded_marks(name: &str, counts: &[(Mark, usize)]) -> Line {
         Line::Session {
             name: name.into(),
-            collapsed: true,
             folded: Some(counts.to_vec()),
         }
     }
@@ -1115,10 +950,6 @@ mod tests {
             p.run = Some(Run { state, since_ms });
         }
         s
-    }
-
-    fn space() -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)
     }
 
     /// `s` with these sessions marked collapsed.
@@ -1145,15 +976,7 @@ mod tests {
     }
 
     fn all(status: &Status) -> Vec<Line> {
-        lines(status, Mode::All, "", HOME)
-    }
-
-    fn key(c: char) -> KeyEvent {
-        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
-    }
-
-    fn enter() -> KeyEvent {
-        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+        lines(status, Mode::All, HOME)
     }
 
     fn panes(lines: &[Line]) -> Vec<&str> {
@@ -1262,8 +1085,8 @@ mod tests {
     #[test]
     fn the_status_view_ignores_runs() {
         assert_eq!(
-            lines(&status_with_runs(), Mode::Status, "", HOME),
-            lines(&status(), Mode::Status, "", HOME)
+            lines(&status_with_runs(), Mode::Status, HOME),
+            lines(&status(), Mode::Status, HOME)
         );
     }
 
@@ -1313,7 +1136,7 @@ mod tests {
         s.panes.truncate(1);
         s.panes[0].cwd = None;
         for mode in [Mode::All, Mode::Status] {
-            let out = lines(&s, mode, "", HOME);
+            let out = lines(&s, mode, HOME);
             assert!(
                 out.iter()
                     .any(|l| matches!(l, Line::Agent(r) if r.label == "claude")),
@@ -1431,7 +1254,13 @@ mod tests {
 
     #[test]
     fn status_view_lists_only_agents_with_where_they_are() {
-        let out = lines(&status(), Mode::Status, "ops", HOME);
+        let out: Vec<Line> = lines(&status(), Mode::Status, HOME)
+            .into_iter()
+            .filter(|l| {
+                matches!(l, Line::Agent(r) if r.pane == "%1")
+                    || matches!(l, Line::Place { pane, .. } if pane == "%1")
+            })
+            .collect();
         assert_eq!(
             out,
             [
@@ -1449,7 +1278,7 @@ mod tests {
                 },
             ]
         );
-        let out = lines(&status(), Mode::Status, "", HOME);
+        let out = lines(&status(), Mode::Status, HOME);
         assert!(
             out.iter()
                 .all(|l| matches!(l, Line::Agent(_) | Line::Place { .. })),
@@ -1466,7 +1295,7 @@ mod tests {
             unplaced.window_id = None;
             s.panes.push(unplaced);
         }
-        let out = lines(&s, Mode::Status, "", HOME);
+        let out = lines(&s, Mode::Status, HOME);
         assert_eq!(panes(&out), ["%1", "%7", "%6", "%2", "%3", "%4", "%5"]);
         let p7 = out
             .iter()
@@ -1489,61 +1318,8 @@ mod tests {
             .find(|r| r.pane == "%4")
             .unwrap()
             .since_ms = 1_000;
-        let out = lines(&s, Mode::Status, "", HOME);
+        let out = lines(&s, Mode::Status, HOME);
         assert_eq!(panes(&out)[5..], ["%5", "%4"], "idle longer comes first");
-    }
-
-    #[test]
-    fn status_view_text_matches_place_and_agent() {
-        let out = lines(&status(), Mode::Status, "BR-%3", HOME);
-        assert_eq!(panes(&out), ["%3"]);
-        let out = lines(&status(), Mode::Status, "idle", HOME);
-        assert_eq!(panes(&out), ["%4", "%5"]);
-        let out = lines(&status(), Mode::Status, "vim", HOME);
-        assert!(out.is_empty(), "plain panes never show: {out:?}");
-    }
-
-    #[test]
-    fn text_matching_a_window_keeps_all_its_agents() {
-        let out = lines(&status(), Mode::All, "logs", HOME);
-        assert_eq!(
-            out,
-            [
-                session("zz"),
-                window("@zz1", "1:logs"),
-                pane("%13", "tail", "@zz1", true)
-            ]
-        );
-        let out = lines(&status(), Mode::All, "3:W3", HOME);
-        assert_eq!(panes(&out), ["%2", "%4"]);
-        let out = lines(&status(), Mode::All, "CLAUDE", HOME);
-        assert_eq!(panes(&out).len(), 5, "matches the agent name");
-    }
-
-    #[test]
-    fn text_matches_a_pane_command() {
-        let out = lines(&status(), Mode::All, "VIM", HOME);
-        assert_eq!(
-            out,
-            [
-                session("me"),
-                window("@me9", "9:w9"),
-                pane("%12", "vim", "@me9", true)
-            ]
-        );
-    }
-
-    #[test]
-    fn text_matches_a_pane_place() {
-        let out = lines(&status(), Mode::All, "/S/TAIL", HOME);
-        assert_eq!(out.last(), Some(&pane("%13", "tail", "@zz1", true)));
-        assert_eq!(out.len(), 3, "{out:?}");
-    }
-
-    #[test]
-    fn cwd_still_matches_the_text_filter() {
-        let out = lines(&status(), Mode::All, "/w/repo", HOME);
-        assert_eq!(panes(&out).len(), 5);
     }
 
     #[test]
@@ -1619,13 +1395,6 @@ mod tests {
     }
 
     #[test]
-    fn filters_by_text() {
-        let out = lines(&status(), Mode::All, "BR-%1", HOME);
-        assert_eq!(panes(&out), ["%1"]);
-        assert!(lines(&status(), Mode::All, "zzz", HOME).is_empty());
-    }
-
-    #[test]
     fn mode_toggles_between_all_and_status() {
         let labels: Vec<&str> = [Mode::All, Mode::All.next(), Mode::All.next().next()]
             .map(Mode::label)
@@ -1633,21 +1402,26 @@ mod tests {
         assert_eq!(labels, ["all", "status", "all"]);
     }
 
+    /// The line the sidebar highlights in `app`.
+    fn highlight(app: &App) -> Option<usize> {
+        app.highlighted_line(&app.lines())
+    }
+
     #[test]
-    fn selection_follows_own_window() {
-        assert_eq!(app_in("@me1").selected, Some(2));
+    fn highlight_follows_own_window() {
+        assert_eq!(highlight(&app_in("@me1")), Some(2));
         assert_eq!(
-            app_in("@me3").selected,
+            highlight(&app_in("@me3")),
             Some(7),
             "the active pane of the window"
         );
-        assert_eq!(app_in("@me2").selected, Some(5), "an active plain pane");
+        assert_eq!(highlight(&app_in("@me2")), Some(5), "an active plain pane");
         let mut app = app_in("@me9");
         let mut s = status();
         s.windows[3].panes.clear();
         app.set_status(s);
-        assert_eq!(app.selected, Some(9), "no panes: the window");
-        assert_eq!(app_in("@gone").selected, None, "unknown window");
+        assert_eq!(highlight(&app), Some(9), "no panes: the window");
+        assert_eq!(highlight(&app_in("@gone")), None, "unknown window");
     }
 
     #[test]
@@ -1660,7 +1434,7 @@ mod tests {
     }
 
     #[test]
-    fn unfocused_selection_tracks_status_updates() {
+    fn highlight_tracks_status_updates() {
         let mut app = app_in("@me9");
         let mut s = status();
         s.panes.push(rec("%7", State::Working, "me", 9, true));
@@ -1671,129 +1445,38 @@ mod tests {
             &[("%12", "vim", false), ("%7", "claude", true)],
         );
         app.set_status(s);
-        assert_eq!(app.selected, Some(11));
+        assert_eq!(highlight(&app), Some(11));
     }
 
     #[test]
-    fn focus_without_agent_selects_first_row() {
-        let mut app = app_in("@gone");
-        app.on_focus(true);
-        assert_eq!(app.selected, Some(0));
-        app.on_focus(false);
-        assert_eq!(app.selected, None);
-    }
-
-    #[test]
-    fn focus_keeps_window_row_and_keys_move_freely() {
+    fn toggling_the_view_moves_the_highlight_to_the_same_pane() {
         let mut app = app_in("@me3");
-        app.on_focus(true);
-        assert_eq!(app.selected, Some(7));
-        app.on_key(key('j'));
-        app.on_key(key('j'));
-        assert_eq!(app.selected, Some(9));
-        app.set_status(status());
-        assert_eq!(
-            app.selected,
-            Some(9),
-            "updates don't move a focused selection"
-        );
-        assert_eq!(
-            app.on_key(enter()),
-            Action::Jump("@me9".into()),
-            "a window header jumps to its window"
-        );
-        app.on_key(key('j'));
-        assert_eq!(
-            app.on_key(enter()),
-            Action::Jump("%12".into()),
-            "a plain pane jumps to itself"
-        );
-        app.on_key(key('j'));
-        assert_eq!(
-            app.items()[app.selected.unwrap()],
-            Item::Session("ops".into())
-        );
-        app.on_key(key('j'));
-        app.on_key(key('j'));
-        assert_eq!(app.on_key(enter()), Action::Jump("%1".into()));
-        for _ in 0..20 {
-            app.on_key(key('j'));
-        }
-        assert_eq!(app.selected, Some(19));
-        app.on_key(key('k'));
-        assert_eq!(app.selected, Some(18));
-        app.on_key(key('q'));
-        assert_eq!(app.selected, Some(18), "q is ignored");
-        app.on_focus(false);
-        assert_eq!(app.selected, Some(7), "snaps back to the window's agent");
-    }
-
-    #[test]
-    fn keys_from_no_selection_start_at_top() {
-        let mut app = app_in("@gone");
-        assert_eq!(app.on_key(enter()), Action::None);
-        app.on_key(key('j'));
-        assert_eq!(app.selected, Some(0));
-    }
-
-    #[test]
-    fn slash_edits_text_filter() {
-        let mut app = app_in("@me1");
-        app.on_focus(true);
-        app.on_key(key('/'));
-        assert!(app.editing);
-        for c in "ops".chars() {
-            app.on_key(key(c));
-        }
-        app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        assert_eq!(app.text, "op");
-        app.on_key(enter());
-        assert!(!app.editing);
-        assert_eq!(panes(&app.lines()), ["%1"]);
-        assert_eq!(app.selected, Some(2), "clamped to the last row left");
-        app.on_key(key('/'));
-        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert_eq!(app.text, "");
-        assert!(!app.editing);
-    }
-
-    #[test]
-    fn f_switches_mode_and_resets_selection() {
-        let mut app = app_in("@me1");
-        app.on_focus(true);
-        app.selected = Some(4);
-        app.on_key(key('f'));
+        app.toggle_mode();
         assert_eq!(app.mode, Mode::Status);
-        assert_eq!(app.selected, Some(0));
-        app.on_key(key('f'));
-        assert_eq!(app.mode, Mode::All);
-        let mut app = app_in("@me3");
-        app.on_key(key('f'));
-        assert_eq!(
-            app.selected,
-            Some(1),
-            "unfocused, the window's active agent, now second"
+        assert!(
+            matches!(&app.lines()[highlight(&app).unwrap()], Line::Agent(r) if r.pane == "%2"),
+            "{:?}",
+            highlight(&app)
         );
         app.set_location("@me9".into());
-        assert_eq!(app.selected, None, "a window without agents has no row");
+        assert_eq!(highlight(&app), None, "a window without agents has no row");
+        app.toggle_mode();
+        assert_eq!(app.mode, Mode::All);
     }
 
     #[test]
-    fn status_view_click_on_any_detail_line_selects_its_agent() {
+    fn status_view_click_on_any_detail_line_jumps_to_its_agent() {
         let mut app = app_in("@me1");
         app.mode = Mode::Status;
         assert_eq!(app.on_click(3), Action::Jump("%2".into()), "location line");
-        assert_eq!(app.selected, Some(1));
         assert_eq!(app.on_click(1), Action::Jump("%1".into()), "location line");
-        assert_eq!(app.selected, Some(0));
         assert_eq!(app.on_click(99), Action::None);
     }
 
     #[test]
     fn click_on_window_agent_or_pane_jumps() {
-        let mut app = app_in("@me9");
+        let app = app_in("@me9");
         assert_eq!(app.on_click(7), Action::Jump("%2".into()));
-        assert_eq!(app.selected, Some(7));
         assert_eq!(
             app.on_click(8),
             Action::Jump("%4".into()),
@@ -1804,9 +1487,7 @@ mod tests {
             Action::Jump("@me2".into()),
             "window header"
         );
-        assert_eq!(app.selected, Some(4));
         assert_eq!(app.on_click(3), Action::Jump("%10".into()), "plain pane");
-        assert_eq!(app.selected, Some(3));
         assert_eq!(app.on_click(99), Action::None);
     }
 
@@ -1820,7 +1501,6 @@ mod tests {
                 collapsed: true
             }
         );
-        assert_eq!(app.selected, Some(11));
         app.set_status(status_collapsed(&["ops"]));
         let out = app.lines();
         assert_eq!(out[11], folded("ops", &[(State::Blocked, 1)]));
@@ -1834,45 +1514,7 @@ mod tests {
     }
 
     #[test]
-    fn focused_selection_stays_on_its_row_as_windows_come_and_go() {
-        let mut app = app_in("@me1");
-        app.on_focus(true);
-        app.selected = Some(13);
-        let mut s = status();
-        s.windows.push(win("aa", 1, "new", &[]));
-        app.set_status(s);
-        assert_eq!(app.selected, Some(15), "below a new session and its window");
-        assert_eq!(app.on_key(enter()), Action::Jump("%1".into()));
-        app.set_status(status());
-        assert_eq!(app.selected, Some(13), "and back");
-        let mut s = status();
-        s.panes.retain(|r| r.pane != "%1");
-        s.windows[4].panes.clear();
-        app.set_status(s);
-        assert_eq!(app.selected, Some(13), "a vanished row keeps the index");
-    }
-
-    #[test]
-    fn focused_selection_on_an_unplaced_agent_stays_off_its_header() {
-        let mut s = status();
-        let mut unplaced = rec("%8", State::Idle, "zz", 4, true);
-        unplaced.window_id = None;
-        unplaced.window = None;
-        s.panes.push(unplaced);
-        let mut app = app_in("@me1");
-        app.set_status(s.clone());
-        app.on_focus(true);
-        app.selected = Some(app.items().len() - 1);
-        app.set_status(s);
-        assert!(
-            matches!(&app.items()[app.selected.unwrap()], Item::Agent(r) if r.pane == "%8"),
-            "{:?}",
-            app.selected
-        );
-    }
-
-    #[test]
-    fn clicking_an_unplaced_agent_selects_it_not_its_header() {
+    fn clicking_an_unplaced_agent_jumps_to_it_not_its_header() {
         let mut s = status();
         let mut unplaced = rec("%8", State::Idle, "zz", 4, true);
         unplaced.window_id = None;
@@ -1883,11 +1525,6 @@ mod tests {
         let out = app.lines();
         assert_eq!(out[out.len() - 2], window("%8", "?"));
         assert_eq!(app.on_click(out.len() - 1), Action::Jump("%8".into()));
-        assert!(
-            matches!(&app.items()[app.selected.unwrap()], Item::Agent(r) if r.pane == "%8"),
-            "{:?}",
-            app.selected
-        );
     }
 
     #[test]
@@ -1898,7 +1535,7 @@ mod tests {
         assert_eq!(line_of(&out, 2), Some(2));
         assert_eq!(line_of(&out, 3), Some(3), "a plain pane");
         assert_eq!(line_of(&out, 99), None);
-        let out = lines(&status(), Mode::Status, "", HOME);
+        let out = lines(&status(), Mode::Status, HOME);
         assert_eq!(
             line_of(&out, 1),
             Some(2),
@@ -1924,101 +1561,33 @@ mod tests {
     }
 
     #[test]
-    fn the_text_filter_opens_folded_sessions() {
-        let s = status_collapsed(&["me"]);
-        let out = lines(&s, Mode::All, "w3", HOME);
-        assert_eq!(
-            out[0],
-            Line::Session {
-                name: "me".into(),
-                collapsed: true,
-                folded: None,
-            }
-        );
-        assert_eq!(panes(&out), ["%2", "%4"]);
-    }
-
-    #[test]
     fn the_status_view_ignores_folding() {
         let s = status_collapsed(&["me", "ops"]);
         assert_eq!(
-            lines(&s, Mode::Status, "", HOME),
-            lines(&status(), Mode::Status, "", HOME)
+            lines(&s, Mode::Status, HOME),
+            lines(&status(), Mode::Status, HOME)
         );
         let mut app = app_in("@me3");
         app.set_status(s);
-        app.on_focus(true);
-        app.on_key(key('f'));
-        assert_eq!(app.mode, Mode::Status);
-        assert_eq!(app.on_key(space()), Action::None, "no sessions to fold");
-    }
-
-    #[test]
-    fn space_folds_the_selected_rows_session_and_selects_its_header() {
-        let mut app = app_in("@me3");
-        app.on_focus(true);
-        assert_eq!(app.selected, Some(7));
+        app.toggle_mode();
         assert_eq!(
-            app.on_key(space()),
-            Action::Collapse {
-                session: "me".into(),
-                collapsed: true
-            }
-        );
-        assert_eq!(app.selected, Some(0));
-        app.set_status(status_collapsed(&["me"]));
-        assert_eq!(app.selected, Some(0), "stays on the header as rows go");
-        assert_eq!(
-            app.on_key(enter()),
-            Action::Collapse {
-                session: "me".into(),
-                collapsed: false
-            },
-            "Enter on a header unfolds it"
-        );
-        app.selected = Some(1);
-        assert_eq!(
-            app.on_key(space()),
-            Action::Collapse {
-                session: "ops".into(),
-                collapsed: true
-            }
-        );
-        assert_eq!(app.selected, Some(1), "already on the header");
-    }
-
-    #[test]
-    fn space_under_the_text_filter_unfolds_a_marked_session() {
-        let mut app = app_in("@me1");
-        app.set_status(status_collapsed(&["me"]));
-        app.on_focus(true);
-        app.text = "w1".into();
-        app.selected = Some(2);
-        assert!(
-            matches!(&app.items()[2], Item::Agent(r) if r.pane == "%3"),
-            "{:?}",
-            app.items()
-        );
-        assert_eq!(
-            app.on_key(space()),
-            Action::Collapse {
-                session: "me".into(),
-                collapsed: false
-            }
+            app.on_click(0),
+            Action::Jump("%1".into()),
+            "no sessions to fold"
         );
     }
 
     #[test]
-    fn unfocused_selection_in_a_folded_session_is_its_header() {
+    fn highlight_in_a_folded_session_is_its_header() {
         let mut app = app_in("@me3");
         app.set_status(status_collapsed(&["me"]));
-        assert_eq!(app.selected, Some(0));
+        assert_eq!(highlight(&app), Some(0));
         let mut app = app_in("@ops2");
         app.set_status(status_collapsed(&["ops"]));
-        assert_eq!(
-            app.items()[app.selected.unwrap()],
-            Item::Session("ops".into())
-        );
+        assert!(matches!(
+            &app.lines()[highlight(&app).unwrap()],
+            Line::Session { name, .. } if name == "ops"
+        ));
     }
 
     #[test]
@@ -2033,7 +1602,7 @@ mod tests {
         assert_eq!(scroll(&out, 10, 11, 5), 9, "a first pane shows its window");
         assert_eq!(scroll(&out, 8, 9, 5), 8, "a later agent needs only itself");
         assert_eq!(scroll(&out, 13, 0, 5), 9, "down: the agent at the bottom");
-        let status_view = lines(&status(), Mode::Status, "", HOME);
+        let status_view = lines(&status(), Mode::Status, HOME);
         assert_eq!(
             scroll(&status_view, 4, 0, 5),
             1,
@@ -2045,11 +1614,10 @@ mod tests {
 
     #[test]
     fn no_status_is_empty() {
-        let mut app = App::default();
+        let app = App::default();
         assert!(app.lines().is_empty());
-        assert_eq!(app.on_key(enter()), Action::None);
-        app.on_focus(true);
-        assert_eq!(app.selected, None);
+        assert_eq!(app.on_click(0), Action::None);
+        assert_eq!(highlight(&app), None);
     }
 
     /// Whether each line of `status` in the tree view is lit, keyed by its first word or pane.
@@ -2143,7 +1711,7 @@ mod tests {
     fn place_line_follows_its_agent() {
         let s = status();
         let lit = Lit::of(&s);
-        let lines = lines(&s, Mode::Status, "", HOME);
+        let lines = lines(&s, Mode::Status, HOME);
         let place = |pane: &str| {
             lines
                 .iter()

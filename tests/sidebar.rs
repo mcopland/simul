@@ -259,7 +259,7 @@ fn sidebar_renders_agents() {
     });
     assert!(!screen.contains("claude"), "{screen}");
     assert!(screen.starts_with('t'), "session header first: {screen}");
-    assert!(screen.contains("f:all"), "{screen}");
+    assert!(screen.contains("view: all"), "{screen}");
 }
 
 #[test]
@@ -490,6 +490,27 @@ fn collapsed_option(h: &Harness, session: &str) -> String {
     ])
 }
 
+/// Clicks row `row` (0-based) of sidebar pane `pane`, sending the SGR mouse report a terminal
+/// would.
+fn click(h: &Harness, pane: &str, row: usize) {
+    let report = format!("\x1b[<0;1;{y}M\x1b[<0;1;{y}m", y = row + 1);
+    let hex: Vec<String> = report.bytes().map(|b| format!("{b:02x}")).collect();
+    let mut args = vec!["send-keys", "-t", pane, "-H"];
+    args.extend(hex.iter().map(String::as_str));
+    h.tmux(&args);
+}
+
+/// The row of sidebar pane `pane` that reads `text`, once drawn.
+fn row_of(h: &Harness, pane: &str, text: &str) -> usize {
+    let mut row = None;
+    eventually(&format!("{text:?} drawn in {pane}"), || {
+        let screen = h.tmux(&["capture-pane", "-p", "-t", pane]);
+        row = screen.lines().position(|l| l.trim_end() == text);
+        row.is_some()
+    });
+    row.unwrap()
+}
+
 /// The sidebar in the first window of `session`.
 fn sidebar_in(h: &Harness, session: &str) -> String {
     let window = h.tmux(&[
@@ -507,7 +528,7 @@ fn sidebar_in(h: &Harness, session: &str) -> String {
 }
 
 #[test]
-fn space_folds_a_session_in_every_sidebar_and_it_persists() {
+fn clicking_a_session_folds_it_in_every_sidebar_and_it_persists() {
     let mut h = Harness::new();
     h.tmux(&["new-session", "-d", "-s", "u", "sleep 600"]);
     h.start_daemon();
@@ -520,10 +541,8 @@ fn space_folds_a_session_in_every_sidebar_and_it_persists() {
         screen.lines().any(|l| l.trim_end() == line)
     };
     eventually("u listed", || shows(&h, "t", "u"));
-    // Space acts on what u's sidebar has drawn, which may lag t's.
-    eventually("u listed in u's own sidebar", || shows(&h, "u", "u"));
-    // Unfocused, u's sidebar has its own window's pane selected, so Space folds u.
-    h.tmux(&["send-keys", "-t", &sidebar_in(&h, "u"), "Space"]);
+    let side = sidebar_in(&h, "u");
+    click(&h, &side, row_of(&h, &side, "u"));
     if !poll(Duration::from_secs(5), || shows(&h, "t", folded)) {
         let screen = |s| h.tmux(&["capture-pane", "-p", "-t", &sidebar_in(&h, s)]);
         panic!(
@@ -546,15 +565,46 @@ fn space_folds_a_session_in_every_sidebar_and_it_persists() {
     eventually("still folded after a daemon restart", || {
         shows(&h, "t", folded)
     });
-    // Space acts on what u's sidebar has drawn, so it must show the fold first.
-    eventually("u's own sidebar folded after the restart", || {
-        shows(&h, "u", folded)
-    });
-
-    // Folded away, u's sidebar selects u's header, so Space unfolds it.
-    h.tmux(&["send-keys", "-t", &sidebar_in(&h, "u"), "Space"]);
+    let side = sidebar_in(&h, "u");
+    click(&h, &side, row_of(&h, &side, folded));
     eventually("u unfolded", || shows(&h, "t", "u"));
     assert_eq!(collapsed_option(&h, "u"), "");
+}
+
+#[test]
+fn the_sidebar_hands_focus_back_after_a_click() {
+    let mut h = Harness::new();
+    h.start_daemon();
+    toggle(&h);
+    eventually("a sidebar", || sidebars(&h).len() == 1);
+    let side = sidebars(&h)[0].0.clone();
+    let shell = h.first_pane();
+    let active = |pane: &str| h.tmux(&["display-message", "-p", "-t", pane, "#{pane_active}"]);
+    h.tmux(&["select-pane", "-t", &side]);
+    assert_eq!(active(&side), "1");
+    click(&h, &side, row_of(&h, &side, "t"));
+    eventually("t folded", || collapsed_option(&h, "t") == "1");
+    eventually("focus back on the shell", || active(&shell) == "1");
+    assert_eq!(active(&side), "0");
+}
+
+#[test]
+fn focus_returns_to_an_earlier_pane_when_the_last_one_is_gone() {
+    let mut h = Harness::new();
+    h.start_daemon();
+    toggle(&h);
+    eventually("a sidebar", || sidebars(&h).len() == 1);
+    let side = sidebars(&h)[0].0.clone();
+    let shell = h.first_pane();
+    let extra = h.tmux(&["split-window", "-d", "-P", "-F", "#{pane_id}", "-t", &shell]);
+    h.tmux(&["select-pane", "-t", &extra]);
+    h.tmux(&["select-pane", "-t", &side]);
+    // tmux keeps a stack of earlier panes, so `select-pane -l` still has one to go back to.
+    h.tmux(&["kill-pane", "-t", &extra]);
+    let active = |pane: &str| h.tmux(&["display-message", "-p", "-t", pane, "#{pane_active}"]);
+    assert_eq!(active(&side), "1");
+    click(&h, &side, row_of(&h, &side, "t"));
+    eventually("focus on the shell", || active(&shell) == "1");
 }
 
 #[test]
@@ -595,23 +645,18 @@ fn own_and_selected_session_headers_are_bright_the_rest_dim() {
         "detached idle session v dim gold, not bold: {screen:?}"
     );
 
-    // Folded away, u's sidebar selects u's header.
+    // Folded away, u's sidebar highlights u's header.
     let side = sidebar_in(&h, "u");
-    // Space acts on what u's sidebar has drawn, which may lag t's.
-    eventually("u listed in u's own sidebar", || {
-        let screen = h.tmux(&["capture-pane", "-e", "-p", "-t", &side]);
-        header(&screen, "u").is_some()
-    });
-    h.tmux(&["send-keys", "-t", &side, "Space"]);
+    click(&h, &side, row_of(&h, &side, "u"));
     let folded = "u \u{25b8}";
-    eventually("u folded and selected", || {
+    eventually("u folded and highlighted", || {
         screen = h.tmux(&["capture-pane", "-e", "-p", "-t", &side]);
         style_of(&screen, folded).is_some()
     });
-    let selected = style_of(&screen, folded).unwrap();
+    let highlighted = style_of(&screen, folded).unwrap();
     assert!(
-        selected.bold && selected.fg.as_deref() == Some(GOLD),
-        "selected session bright gold and bold, like status-left: {screen:?}"
+        highlighted.bold && highlighted.fg.as_deref() == Some(GOLD),
+        "the own folded session bright gold and bold, like status-left: {screen:?}"
     );
     let rest = header(&screen, "t").unwrap();
     assert!(

@@ -7,6 +7,7 @@ Status: early development. See `fixtures/CALIBRATION.md` for verified agent beha
 ## Requirements
 
 - tmux 3.3 or newer, with `set -g focus-events on` (without it, simul cannot tell whether you are looking at a pane)
+- `set -g mouse on` in tmux, since the sidebar is driven by clicks
 - macOS, Linux, or WSL
 - `curl`, `tar`, and `sha256sum` or `shasum`, to download and verify the prebuilt binary (macOS and Linux on x86_64 or arm64; WSL uses the Linux build)
 
@@ -75,20 +76,18 @@ Then add `run-shell /path/to/simul/simul.tmux` to `tmux.conf`. When `target/rele
 | `simul ls [--json]` | Lists tracked agents.                                                    |
 | `simul doctor`      | Checks tmux, the daemon, hooks, and notifications.                       |
 
-Sidebar keys:
+The sidebar is for the mouse. It never keeps focus: tmux hands focus straight back to the pane you were in.
 
-| Key                         | Action                                        |
-| --------------------------- | --------------------------------------------- |
-| `j` / `k`                   | Move                                          |
-| Enter or click              | Jump to the window or pane                    |
-| Enter or click on a session | Collapse or expand the session                |
-| Space                       | Collapse or expand the selected row's session |
-| `/`                         | Filter by text                                |
-| `f`                         | Switch between the `all` and `status` views   |
+| Mouse                       | Action                                      |
+| --------------------------- | ------------------------------------------- |
+| Click a window or pane      | Jump to it                                  |
+| Click a session             | Collapse or expand the session              |
+| Click the `view:` footer    | Switch between the `all` and `status` views |
+| Wheel                       | Scroll                                      |
 
-The sidebar takes a quarter of its window's width and returns to it after you drag its border or resize the terminal. It lists every session, every `window_index:window_name` in it, and every pane in each window, whether or not an agent runs there. An agent pane is one line: a state symbol, where it is, and time in the current state (the agent name stands in when where it is is unknown); any other pane shows only where it is. Where a pane is reads like a starship prompt: in a git repo, the branch (or `HEAD`) followed by status markers, rechecked every 5 seconds while the sidebar is shown; elsewhere, its directory with each parent cut to one letter, from home when under it (`~/dev/simul/examples` is `/d/s/examples`, and home is `~`). The text filter matches session and window names, where panes are, pane commands, and agent details. That is the `all` view; `f` switches to the `status` view, which lists only agents, without session or window headers, ordered `blocked`, `asking`, `failed`, `done`, `working`, `idle`, then `unknown`, and within a state, the one in it longest first. Under each agent it shows the session and window. While the sidebar isn't focused, it highlights the active pane of its own window. Only what is inactive is dimmed: a pane that is neither its window's active pane nor at work (an agent whose state is known and not idle, or a process running, open, or newly finished), a window that is neither its session's current window nor holds work, and a session no client shows that holds no work. Active session names are in the bright gold of tmux's status-left, inactive ones a dim gold; the highlighted row and the sidebar's own session and window are bold; state symbols keep their colors. Focusing the sidebar keeps that row, or selects the first row if none was highlighted.
+The sidebar takes a quarter of its window's width and returns to it after you drag its border or resize the terminal. It lists every session, every `window_index:window_name` in it, and every pane in each window, whether or not an agent runs there. An agent pane is one line: a state symbol, where it is, and time in the current state (the agent name stands in when where it is is unknown); any other pane shows only where it is. Where a pane is reads like a starship prompt: in a git repo, the branch (or `HEAD`) followed by status markers, rechecked every 5 seconds while the sidebar is shown; elsewhere, its directory with each parent cut to one letter, from home when under it (`~/dev/simul/examples` is `/d/s/examples`, and home is `~`). That is the `all` view; the footer switches to the `status` view, which lists only agents, without session or window headers, ordered `blocked`, `asking`, `failed`, `done`, `working`, `idle`, then `unknown`, and within a state, the one in it longest first. Under each agent it shows the session and window. It highlights the pane you are in: the active pane of its own window. Only what is inactive is dimmed: a pane that is neither its window's active pane nor at work (an agent whose state is known and not idle, or a process running, open, or newly finished), a window that is neither its session's current window nor holds work, and a session no client shows that holds no work. Active session names are in the bright gold of tmux's status-left, inactive ones a dim gold; the highlighted row and the sidebar's own session and window are bold; state symbols keep their colors.
 
-A collapsed session shrinks to its header, `▸`, and a count of its agents in each state, in the `status` view's order, then of its finished and running panes (`me ▸ ⊘1 ?1 ●2 ■1 ▶2`), so a blocked or asking agent or an unseen finish stays visible. Collapsing applies to the sidebar in every window. simul remembers it in the tmux session option `@simul-collapsed`, so it lasts through toggling the sidebar and restarting the daemon, and goes away with the session. Only the `all` view folds sessions, and while the text filter is active they open so no match is hidden.
+A collapsed session shrinks to its header, `▸`, and a count of its agents in each state, in the `status` view's order, then of its finished and running panes (`me ▸ ⊘1 ?1 ●2 ■1 ▶2`), so a blocked or asking agent or an unseen finish stays visible. Collapsing applies to the sidebar in every window. simul remembers it in the tmux session option `@simul-collapsed`, so it lasts through toggling the sidebar and restarting the daemon, and goes away with the session. Only the `all` view folds sessions.
 
 The sidebar repeats tmux's session name and window list, so while it is shown simul cuts the first status line (`status-format[0]`) down to `status-right` and restores it when you toggle the sidebar off. Further status lines, such as `status-format[1]`, keep running. Set `hide_status = false` under `[sidebar]` to keep the line as is.
 
