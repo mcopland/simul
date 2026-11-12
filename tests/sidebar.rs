@@ -817,3 +817,20 @@ fn hide_status_false_leaves_status_line() {
     assert_eq!(sidebars(&h).len(), 1);
     assert_eq!(status_format(&h), "#S custom");
 }
+
+#[test]
+fn status_line_restored_when_a_new_daemon_finds_no_sidebar() {
+    // The daemon was killed while the sidebar was shown, and its sidebars were closed by hand.
+    let mut h = Harness::new();
+    h.tmux(&["set-option", "-g", "status-format[0]", "#S custom"]);
+    h.start_daemon();
+    toggle(&h);
+    h.stop_daemon();
+    for (pane, ..) in sidebars(&h) {
+        h.tmux(&["kill-pane", "-t", &pane]);
+    }
+    assert!(!status_format(&h).contains("#S"), "{}", status_format(&h));
+    h.start_daemon();
+    eventually("status line restored", || status_format(&h) == "#S custom");
+    assert_eq!(h.tmux(&["show-options", "-gq", "@simul-status-format"]), "");
+}

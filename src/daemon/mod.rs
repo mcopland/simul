@@ -456,6 +456,13 @@ impl Daemon {
             }
             self.restart_stale_sidebars().await;
             self.set_layout_hook(self.sidebar.on).await;
+            // An earlier daemon may have hidden the status line and died before its sidebars
+            // were closed; with none left, no toggle-off would ever bring the line back.
+            if !self.sidebar.on
+                && let Err(e) = self.restore_status().await
+            {
+                log!("failed to restore the status line: {e:#}");
+            }
         }
         let transitions = self.store.reconcile(&snap, now);
         self.windows = tmux::windows(&snap);
