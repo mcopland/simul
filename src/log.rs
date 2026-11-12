@@ -61,8 +61,17 @@ impl Sink {
 
     fn write(&mut self, line: &[u8]) -> Result<()> {
         let len = line.len() as u64;
-        if self.size > 0 && self.size + len > self.cap {
-            self.rotate()?;
+        if self.size > 0
+            && self.size + len > self.cap
+            && let Err(e) = self.rotate()
+        {
+            // Stderr is /dev/null for a detached daemon, so the current file, still open,
+            // takes the error and later lines; the next try waits for another cap's worth.
+            let note = format!("{} {e:#}\n", crate::protocol::now_ms() / 1000);
+            self.size = 0;
+            self.file
+                .write_all(note.as_bytes())
+                .with_context(|| format!("failed to write daemon log: {}", self.path.display()))?;
         }
         self.file
             .write_all(line)
@@ -142,6 +151,27 @@ mod tests {
         sink.write(b"new\n").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"new\n");
         assert_eq!(size(&dir.path().join("x.log.1")), 150);
+    }
+
+    #[test]
+    fn a_failed_rotation_keeps_logging_to_the_current_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir(&logs).unwrap();
+        let path = logs.join("x.log");
+        let mut sink = Sink::open(&path, 50).unwrap();
+        sink.write(&[b'a'; 48]).unwrap();
+        // A read-only directory refuses the rename.
+        std::fs::set_permissions(&logs, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = sink.write(b"after\n");
+        let later = sink.write(b"later\n");
+        std::fs::set_permissions(&logs, std::fs::Permissions::from_mode(0o700)).unwrap();
+        result.unwrap();
+        later.unwrap();
+        let text = String::from_utf8(std::fs::read(&path).unwrap()).unwrap();
+        assert!(text.contains("failed to rotate"), "{text}");
+        assert!(text.ends_with("after\nlater\n"), "{text}");
+        assert!(!logs.join("x.log.1").exists());
     }
 
     #[test]
