@@ -32,6 +32,18 @@ enum Command {
         #[arg(long, conflicts_with = "project")]
         settings: Option<PathBuf>,
     },
+    /// Remove simul's hooks from an agent's settings, leaving every other hook.
+    UninstallHooks {
+        #[arg(value_parser = ["claude", "kiro"])]
+        agent: String,
+        /// Remove from this directory's files: ./.claude/settings.local.json for Claude,
+        /// ./.kiro/hooks/simul.json and its git exclude line for Kiro.
+        #[arg(long)]
+        project: bool,
+        /// Remove from this file (Claude settings, or the Kiro hook file).
+        #[arg(long, conflicts_with = "project")]
+        settings: Option<PathBuf>,
+    },
     /// Check the tmux setup, daemon, and installed hooks.
     Doctor,
     /// Show or hide the sidebar in every window.
@@ -86,6 +98,11 @@ fn run(cli: Cli) -> Result<()> {
             project,
             settings,
         } => cli::install_hooks::run(&agent, project, settings),
+        Command::UninstallHooks {
+            agent,
+            project,
+            settings,
+        } => cli::install_hooks::run_uninstall(&agent, project, settings),
         Command::Doctor => cli::doctor::run(),
         Command::Toggle => {
             let _: Toggled = client::request(&paths::client_socket()?, &Request::Toggle)?;

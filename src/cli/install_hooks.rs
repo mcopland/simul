@@ -24,14 +24,55 @@ pub fn run(agent: &str, project: bool, settings: Option<PathBuf>) -> Result<()> 
     }
 }
 
-fn run_kiro(project: bool, file: Option<PathBuf>) -> Result<()> {
-    let path = match (file, project) {
-        (Some(p), _) => p,
+/// `simul uninstall-hooks`: removes what `run` installed for the same arguments.
+pub fn run_uninstall(agent: &str, project: bool, settings: Option<PathBuf>) -> Result<()> {
+    match agent {
+        "claude" => {
+            let path = claude_settings_path(project, settings)?;
+            match uninstall(&path)? {
+                0 => println!("no simul hooks in {}", path.display()),
+                n => println!("removed {n} Claude hooks from {}", path.display()),
+            }
+        }
+        "kiro" => {
+            let path = kiro_path(project, settings)?;
+            if uninstall_kiro(&path)? {
+                println!("removed {}", path.display());
+            } else {
+                println!("no simul hook file at {}", path.display());
+            }
+            if project {
+                unexclude_project_hooks()?;
+            }
+        }
+        _ => bail!("uninstall-hooks: unknown agent {agent} (expected claude or kiro)"),
+    }
+    Ok(())
+}
+
+fn claude_settings_path(project: bool, settings: Option<PathBuf>) -> Result<PathBuf> {
+    match (settings, project) {
+        (Some(p), _) => Ok(p),
         // Local, not shared: the hook embeds this machine's absolute binary path.
-        (None, true) => PathBuf::from(KIRO_PROJECT_FILE),
+        (None, true) => Ok(PathBuf::from(".claude/settings.local.json")),
+        (None, false) => env_var("HOME")
+            .map(|h| PathBuf::from(h).join(".claude/settings.json"))
+            .context("cannot locate ~/.claude/settings.json: $HOME unset"),
+    }
+}
+
+fn kiro_path(project: bool, file: Option<PathBuf>) -> Result<PathBuf> {
+    match (file, project) {
+        (Some(p), _) => Ok(p),
+        // Local, not shared: the hook embeds this machine's absolute binary path.
+        (None, true) => Ok(PathBuf::from(KIRO_PROJECT_FILE)),
         (None, false) => kiro_hook_file(env_var)
-            .context("cannot locate ~/.kiro/hooks: $KIRO_HOME and $HOME unset")?,
-    };
+            .context("cannot locate ~/.kiro/hooks: $KIRO_HOME and $HOME unset"),
+    }
+}
+
+fn run_kiro(project: bool, file: Option<PathBuf>) -> Result<()> {
+    let path = kiro_path(project, file)?;
     let exe = std::env::current_exe().context("failed to locate the simul binary")?;
     let written = install_kiro(&path, &exe)?;
     println!(
@@ -60,15 +101,18 @@ fn exclude_project_hooks() -> Result<()> {
     Ok(())
 }
 
+fn unexclude_project_hooks() -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read the current directory")?;
+    if let Some(exclude) = git_exclude_file(&cwd)?
+        && remove_exclude(&exclude, KIRO_EXCLUDE_PATTERN)?
+    {
+        println!("removed {KIRO_EXCLUDE_PATTERN} from {}", exclude.display());
+    }
+    Ok(())
+}
+
 fn run_claude(project: bool, settings: Option<PathBuf>) -> Result<()> {
-    let path = match (settings, project) {
-        (Some(p), _) => p,
-        // Local, not shared: the hook embeds this machine's absolute binary path.
-        (None, true) => PathBuf::from(".claude/settings.local.json"),
-        (None, false) => env_var("HOME")
-            .map(|h| PathBuf::from(h).join(".claude/settings.json"))
-            .context("cannot locate ~/.claude/settings.json: $HOME unset")?,
-    };
+    let path = claude_settings_path(project, settings)?;
     let exe = std::env::current_exe().context("failed to locate the simul binary")?;
     let written = install(&path, &exe)?;
     println!(
@@ -205,33 +249,40 @@ pub fn kiro_managed(file: &Value) -> Vec<(String, String)> {
 }
 
 /// Writes simul's Kiro hook file, replacing an earlier one but never a file with other hooks.
+/// Fails unless the Kiro hook file at `path` holds only simul's hooks; `verb` names the refused
+/// action in the error.
+fn check_kiro_file_is_ours(path: &Path, verb: &str) -> Result<()> {
+    let old = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let old: Value = serde_json::from_str(&old).with_context(|| {
+        format!(
+            "refusing to {verb} {}: not a JSON hook file",
+            path.display()
+        )
+    })?;
+    let hooks = old.get("hooks").and_then(Value::as_array);
+    let total = hooks.map_or(0, Vec::len);
+    let ours = hooks
+        .into_iter()
+        .flatten()
+        .filter(|h| {
+            h.pointer("/action/command")
+                .and_then(Value::as_str)
+                .is_some_and(|c| c.ends_with(MARKER))
+        })
+        .count();
+    if ours < total {
+        bail!(
+            "refusing to {verb} {}: it holds hooks simul does not manage",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 pub fn install_kiro(path: &Path, exe: &Path) -> Result<PathBuf> {
     if exists(path)? {
-        let old = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        let old: Value = serde_json::from_str(&old).with_context(|| {
-            format!(
-                "refusing to replace {}: not a JSON hook file",
-                path.display()
-            )
-        })?;
-        let hooks = old.get("hooks").and_then(Value::as_array);
-        let total = hooks.map_or(0, Vec::len);
-        let ours = hooks
-            .into_iter()
-            .flatten()
-            .filter(|h| {
-                h.pointer("/action/command")
-                    .and_then(Value::as_str)
-                    .is_some_and(|c| c.ends_with(MARKER))
-            })
-            .count();
-        if ours < total {
-            bail!(
-                "refusing to replace {}: it holds hooks simul does not manage",
-                path.display()
-            );
-        }
+        check_kiro_file_is_ours(path, "replace")?;
     }
     let mut text =
         serde_json::to_string_pretty(&kiro_hooks(exe)).context("failed to encode Kiro hooks")?;
@@ -287,6 +338,25 @@ pub fn add_exclude(file: &Path, entry: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Drops lines equal to `entry` from an exclude file; true if any were removed.
+pub fn remove_exclude(file: &Path, entry: &str) -> Result<bool> {
+    let text = match std::fs::read_to_string(file) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e).with_context(|| format!("failed to read {}", file.display())),
+    };
+    let kept: Vec<&str> = text.lines().filter(|l| l.trim() != entry).collect();
+    if kept.len() == text.lines().count() {
+        return Ok(false);
+    }
+    let mut out = kept.join("\n");
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    std::fs::write(file, out).with_context(|| format!("failed to write {}", file.display()))?;
+    Ok(true)
+}
+
 /// Merges hooks into the settings file, writing through a symlink rather than replacing it.
 pub fn install(path: &Path, exe: &Path) -> Result<PathBuf> {
     let settings = if exists(path)? {
@@ -302,6 +372,48 @@ pub fn install(path: &Path, exe: &Path) -> Result<PathBuf> {
     let mut text = serde_json::to_string_pretty(&merged).context("failed to encode settings")?;
     text.push('\n');
     replace_file(path, &text, true)
+}
+
+/// Removes simul's hooks from a Claude settings file, and the `hooks` table if that empties it.
+/// Returns how many were removed; a missing file, or one without them, is left untouched.
+pub fn uninstall(path: &Path) -> Result<usize> {
+    if !exists(path)? {
+        return Ok(0);
+    }
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let mut settings: Value = serde_json::from_str(&text)
+        .with_context(|| format!("invalid JSON in {}", path.display()))?;
+    let removed = managed(&settings).len();
+    if removed == 0 {
+        return Ok(0);
+    }
+    strip_managed(&mut settings);
+    if let Some(root) = settings.as_object_mut()
+        && root
+            .get("hooks")
+            .and_then(Value::as_object)
+            .is_some_and(serde_json::Map::is_empty)
+    {
+        root.remove("hooks");
+    }
+    let mut text = serde_json::to_string_pretty(&settings).context("failed to encode settings")?;
+    text.push('\n');
+    replace_file(path, &text, true)?;
+    Ok(removed)
+}
+
+/// Deletes simul's Kiro hook file, refusing one that holds other hooks. A symlink is removed
+/// itself, leaving the file it points to. Returns false if there was no file.
+pub fn uninstall_kiro(path: &Path) -> Result<bool> {
+    if std::fs::symlink_metadata(path).is_err() {
+        return Ok(false);
+    }
+    if path.exists() {
+        check_kiro_file_is_ours(path, "remove")?;
+    }
+    std::fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))?;
+    Ok(true)
 }
 
 /// Whether `path` exists, following symlinks. A symlink whose target is missing is an error:
@@ -658,6 +770,71 @@ mod tests {
                 .is_symlink()
         );
         assert_eq!(read_json(&real), kiro_hooks(Path::new(EXE)));
+    }
+
+    #[test]
+    fn uninstall_removes_only_simul_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, user_settings().to_string()).unwrap();
+        install(&path, Path::new(EXE)).unwrap();
+        assert_eq!(uninstall(&path).unwrap(), claude::EVENTS.len());
+        assert_eq!(read_json(&path), user_settings());
+        assert_eq!(uninstall(&path).unwrap(), 0, "nothing left to remove");
+        assert_eq!(read_json(&path), user_settings());
+    }
+
+    #[test]
+    fn uninstall_drops_the_hooks_table_it_emptied() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"model": "opus"}"#).unwrap();
+        install(&path, Path::new(EXE)).unwrap();
+        uninstall(&path).unwrap();
+        assert_eq!(read_json(&path), json!({"model": "opus"}));
+    }
+
+    #[test]
+    fn uninstall_leaves_missing_and_invalid_files_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        assert_eq!(uninstall(&path).unwrap(), 0);
+        assert!(!path.exists(), "no file is created");
+        std::fs::write(&path, "{ not json").unwrap();
+        let err = format!("{:#}", uninstall(&path).unwrap_err());
+        assert!(err.contains("settings.json"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn uninstall_kiro_removes_only_a_simul_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("simul.json");
+        assert!(!uninstall_kiro(&path).unwrap(), "nothing to remove");
+        install_kiro(&path, Path::new(EXE)).unwrap();
+        assert!(uninstall_kiro(&path).unwrap());
+        assert!(!path.exists());
+
+        let mine = r#"{"version": "v1", "hooks": [{"name": "fmt", "trigger": "Stop", "action": {"type": "command", "command": "/u/fmt.sh"}}]}"#;
+        std::fs::write(&path, mine).unwrap();
+        let err = format!("{:#}", uninstall_kiro(&path).unwrap_err());
+        assert!(err.contains("simul.json"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), mine);
+    }
+
+    #[test]
+    fn remove_exclude_drops_only_that_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("info/exclude");
+        assert!(
+            !remove_exclude(&file, KIRO_EXCLUDE_PATTERN).unwrap(),
+            "no file"
+        );
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, format!("# ignore\n{KIRO_EXCLUDE_PATTERN}\n*.log\n")).unwrap();
+        assert!(remove_exclude(&file, KIRO_EXCLUDE_PATTERN).unwrap());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "# ignore\n*.log\n");
+        assert!(!remove_exclude(&file, KIRO_EXCLUDE_PATTERN).unwrap());
     }
 
     #[test]

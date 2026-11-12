@@ -68,6 +68,29 @@ ln -s "$PWD/target/release/simul" ~/.cargo/bin/simul  # or any directory on your
 
 Then add `run-shell /path/to/simul/simul.tmux` to `tmux.conf`. When `target/release/simul` exists, the plugin uses it and skips the download, and rebuilds update the symlink in place. A build from source doesn't update itself; after a rebuild, reload your tmux config.
 
+### Uninstall
+
+Remove the hooks first, while `simul` is still installed. Only entries tagged `#simul-managed` are removed:
+
+```sh
+simul uninstall-hooks claude            # ~/.claude/settings.json
+simul uninstall-hooks claude --project  # ./.claude/settings.local.json, in each project you installed into
+simul uninstall-hooks kiro              # deletes ~/.kiro/hooks/simul.json
+simul uninstall-hooks kiro --project    # deletes ./.kiro/hooks/simul.json and its .git/info/exclude line
+```
+
+Toggle the sidebar off so tmux gets its status line back. Then delete the `set -g @plugin 'mcopland/simul'` line from `tmux.conf` and press `prefix + alt + u`, which makes TPM delete the plugin directory. Without TPM, delete the `run-shell` line and the checkout instead. Finally, stop the daemon and remove what is left:
+
+```sh
+pkill -f 'simul daemon'
+rm ~/.local/bin/simul                   # the PATH symlink you made at install
+rm -r "$XDG_RUNTIME_DIR/simul"          # daemon socket and log, if XDG_RUNTIME_DIR is set
+rm -r "/tmp/simul-$(id -u)"             # otherwise
+rm -r ~/.config/simul                   # config, if you made one
+```
+
+The Claude settings backup, `settings.json.simul-bak`, stays next to the settings file; delete it once you no longer need it. The toggle key stays bound until tmux restarts, or until you unbind it with `tmux unbind-key a` (or your `@simul-key`).
+
 ## Use
 
 | Command             | What it does                                                             |
@@ -78,12 +101,12 @@ Then add `run-shell /path/to/simul/simul.tmux` to `tmux.conf`. When `target/rele
 
 The sidebar is for the mouse. It never keeps focus: tmux hands focus straight back to the pane you were in.
 
-| Mouse                       | Action                                      |
-| --------------------------- | ------------------------------------------- |
-| Click a window or pane      | Jump to it                                  |
-| Click a session             | Collapse or expand the session              |
-| Click the `view:` footer    | Switch between the `all` and `status` views |
-| Wheel                       | Scroll                                      |
+| Mouse                    | Action                                      |
+| ------------------------ | ------------------------------------------- |
+| Click a window or pane   | Jump to it                                  |
+| Click a session          | Collapse or expand the session              |
+| Click the `view:` footer | Switch between the `all` and `status` views |
+| Wheel                    | Scroll                                      |
 
 The sidebar takes a quarter of its window's width and returns to it after you drag its border or resize the terminal. It lists every session, every `window_index:window_name` in it, and every pane in each window, whether or not an agent runs there. An agent pane is one line: a state symbol, where it is, and time in the current state (the agent name stands in when where it is is unknown); any other pane shows only where it is. Where a pane is reads like a starship prompt: in a git repo, the branch (or `HEAD`) followed by status markers, rechecked every 5 seconds while the sidebar is shown; elsewhere, its directory with each parent cut to one letter, from home when under it (`~/dev/simul/examples` is `/d/s/examples`, and home is `~`). That is the `all` view; the footer switches to the `status` view, which lists only agents, without session or window headers, ordered `blocked`, `asking`, `failed`, `done`, `working`, `idle`, then `unknown`, and within a state, the one in it longest first. Under each agent it shows the session and window. Rows come in three tones. A pane where something runs (any agent, or a process running, open, or newly finished) is drawn at full color, and so are its window and session; a pane at a shell prompt, a window where nothing runs, and a session where nothing runs are dimmed. The pane you are in, the active pane of the sidebar's own window, is bold, with its window and session. Session names are in the bright gold of tmux's status-left, or a dim gold when nothing runs there; state symbols keep their colors.
 
@@ -115,15 +138,15 @@ A pane without an agent gets a symbol while its foreground process isn't a shell
 
 Git status markers follow the branch in this order:
 
-| Marker      | Meaning                                       |
-| ----------- | --------------------------------------------- |
-| `!`         | Merge conflicts                               |
-| `⌃` `⌄` `⇕` | Ahead of, behind, or diverged from upstream   |
-| `+`         | Staged changes                                |
-| `-`         | Deleted files                                 |
-| `*`         | Modified files                                |
-| `?`         | Untracked files                               |
-| `≡`         | Stashed changes                               |
+| Marker      | Meaning                                     |
+| ----------- | ------------------------------------------- |
+| `!`         | Merge conflicts                             |
+| `⌃` `⌄` `⇕` | Ahead of, behind, or diverged from upstream |
+| `+`         | Staged changes                              |
+| `-`         | Deleted files                               |
+| `*`         | Modified files                              |
+| `?`         | Untracked files                             |
+| `≡`         | Stashed changes                             |
 
 When an agent becomes `blocked`, `asking`, `done`, or `failed` in a pane you are not looking at, simul shows a message in the tmux status line; a pane without an agent shows only its sidebar symbol. Desktop notifications and the terminal bell are off by default; turn them on under `[notify]`.
 
