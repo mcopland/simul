@@ -1,15 +1,23 @@
 name: ci
 
-# Actions are pinned to the same commit SHAs as release.yml.
+# Actions are pinned to commit SHAs, the same ones release.yml uses where both use one.
 on:
   push:
     branches: [main]
+  # Dependabot proposes updates as pull requests.
+  pull_request:
   workflow_dispatch:
   # release.yml runs these checks on the tagged commit before it builds anything.
   workflow_call:
 
 permissions:
   contents: read
+
+# A newer push to a pull request supersedes its older run. Runs on main are kept, so every
+# commit there gets a full result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
@@ -24,6 +32,11 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
+      # Only main saves the cache, so a pull request can't plant build output that later runs
+      # restore.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # The integration tests drive a real tmux server and need tmux 3.3 or newer; the
       # plain-pane test runs zsh, which macOS ships and Ubuntu doesn't.
       - name: Install tmux and zsh
@@ -36,6 +49,6 @@ jobs:
           fi
           tmux -V
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --locked --all-targets -- -D warnings
       # Every suite runs even after one fails, so a single run shows all failures.
-      - run: cargo test --no-fail-fast
+      - run: cargo test --locked --no-fail-fast
