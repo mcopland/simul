@@ -29,13 +29,18 @@ impl Plugin {
                  case \"$1\" in\n\
                  -V) echo 'tmux 3.5a' ;;\n\
                  display-message) [ \"$2\" = -p ] && echo /fake/socket ;;\n\
-                 show-option) [ \"$3\" = @simul-bin ] && cat '{}' 2>/dev/null ;;\n\
+                 show-option) cat '{opts}'/\"$3\" 2>/dev/null ;;\n\
+                 set-option) printf '%s\\n' \"$4\" > '{opts}'/\"$3\" ;;\n\
+                 list-keys) cat '{keys}'/\"$4\" 2>/dev/null ;;\n\
                  esac\n\
                  exit 0\n",
                 dir.path().join("tmux.log").display(),
-                dir.path().join("simul-bin").display()
+                opts = dir.path().join("opts").display(),
+                keys = dir.path().join("keys").display(),
             ),
         );
+        fs::create_dir_all(dir.path().join("opts")).unwrap();
+        fs::create_dir_all(dir.path().join("keys")).unwrap();
         Plugin { dir }
     }
 
@@ -112,6 +117,30 @@ impl Plugin {
             .unwrap();
         assert!(out.status.success(), "simul.tmux failed: {}", stderr(&out));
         fs::read_to_string(self.dir.path().join("tmux.log")).unwrap_or_default()
+    }
+
+    /// Sets a global option in the stub tmux, as `set -g` in tmux.conf would.
+    fn set_option(&self, name: &str, value: &str) {
+        fs::write(
+            self.dir.path().join("opts").join(name),
+            format!("{value}\n"),
+        )
+        .unwrap();
+    }
+
+    fn option(&self, name: &str) -> Option<String> {
+        fs::read_to_string(self.dir.path().join("opts").join(name))
+            .ok()
+            .map(|v| v.trim_end().to_owned())
+    }
+
+    /// What the stub's `list-keys -T prefix <key>` prints.
+    fn bind(&self, key: &str, listing: &str) {
+        fs::write(
+            self.dir.path().join("keys").join(key),
+            format!("{listing}\n"),
+        )
+        .unwrap();
     }
 
     fn stubs(&self) -> PathBuf {
@@ -318,11 +347,7 @@ fn plugin_uses_the_simul_bin_override_without_downloading() {
     let dev = p.dir.path().join("dev/simul");
     fs::create_dir_all(dev.parent().unwrap()).unwrap();
     write_stub(&dev, "0.0.0-dev");
-    fs::write(
-        p.dir.path().join("simul-bin"),
-        format!("{}\n", dev.display()),
-    )
-    .unwrap();
+    p.set_option("@simul-bin", &dev.display().to_string());
 
     let log = p.load_plugin();
 
@@ -344,7 +369,7 @@ fn plugin_uses_the_simul_bin_override_without_downloading() {
 #[test]
 fn plugin_reports_a_simul_bin_override_that_cannot_run() {
     let p = Plugin::new();
-    fs::write(p.dir.path().join("simul-bin"), "/no/such/simul\n").unwrap();
+    p.set_option("@simul-bin", "/no/such/simul");
 
     let log = p.load_plugin();
 
@@ -426,4 +451,67 @@ fn plugin_uses_dev_build_without_downloading() {
             .any(|l| l.starts_with("bind-key a") && l.contains(&dev)),
         "{log}"
     );
+}
+
+fn unbinds(log: &str) -> Vec<&str> {
+    log.lines()
+        .filter(|l| l.starts_with("unbind-key"))
+        .collect()
+}
+
+#[test]
+fn plugin_records_the_bound_key() {
+    let p = Plugin::new();
+    p.publish("aarch64-apple-darwin", VERSION, None);
+    let log = p.load_plugin();
+    assert_eq!(p.option("@simul-bound-key").as_deref(), Some("a"), "{log}");
+    assert!(unbinds(&log).is_empty(), "{log}");
+}
+
+#[test]
+fn plugin_unbinds_the_previous_key_when_it_changes() {
+    let p = Plugin::new();
+    p.publish("aarch64-apple-darwin", VERSION, None);
+    p.set_option("@simul-bound-key", "a");
+    p.set_option("@simul-key", "s");
+    p.bind(
+        "a",
+        "bind-key -T prefix a run-shell -b \"'/old/simul' toggle\"",
+    );
+
+    let log = p.load_plugin();
+
+    assert_eq!(unbinds(&log), ["unbind-key -T prefix a"], "{log}");
+    assert!(log.lines().any(|l| l.starts_with("bind-key s")), "{log}");
+    assert_eq!(p.option("@simul-bound-key").as_deref(), Some("s"));
+}
+
+#[test]
+fn plugin_leaves_a_previous_key_the_user_reassigned() {
+    let p = Plugin::new();
+    p.publish("aarch64-apple-darwin", VERSION, None);
+    p.set_option("@simul-bound-key", "a");
+    p.set_option("@simul-key", "s");
+    p.bind("a", "bind-key -T prefix a select-pane -L");
+
+    let log = p.load_plugin();
+
+    assert!(unbinds(&log).is_empty(), "{log}");
+    assert!(log.lines().any(|l| l.starts_with("bind-key s")), "{log}");
+}
+
+#[test]
+fn plugin_keeps_an_unchanged_key_bound() {
+    let p = Plugin::new();
+    p.publish("aarch64-apple-darwin", VERSION, None);
+    p.set_option("@simul-bound-key", "a");
+    p.bind(
+        "a",
+        "bind-key -T prefix a run-shell -b \"'/old/simul' toggle\"",
+    );
+
+    let log = p.load_plugin();
+
+    assert!(unbinds(&log).is_empty(), "{log}");
+    assert!(!log.lines().any(|l| l.starts_with("list-keys")), "{log}");
 }

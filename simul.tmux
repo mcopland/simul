@@ -63,9 +63,18 @@ main() {
 	# --replace hands over from a daemon of another build, such as the one before an update.
 	tmux run-shell -b "'$bin' daemon --replace --tmux-socket '$socket' >/dev/null 2>&1"
 
-	local key
+	local key old
 	key=$(tmux show-option -gqv @simul-key)
-	tmux bind-key "${key:-a}" run-shell -b "'$bin' toggle"
+	key=${key:-a}
+	old=$(tmux show-option -gqv @simul-bound-key)
+	if [ -n "$old" ] && [ "$old" != "$key" ]; then
+		# Only while the old key still toggles simul; the user may have rebound it since.
+		case "$(tmux list-keys -T prefix "$old" 2>/dev/null)" in
+		*simul*" toggle"*) tmux unbind-key -T prefix "$old" ;;
+		esac
+	fi
+	tmux bind-key "$key" run-shell -b "'$bin' toggle"
+	tmux set-option -g @simul-bound-key "$key"
 }
 
 main
