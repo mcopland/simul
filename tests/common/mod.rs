@@ -121,14 +121,12 @@ impl Harness {
     /// Starts `cmd` (from `simul_at`) as the daemon with `args` after `daemon`, and waits for
     /// its socket. A daemon it replaces exits on its own.
     pub fn start_daemon_with(&mut self, mut cmd: Command, args: &[&str]) {
-        let child = cmd
-            .arg("daemon")
+        cmd.arg("daemon")
             .args(args)
             .arg("--tmux-socket")
             .arg(&self.tmux_sock)
-            .stdin(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stdin(Stdio::null());
+        let child = spawn_retrying(&mut cmd);
         self.daemons.push(child);
         eventually("daemon socket", || {
             UnixStream::connect(&self.simul_sock).is_ok()
@@ -379,6 +377,26 @@ pub fn git_repo(dir: &Path, branch: &str) {
     };
     git(&["init", "-q", "-b", branch]);
     git(&["commit", "-q", "--allow-empty", "-m", "chore: init"]);
+}
+
+/// Spawns `cmd`, retrying while Linux reports its binary busy. A binary a test just copied
+/// stays open for writing in any child another test thread forked during the copy, until
+/// that child execs, and Linux refuses to run a file open for writing (ETXTBSY).
+pub fn spawn_retrying(cmd: &mut Command) -> Child {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match cmd.spawn() {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            result => {
+                return result.unwrap_or_else(|e| panic!("failed to spawn {cmd:?}: {e}"));
+            }
+        }
+    }
 }
 
 pub fn poll(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
