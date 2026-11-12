@@ -563,3 +563,19 @@ fn plugin_quotes_a_path_with_a_single_quote() {
         );
     }
 }
+
+#[test]
+fn refuses_plain_http_downloads() {
+    let p = Plugin::new();
+    let out = Command::new("bash")
+        .arg(p.root().join("scripts/install-binary.sh"))
+        .env("SIMUL_OS", "Darwin")
+        .env("SIMUL_ARCH", "arm64")
+        .env("SIMUL_RELEASE_BASE_URL", "http://127.0.0.1:9/releases")
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    // curl's exit 1 is an unsupported protocol: it refused before connecting.
+    assert!(stderr(&out).contains("curl: (1)"), "{}", stderr(&out));
+    assert!(!p.bin().exists());
+}

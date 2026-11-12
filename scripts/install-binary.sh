@@ -45,7 +45,11 @@ sha256_of() {
 }
 
 fetch() {
-	curl -fsSL --connect-timeout 10 --max-time 120 --retry 2 -o "$1" "$2"
+	local proto='=https'
+	# Tests serve releases over file:// through the base URL override.
+	[ -z "${SIMUL_RELEASE_BASE_URL:-}" ] || proto='=https,file'
+	curl -fsSL --proto "$proto" --proto-redir '=https' \
+		--connect-timeout 10 --max-time 120 --retry 2 -o "$1" "$2"
 }
 
 main() {
