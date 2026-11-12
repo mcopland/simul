@@ -163,9 +163,14 @@ fn release_checkout(unreleased: &str) -> tempfile::TempDir {
 }
 
 fn bump(root: &Path, version: &str) -> Output {
+    bump_with_path(root, version, &std::env::var("PATH").unwrap())
+}
+
+fn bump_with_path(root: &Path, version: &str, path: &str) -> Output {
     Command::new("bash")
         .arg(root.join("scripts/bump-version.sh"))
         .arg(version)
+        .env("PATH", path)
         .env("GIT_CONFIG_COUNT", "4")
         .env("GIT_CONFIG_KEY_0", "user.name")
         .env("GIT_CONFIG_VALUE_0", "t")
@@ -263,4 +268,24 @@ fn bump_refuses_bad_input_without_changing_anything() {
         std::fs::read_to_string(root.join("VERSION")).unwrap(),
         "1.2.3\n"
     );
+}
+
+#[test]
+fn bump_restores_the_files_when_a_step_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = release_checkout("\n### Added\n\n- New.\n");
+    let root = dir.path();
+    let fake = root.join("fake-bin");
+    std::fs::create_dir(&fake).unwrap();
+    std::fs::write(fake.join("cargo"), "#!/bin/sh\nexit 101\n").unwrap();
+    std::fs::set_permissions(fake.join("cargo"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Untracked, so the clean-tree check must not see it.
+    std::fs::write(root.join(".git/info/exclude"), "fake-bin/\n").unwrap();
+    let path = format!("{}:{}", fake.display(), std::env::var("PATH").unwrap());
+
+    let out = bump_with_path(root, "1.3.0", &path);
+
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("Cargo.lock"), "{}", stderr(&out));
+    assert_eq!(git_out(root, &["status", "--porcelain"]), "", "restored");
 }

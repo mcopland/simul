@@ -34,6 +34,13 @@ replace() {
 	printf '%s\n' "$text" >"$1"
 }
 
+# From here on, a failure puts the four files back as they were committed; the tree was clean.
+restore() {
+	git checkout --quiet HEAD -- VERSION Cargo.toml Cargo.lock CHANGELOG.md ||
+		echo "bump-version: failed to restore the version files; run: git checkout HEAD -- VERSION Cargo.toml Cargo.lock CHANGELOG.md" >&2
+}
+trap restore EXIT
+
 printf '%s\n' "$new" >VERSION
 
 # Only the package version: the first version key, inside [package].
@@ -42,7 +49,7 @@ awk -v v="$new" '
 	in_package && !done && /^version = "/ { print "version = \"" v "\""; done = 1; next }
 	{ print }
 ' Cargo.toml | replace Cargo.toml
-grep -qx "version = \"$new\"" Cargo.toml || die "failed to set the version in Cargo.toml"
+grep -qxF "version = \"$new\"" Cargo.toml || die "failed to set the version in Cargo.toml"
 
 cargo update --workspace --offline --quiet ||
 	die "cargo update failed to record $new in Cargo.lock"
@@ -61,4 +68,5 @@ awk -v new="$new" -v old="$old" -v today="$today" -v repo="$repo" '
 
 git add VERSION Cargo.toml Cargo.lock CHANGELOG.md
 git commit --quiet -m "chore(release): bump version to $new"
+trap - EXIT
 echo "committed $old -> $new; tag it with: git tag v$new && git push origin main v$new"
