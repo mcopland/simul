@@ -42,7 +42,18 @@ pub fn run_uninstall(agent: &str, project: bool, settings: Option<PathBuf>) -> R
                 println!("no simul hook file at {}", path.display());
             }
             if project {
-                unexclude_project_hooks()?;
+                let cwd =
+                    std::env::current_dir().context("failed to read the current directory")?;
+                match unexclude_project_hooks(&cwd)? {
+                    Unexclude::Removed(exclude) => {
+                        println!("removed {KIRO_EXCLUDE_PATTERN} from {}", exclude.display());
+                    }
+                    Unexclude::Kept(others) => println!(
+                        "kept {KIRO_EXCLUDE_PATTERN} in git's exclude file for {}",
+                        others.join(", ")
+                    ),
+                    Unexclude::NotARepo | Unexclude::Absent => {}
+                }
             }
         }
         _ => bail!("uninstall-hooks: unknown agent {agent} (expected claude or kiro)"),
@@ -101,14 +112,55 @@ fn exclude_project_hooks() -> Result<()> {
     Ok(())
 }
 
-fn unexclude_project_hooks() -> Result<()> {
-    let cwd = std::env::current_dir().context("failed to read the current directory")?;
-    if let Some(exclude) = git_exclude_file(&cwd)?
-        && remove_exclude(&exclude, KIRO_EXCLUDE_PATTERN)?
-    {
-        println!("removed {KIRO_EXCLUDE_PATTERN} from {}", exclude.display());
+/// What `unexclude_project_hooks` did with the exclude line.
+#[derive(Debug)]
+pub enum Unexclude {
+    NotARepo,
+    /// The line was not there.
+    Absent,
+    /// Removed from this exclude file.
+    Removed(PathBuf),
+    /// Left in place for these other project hook files, relative to the repo root.
+    Kept(Vec<String>),
+}
+
+/// Drops the exclude line for project Kiro hooks from the repo containing `dir`, unless other
+/// directories in that repo still hold one: the line covers the whole repo.
+pub fn unexclude_project_hooks(dir: &Path) -> Result<Unexclude> {
+    let Some(exclude) = git_exclude_file(dir)? else {
+        return Ok(Unexclude::NotARepo);
+    };
+    let others = ignored_project_hook_files(dir)?;
+    if !others.is_empty() {
+        return Ok(Unexclude::Kept(others));
     }
-    Ok(())
+    Ok(if remove_exclude(&exclude, KIRO_EXCLUDE_PATTERN)? {
+        Unexclude::Removed(exclude)
+    } else {
+        Unexclude::Absent
+    })
+}
+
+/// Project Kiro hook files anywhere in the repo containing `dir` that git ignores.
+fn ignored_project_hook_files(dir: &Path) -> Result<Vec<String>> {
+    let pathspec = format!(":(top,glob){KIRO_EXCLUDE_PATTERN}");
+    let out = std::process::Command::new("git")
+        .args(["ls-files", "--others", "--ignored", "--exclude-standard"])
+        .args(["--full-name", "--", &pathspec])
+        .current_dir(dir)
+        .output()
+        .with_context(|| format!("failed to run git ls-files in {}", dir.display()))?;
+    if !out.status.success() {
+        bail!(
+            "git ls-files failed in {}: {}",
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect())
 }
 
 fn run_claude(project: bool, settings: Option<PathBuf>) -> Result<()> {
@@ -894,6 +946,51 @@ mod tests {
         );
         let err = git_exclude_file(&dir.path().join("missing")).unwrap_err();
         assert!(format!("{err:#}").contains("missing"), "{err:#}");
+    }
+
+    #[test]
+    fn unexclude_keeps_the_line_while_other_project_files_need_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        let exclude = git_exclude_file(dir.path()).unwrap().unwrap();
+        add_exclude(&exclude, KIRO_EXCLUDE_PATTERN).unwrap();
+        let (a, b) = (dir.path().join("pkg/a"), dir.path().join("pkg/b"));
+        for pkg in [&a, &b] {
+            install_kiro(&pkg.join(KIRO_PROJECT_FILE), Path::new(EXE)).unwrap();
+        }
+
+        assert!(uninstall_kiro(&a.join(KIRO_PROJECT_FILE)).unwrap());
+        match unexclude_project_hooks(&a).unwrap() {
+            Unexclude::Kept(others) => {
+                assert_eq!(others, ["pkg/b/.kiro/hooks/simul.json"])
+            }
+            other => panic!("expected the line kept, got {other:?}"),
+        }
+        let text = std::fs::read_to_string(&exclude).unwrap();
+        assert!(text.contains(KIRO_EXCLUDE_PATTERN), "{text}");
+
+        assert!(uninstall_kiro(&b.join(KIRO_PROJECT_FILE)).unwrap());
+        assert!(matches!(
+            unexclude_project_hooks(&b).unwrap(),
+            Unexclude::Removed(_)
+        ));
+        let text = std::fs::read_to_string(&exclude).unwrap();
+        assert!(!text.contains(KIRO_EXCLUDE_PATTERN), "{text}");
+        assert!(matches!(
+            unexclude_project_hooks(&b).unwrap(),
+            Unexclude::Absent
+        ));
+
+        let outside = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            unexclude_project_hooks(outside.path()).unwrap(),
+            Unexclude::NotARepo
+        ));
     }
 
     #[test]
