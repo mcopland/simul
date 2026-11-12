@@ -579,3 +579,21 @@ fn refuses_plain_http_downloads() {
     assert!(stderr(&out).contains("curl: (1)"), "{}", stderr(&out));
     assert!(!p.bin().exists());
 }
+
+#[test]
+fn plugin_unbinds_the_default_key_on_the_first_load_that_records_one() {
+    // Plugins before @simul-bound-key bound @simul-key without recording it; a user who had
+    // moved off the default still has it bound to toggle.
+    let p = Plugin::new();
+    p.publish("aarch64-apple-darwin", VERSION, None);
+    p.set_option("@simul-key", "t");
+    p.bind(
+        "a",
+        "bind-key -T prefix a run-shell -b \"'/old/simul' toggle\"",
+    );
+
+    let log = p.load_plugin();
+
+    assert_eq!(unbinds(&log), ["unbind-key -T prefix a"], "{log}");
+    assert_eq!(p.option("@simul-bound-key").as_deref(), Some("t"));
+}

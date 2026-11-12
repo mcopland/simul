@@ -73,7 +73,9 @@ main() {
 	key=$(tmux show-option -gqv @simul-key)
 	key=${key:-a}
 	old=$(tmux show-option -gqv @simul-bound-key)
-	if [ -n "$old" ] && [ "$old" != "$key" ]; then
+	# Plugins before @simul-bound-key always bound the default at least once.
+	old=${old:-a}
+	if [ "$old" != "$key" ]; then
 		# Only while the old key still toggles simul; the user may have rebound it since.
 		case "$(tmux list-keys -T prefix "$old" 2>/dev/null)" in
 		*simul*" toggle"*) tmux unbind-key -T prefix "$old" ;;
