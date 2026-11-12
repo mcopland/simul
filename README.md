@@ -79,7 +79,7 @@ simul uninstall-hooks kiro              # deletes ~/.kiro/hooks/simul.json
 simul uninstall-hooks kiro --project    # deletes ./.kiro/hooks/simul.json and its .git/info/exclude line
 ```
 
-Toggle the sidebar off so tmux gets its status line back. Then delete the `set -g @plugin 'mcopland/simul'` line from `tmux.conf` and press `prefix + alt + u`, which makes TPM delete the plugin directory. Without TPM, delete the `run-shell` line and the checkout instead. Finally, stop the daemon and remove what is left:
+Toggle the sidebar off so tmux gets its status line back. Then delete the `set -g @plugin 'mcopland/simul'` line from `tmux.conf`. Press `prefix + alt + u`, and TPM deletes the plugin directory. Without TPM, delete the `run-shell` line and the checkout instead. Finally, stop the daemon and remove what is left:
 
 ```sh
 pkill -f 'simul daemon'
@@ -93,11 +93,15 @@ The Claude settings backup, `settings.json.simul-bak`, stays next to the setting
 
 ## Use
 
-| Command             | What it does                                                             |
-| ------------------- | ------------------------------------------------------------------------ |
-| `prefix + a`        | Toggles the sidebar in every window. Set `@simul-key` to change the key. |
-| `simul ls [--json]` | Lists tracked agents.                                                    |
-| `simul doctor`      | Checks tmux, the daemon, hooks, and notifications.                       |
+| Command                                            | What it does                                                                   |
+| -------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `prefix + a`                                       | Toggles the sidebar in every window. Set `@simul-key` to change the key.       |
+| `simul toggle`                                     | Toggles the sidebar, like `prefix + a`.                                        |
+| `simul ls [--json]`                                | Lists tracked agents.                                                          |
+| `simul doctor`                                     | Checks tmux, the config, the daemon and its version, hooks, and notifications. |
+| `simul install-hooks <claude\|kiro> [--project]`   | Installs the agent hooks (see Install).                                        |
+| `simul uninstall-hooks <claude\|kiro> [--project]` | Removes them (see Uninstall).                                                  |
+| `simul sidebar`                                    | Runs the sidebar in the current pane. `toggle` starts it for you.              |
 
 The sidebar is for the mouse. It never keeps focus: tmux hands focus straight back to the pane you were in.
 
@@ -108,7 +112,17 @@ The sidebar is for the mouse. It never keeps focus: tmux hands focus straight ba
 | Click the `view:` footer | Switch between the `all` and `status` views |
 | Wheel                    | Scroll                                      |
 
-The sidebar takes a quarter of its window's width and returns to it after you drag its border or resize the terminal. It lists every session, every `window_index:window_name` in it, and every pane in each window, whether or not an agent runs there. An agent pane is one line: a state symbol, where it is, and time in the current state (the agent name stands in when where it is is unknown); any other pane shows only where it is. Where a pane is reads like a starship prompt: in a git repo, the branch (or `HEAD`) followed by status markers, rechecked every 5 seconds while the sidebar is shown; elsewhere, its directory with each parent cut to one letter, from home when under it (`~/dev/simul/examples` is `/d/s/examples`, and home is `~`). That is the `all` view; the footer switches to the `status` view, which lists only agents, without session or window headers, ordered `blocked`, `asking`, `failed`, `done`, `working`, `idle`, then `unknown`, and within a state, the one in it longest first. Under each agent it shows the session and window. Rows come in three tones. A pane where something runs (any agent, or a process running, open, or newly finished) is drawn at full color, and so are its window and session; a pane at a shell prompt, a window where nothing runs, and a session where nothing runs are dimmed. The pane you are in, the active pane of the sidebar's own window, is bold, with its window and session. Session names are in the bright gold of tmux's status-left, or a dim gold when nothing runs there; state symbols keep their colors.
+The sidebar takes a quarter of its window's width and returns to it after you drag its border or resize the terminal. It lists every session, every `window_index:window_name` in it, and every pane in each window, whether or not an agent runs there.
+
+An agent pane is one line: a state symbol, where it is, and time in the current state (the agent name stands in when where it is is unknown); any other pane shows only where it is.
+
+Where a pane is reads like a starship prompt: in a git repo, the branch (or `HEAD`) followed by status markers, rechecked every 5 seconds while the sidebar is shown; elsewhere, its directory with each parent cut to one letter, from home when under it (`~/dev/simul/examples` is `/d/s/examples`, and home is `~`).
+
+That is the `all` view; the footer switches to the `status` view, which lists only agents, without session or window headers, ordered `blocked`, `asking`, `failed`, `done`, `working`, `idle`, then `unknown`, and within a state, the one in it longest first. Under each agent it shows the session and window.
+
+Rows come in three tones. A pane where something runs (any agent, or a process running, open, or newly finished) is drawn at full color, and so are its window and session; a pane at a shell prompt, a window where nothing runs, and a session where nothing runs are dimmed. The pane you are in, the active pane of the sidebar's own window, is bold, with its window and session.
+
+Session names are in the bright gold of tmux's status-left, or a dim gold when nothing runs there; state symbols keep their colors.
 
 A collapsed session shrinks to its header, `▸`, and a count of its agents in each state, in the `status` view's order, then of its finished and running panes (`me ▸ ⊘1 ?1 ●2 ■1 ▶2`), so a blocked or asking agent or an unseen finish stays visible. Collapsing applies to the sidebar in every window. simul remembers it in the tmux session option `@simul-collapsed`, so it lasts through toggling the sidebar and restarting the daemon, and goes away with the session. Only the `all` view folds sessions.
 
