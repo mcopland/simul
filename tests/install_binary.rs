@@ -11,15 +11,22 @@ const VERSION: &str = "0.1.0";
 /// fake release server directory served over file://.
 struct Plugin {
     dir: tempfile::TempDir,
+    /// The checkout's directory name under `dir`.
+    name: String,
 }
 
 impl Plugin {
     fn new() -> Plugin {
+        Plugin::named("plugin")
+    }
+
+    fn named(name: &str) -> Plugin {
         let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join("plugin/scripts")).unwrap();
-        fs::copy(SCRIPT, dir.path().join("plugin/scripts/install-binary.sh")).unwrap();
-        fs::copy(ENTRY, dir.path().join("plugin/simul.tmux")).unwrap();
-        fs::write(dir.path().join("plugin/VERSION"), format!("{VERSION}\n")).unwrap();
+        let root = dir.path().join(name);
+        fs::create_dir_all(root.join("scripts")).unwrap();
+        fs::copy(SCRIPT, root.join("scripts/install-binary.sh")).unwrap();
+        fs::copy(ENTRY, root.join("simul.tmux")).unwrap();
+        fs::write(root.join("VERSION"), format!("{VERSION}\n")).unwrap();
         fs::create_dir_all(dir.path().join("stubs")).unwrap();
         write_script(
             &dir.path().join("stubs/tmux"),
@@ -41,11 +48,14 @@ impl Plugin {
         );
         fs::create_dir_all(dir.path().join("opts")).unwrap();
         fs::create_dir_all(dir.path().join("keys")).unwrap();
-        Plugin { dir }
+        Plugin {
+            dir,
+            name: name.to_owned(),
+        }
     }
 
     fn root(&self) -> PathBuf {
-        self.dir.path().join("plugin")
+        self.dir.path().join(&self.name)
     }
 
     fn bin(&self) -> PathBuf {
@@ -514,4 +524,42 @@ fn plugin_keeps_an_unchanged_key_bound() {
 
     assert!(unbinds(&log).is_empty(), "{log}");
     assert!(!log.lines().any(|l| l.starts_with("list-keys")), "{log}");
+}
+
+/// The shell command a logged `<prefix><command>` line hands to /bin/sh.
+fn shell_command<'a>(log: &'a str, prefix: &str) -> &'a str {
+    log.lines()
+        .find_map(|l| l.strip_prefix(prefix))
+        .unwrap_or_else(|| panic!("no {prefix:?} line: {log}"))
+}
+
+#[test]
+fn plugin_quotes_a_path_with_a_single_quote() {
+    let p = Plugin::named("it's plugin");
+    p.publish("aarch64-apple-darwin", VERSION, None);
+
+    let log = p.load_plugin();
+
+    assert_eq!(p.installed_version(), format!("simul {VERSION}"));
+    assert!(messages(&log).is_empty(), "unexpected messages: {log}");
+    let left: Vec<_> = fs::read_dir(p.root().join("bin"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(left, ["simul"], "the staged copy is gone");
+    // tmux runs these with /bin/sh, so they must parse there and reach the binary.
+    for prefix in ["bind-key a run-shell -b ", "run-shell -b "] {
+        let cmd = shell_command(&log, prefix).replace(" >/dev/null 2>&1", "");
+        let out = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&cmd)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{cmd}: {}", stderr(&out));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            format!("simul {VERSION}"),
+            "{cmd}"
+        );
+    }
 }

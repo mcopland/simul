@@ -15,6 +15,12 @@ find_binary() {
 	command -v simul
 }
 
+# Single-quotes $1 for /bin/sh, which runs tmux's run-shell and bind-key commands.
+sq() {
+	local q="'\\''"
+	printf "'%s'" "${1//\'/$q}"
+}
+
 # Accepts "tmux 3.3a", "tmux next-3.4"; unversioned builds ("tmux master") pass.
 tmux_version_ok() {
 	local version major minor
@@ -61,7 +67,7 @@ main() {
 	fi
 	socket=$(tmux display-message -p '#{socket_path}')
 	# --replace hands over from a daemon of another build, such as the one before an update.
-	tmux run-shell -b "'$bin' daemon --replace --tmux-socket '$socket' >/dev/null 2>&1"
+	tmux run-shell -b "$(sq "$bin") daemon --replace --tmux-socket $(sq "$socket") >/dev/null 2>&1"
 
 	local key old
 	key=$(tmux show-option -gqv @simul-key)
@@ -73,7 +79,7 @@ main() {
 		*simul*" toggle"*) tmux unbind-key -T prefix "$old" ;;
 		esac
 	fi
-	tmux bind-key "$key" run-shell -b "'$bin' toggle"
+	tmux bind-key "$key" run-shell -b "$(sq "$bin") toggle"
 	tmux set-option -g @simul-bound-key "$key"
 }
 

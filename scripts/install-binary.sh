@@ -7,6 +7,17 @@ set -euo pipefail
 PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BASE_URL="${SIMUL_RELEASE_BASE_URL:-https://github.com/mcopland/simul/releases/download}"
 
+# Removed on exit. Globals rather than main's locals, so the EXIT trap still sees them after
+# main returns, and expanded only inside cleanup, so a path holding a quote can't break it.
+TMP_DIR=""
+STAGED=""
+
+cleanup() {
+	[ -z "$TMP_DIR" ] || rm -r -f "$TMP_DIR"
+	[ -z "$STAGED" ] || rm -f "$STAGED"
+}
+trap cleanup EXIT
+
 die() {
 	echo "simul install: $*" >&2
 	exit 1
@@ -38,7 +49,7 @@ fetch() {
 }
 
 main() {
-	local version os arch triple bin archive url tmp staged expected actual
+	local version os arch triple bin archive url tmp expected actual
 	version=$(tr -d '[:space:]' <"$PLUGIN_DIR/VERSION") ||
 		die "failed to read $PLUGIN_DIR/VERSION"
 	os=${SIMUL_OS:-$(uname -s)}
@@ -53,10 +64,9 @@ main() {
 
 	archive="simul-$triple.tar.gz"
 	url="$BASE_URL/v$version/$archive"
-	tmp=$(mktemp -d "${TMPDIR:-/tmp}/simul.XXXXXX") ||
+	TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/simul.XXXXXX") ||
 		die "failed to create a temp dir under ${TMPDIR:-/tmp}"
-	# shellcheck disable=SC2064 # expand $tmp now; it is local to main
-	trap "rm -rf '$tmp'" EXIT
+	tmp=$TMP_DIR
 
 	fetch "$tmp/$archive" "$url" ||
 		die "failed to download $url (release v$version)"
@@ -76,13 +86,11 @@ main() {
 	# that installed hooks point at stays the same.
 	mkdir -p "$PLUGIN_DIR/bin" ||
 		die "failed to create $PLUGIN_DIR/bin"
-	staged=$(mktemp "$PLUGIN_DIR/bin/.simul.XXXXXX" 2>/dev/null) ||
+	STAGED=$(mktemp "$PLUGIN_DIR/bin/.simul.XXXXXX" 2>/dev/null) ||
 		die "failed to write to $PLUGIN_DIR/bin"
-	# shellcheck disable=SC2064 # expand both paths now; they are local to main
-	trap "rm -rf '$tmp' '$staged'" EXIT
-	{ cp "$tmp/simul" "$staged" && chmod 755 "$staged"; } ||
-		die "failed to copy simul into $staged"
-	mv -f "$staged" "$bin" ||
+	{ cp "$tmp/simul" "$STAGED" && chmod 755 "$STAGED"; } ||
+		die "failed to copy simul into $STAGED"
+	mv -f "$STAGED" "$bin" ||
 		die "failed to install $bin"
 }
 
