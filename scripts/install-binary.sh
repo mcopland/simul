@@ -66,6 +66,11 @@ main() {
 		return 0
 	fi
 
+	case "$BASE_URL" in
+	https://* | file://*) ;;
+	*) die "SIMUL_RELEASE_BASE_URL must be an https URL (got $BASE_URL)" ;;
+	esac
+
 	archive="simul-$triple.tar.gz"
 	url="$BASE_URL/v$version/$archive"
 	TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/simul.XXXXXX") ||

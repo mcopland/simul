@@ -575,8 +575,12 @@ fn refuses_plain_http_downloads() {
         .output()
         .unwrap();
     assert!(!out.status.success());
-    // curl's exit 1 is an unsupported protocol: it refused before connecting.
-    assert!(stderr(&out).contains("curl: (1)"), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("SIMUL_RELEASE_BASE_URL must be an https URL"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(!stderr(&out).contains("curl:"), "refused before curl ran");
     assert!(!p.bin().exists());
 }
 
