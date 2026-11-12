@@ -349,6 +349,8 @@ fn replace_file(path: &Path, text: &str, backup: bool) -> Result<PathBuf> {
     Ok(real)
 }
 
+/// Copies `real` to `<name>.simul-bak`, unless a backup exists and `real` already holds simul's
+/// hooks: then the backup is the copy from before simul, and overwriting it would lose it.
 fn write_backup(real: &Path) -> Result<()> {
     let old = std::fs::read(real).with_context(|| format!("failed to read {}", real.display()))?;
     let backup = real.with_file_name(format!(
@@ -356,6 +358,10 @@ fn write_backup(real: &Path) -> Result<()> {
         real.file_name()
             .map_or_else(Default::default, |n| n.to_string_lossy())
     ));
+    let has_ours = serde_json::from_slice::<Value>(&old).is_ok_and(|v| !managed(&v).is_empty());
+    if has_ours && backup.exists() {
+        return Ok(());
+    }
     std::fs::write(&backup, old)
         .with_context(|| format!("failed to write backup {}", backup.display()))
 }
@@ -492,6 +498,35 @@ mod tests {
         let backup = dir.path().join("dotfiles-settings.json.simul-bak");
         let b: Value = serde_json::from_str(&std::fs::read_to_string(backup).unwrap()).unwrap();
         assert_eq!(b, user_settings());
+    }
+
+    fn backup_of(path: &Path) -> Value {
+        let mut name = path.file_name().unwrap().to_owned();
+        name.push(".simul-bak");
+        read_json(&path.with_file_name(name))
+    }
+
+    #[test]
+    fn reinstalling_keeps_the_original_in_the_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, user_settings().to_string()).unwrap();
+        install(&path, Path::new("/old/simul")).unwrap();
+        install(&path, Path::new(EXE)).unwrap();
+        assert_eq!(backup_of(&path), user_settings());
+    }
+
+    #[test]
+    fn a_file_without_simul_hooks_refreshes_the_backup() {
+        // The user removed simul's hooks and changed the file since; that is the new original.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, user_settings().to_string()).unwrap();
+        install(&path, Path::new(EXE)).unwrap();
+        let edited = json!({"model": "sonnet"});
+        std::fs::write(&path, edited.to_string()).unwrap();
+        install(&path, Path::new(EXE)).unwrap();
+        assert_eq!(backup_of(&path), edited);
     }
 
     #[test]

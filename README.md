@@ -37,7 +37,7 @@ simul install-hooks kiro --project    # ./.kiro/hooks/simul.json, added to .git/
 
 Hooks record the path you ran `simul` from, so run it through a path that won't move, such as the symlink above. Plugin updates replace the binary at the same path. Start new agent sessions to pick up the hooks.
 
-For Claude, the merge keeps your existing hooks. If the settings file is a symlink, simul writes through it and leaves the link in place. Each run replaces simul's previous entries, which are tagged `#simul-managed`, and saves a `.simul-bak` copy first.
+For Claude, the merge keeps your existing hooks. If the settings file is a symlink, simul writes through it and leaves the link in place. Each run replaces simul's previous entries, which are tagged `#simul-managed`. The first run saves the file as it was in a `.simul-bak` copy, and later runs keep that copy.
 
 For Kiro, simul owns the whole `simul.json` hook file and rewrites it on each run. It uses the standalone hook files of Kiro CLI's V3 engine; the V2 engine reads hooks only from agent profiles, which simul does not edit. Kiro's hooks were built from its public docs and have not yet been checked against a live Kiro session. Its session files were observed with `kiro-cli 2.34.2 --v3`. See `fixtures/CALIBRATION.md`.
 
