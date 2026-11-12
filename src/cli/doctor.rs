@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::install_hooks;
@@ -8,7 +8,7 @@ use crate::client;
 use crate::daemon::notify::{self, Message};
 use crate::hook::{claude, kiro};
 use crate::paths::{self, env_var};
-use crate::protocol::{Ack, Request, Status};
+use crate::protocol::{Ack, Identity, Request, Status};
 use crate::tmux::{self, Tmux};
 
 pub const MIN_TMUX: (u32, u32) = (3, 3);
@@ -61,8 +61,15 @@ fn gather() -> Vec<Check> {
         },
     ];
     match paths::current_tmux_socket() {
-        Some(sock) => checks.push(check_focus_events(&Tmux::new(sock))),
-        None => checks.push(fail("focus-events", "not inside tmux ($TMUX unset)")),
+        Some(sock) => {
+            let tmux = Tmux::new(sock);
+            checks.push(check_focus_events(&tmux));
+            checks.push(check_mouse(&tmux));
+        }
+        None => {
+            checks.push(fail("focus-events", "not inside tmux ($TMUX unset)"));
+            checks.push(fail("mouse", "not inside tmux ($TMUX unset)"));
+        }
     }
     checks.push(check_config(
         crate::config::default_path().as_deref(),
@@ -73,6 +80,7 @@ fn gather() -> Vec<Check> {
         Ok(sock) => match client::request::<Ack>(sock, &Request::Ping) {
             Ok(_) => {
                 checks.push(pass("daemon", format!("listening on {}", sock.display())));
+                checks.push(check_daemon_version(sock));
                 true
             }
             Err(e) => {
@@ -157,17 +165,77 @@ pub fn check_version(output: &str) -> Check {
 }
 
 fn check_focus_events(tmux: &Tmux) -> Check {
-    match tmux.run(&["show-options", "-gv", "focus-events"]) {
-        Ok(v) if v.trim() == "on" => pass("focus-events", "on"),
-        Ok(v) => fail(
-            "focus-events",
-            format!(
-                "{}: add 'set -g focus-events on' to tmux.conf, or notifications fire while you watch",
-                v.trim()
-            ),
-        ),
-        Err(e) => fail("focus-events", format!("{e:#}")),
+    option_on(
+        "focus-events",
+        tmux.run(&["show-options", "-gv", "focus-events"]),
+        "add 'set -g focus-events on' to tmux.conf, or notifications fire while you watch",
+    )
+}
+
+fn check_mouse(tmux: &Tmux) -> Check {
+    option_on(
+        "mouse",
+        tmux.run(&["show-options", "-gv", "mouse"]),
+        "add 'set -g mouse on' to tmux.conf; the sidebar is driven by clicks",
+    )
+}
+
+/// Passes when the tmux option `name` reads `on`; otherwise fails with `fix`.
+fn option_on(name: &'static str, value: Result<String>, fix: &str) -> Check {
+    match value {
+        Ok(v) if v.trim() == "on" => pass(name, "on"),
+        Ok(v) => fail(name, format!("{}: {fix}", v.trim())),
+        Err(e) => fail(name, format!("{e:#}")),
     }
+}
+
+/// The `simul` on PATH, which users and new hooks run, should be the daemon's version.
+/// `found` is that binary and its `--version` output.
+fn check_path_version(daemon: &str, found: Option<(PathBuf, Result<String>)>) -> Check {
+    let Some((bin, output)) = found else {
+        return pass("version", format!("daemon {daemon}; simul is not on PATH"));
+    };
+    match output {
+        Ok(out) => {
+            let version = out.trim().trim_start_matches("simul ").to_owned();
+            if version == daemon {
+                pass(
+                    "version",
+                    format!("{daemon} (daemon and {})", bin.display()),
+                )
+            } else {
+                fail(
+                    "version",
+                    format!(
+                        "{} is {version} but the daemon runs {daemon}; reload your tmux config, \
+                         or fix the PATH link",
+                        bin.display()
+                    ),
+                )
+            }
+        }
+        Err(e) => fail("version", format!("{e:#}")),
+    }
+}
+
+fn check_daemon_version(socket: &Path) -> Check {
+    match client::request::<Identity>(socket, &Request::Identify) {
+        Ok(id) => check_path_version(&id.version, path_binary_version()),
+        Err(e) => fail(
+            "version",
+            format!("failed to ask the daemon its version: {e:#}"),
+        ),
+    }
+}
+
+fn path_binary_version() -> Option<(PathBuf, Result<String>)> {
+    let bin = find_on_path("simul", env_var("PATH").as_deref())?;
+    let out = std::process::Command::new(&bin)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("failed to run {} --version", bin.display()))
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+    Some((bin, out))
 }
 
 fn claude_settings_paths() -> Vec<PathBuf> {
@@ -264,13 +332,18 @@ fn check_kiro_hooks_file(global: Option<&Path>, project: &Path, cli_installed: b
 
 /// Whether an executable `name` is in one of the directories of a `$PATH` value.
 fn on_path(name: &str, path: Option<&str>) -> bool {
+    find_on_path(name, path).is_some()
+}
+
+/// The first executable file called `name` in the directories of `path`.
+fn find_on_path(name: &str, path: Option<&str>) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     path.into_iter()
         .flat_map(|p| p.split(':'))
         .filter(|dir| !dir.is_empty())
-        .any(|dir| {
-            std::fs::metadata(Path::new(dir).join(name))
-                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        .map(|dir| Path::new(dir).join(name))
+        .find(|bin| {
+            std::fs::metadata(bin).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         })
 }
 
@@ -308,6 +381,50 @@ mod tests {
             c.detail
         );
         assert!(!check_config(Some(path), Err(anyhow::anyhow!("invalid config"))).ok);
+    }
+
+    #[test]
+    fn option_checks_want_on() {
+        assert!(option_on("mouse", Ok("on\n".into()), "hint").ok);
+        let c = option_on("mouse", Ok("off\n".into()), "set -g mouse on");
+        assert!(
+            !c.ok && c.detail.starts_with("off: set -g mouse on"),
+            "{}",
+            c.detail
+        );
+        assert!(!option_on("mouse", Err(anyhow::anyhow!("no server")), "hint").ok);
+    }
+
+    #[test]
+    fn path_binary_must_match_the_daemon() {
+        let bin = || PathBuf::from("/u/bin/simul");
+        assert!(check_path_version("0.10.0", Some((bin(), Ok("simul 0.10.0\n".into())))).ok);
+        let c = check_path_version("0.10.0", Some((bin(), Ok("simul 0.9.0\n".into()))));
+        assert!(!c.ok);
+        assert!(
+            c.detail.contains("/u/bin/simul")
+                && c.detail.contains("0.9.0")
+                && c.detail.contains("0.10.0"),
+            "{}",
+            c.detail
+        );
+        assert!(
+            !check_path_version("0.10.0", Some((bin(), Err(anyhow::anyhow!("exec failed"))))).ok
+        );
+        let c = check_path_version("0.10.0", None);
+        assert!(c.ok, "hooks use absolute paths, so PATH is optional");
+        assert!(c.detail.contains("not on PATH"), "{}", c.detail);
+    }
+
+    #[test]
+    fn find_on_path_returns_the_first_match() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("simul");
+        std::fs::write(&bin, "").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!("/nonexistent:{}", dir.path().display());
+        assert_eq!(find_on_path("simul", Some(&path)), Some(bin));
     }
 
     #[test]
