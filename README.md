@@ -194,7 +194,7 @@ interactive = ["vi", "vim", "nvim", "hx", "helix", "emacs", "nano", "micro", "ka
 
 Kiro has no hook for approval prompts, so simul reads them from Kiro's session log (`$KIRO_HOME/sessions`, else `~/.kiro/sessions`). The same log shows when a turn ends, is interrupted, fails, or asks you a question. When the log can't be read, simul falls back to reading the bottom of a busy Kiro pane. That scrape recognizes the classic `Allow this action? ... [y/n/t]:` prompt. If your Kiro shows a different approval dialog, add a line of text unique to it to `approval_patterns`. Pick text that disappears once you answer: a pattern still in the bottom 15 lines keeps the pane `blocked`.
 
-The daemon log is next to its socket: `$XDG_RUNTIME_DIR/simul/<hash>.log`, or `/tmp/simul-$UID/<hash>.log`.
+The daemon log is next to its socket: `$XDG_RUNTIME_DIR/simul/<hash>.log`, or `/tmp/simul-$UID/<hash>.log`. At 1 MiB the daemon renames it to `<hash>.log.1`, which replaces the previous one.
 
 ## License
 
