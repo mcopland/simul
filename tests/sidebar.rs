@@ -374,18 +374,11 @@ fn closing_sidebars_does_not_log_errors() {
     h.start_daemon();
     toggle(&h);
     let side = sidebars(&h);
+    // The session header is drawn from the first status the subscription delivers.
     eventually("sidebars subscribed", || {
-        side.iter().all(|s| {
-            h.tmux(&[
-                "display-message",
-                "-p",
-                "-t",
-                &s.0,
-                "#{pane_current_command}",
-            ]) == "simul"
-        })
+        side.iter()
+            .all(|s| h.tmux(&["capture-pane", "-p", "-t", &s.0]).starts_with('t'))
     });
-    std::thread::sleep(std::time::Duration::from_millis(300));
     toggle(&h);
     eventually("sidebars removed", || sidebars(&h).is_empty());
     // A status push after the sidebars are gone hits their closed sockets.
