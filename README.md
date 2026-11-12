@@ -169,7 +169,7 @@ After opening a sidebar, simul re-runs `window-layout-changed` hooks, so hooks t
 
 ## Config
 
-`~/.config/simul/config.toml`, all keys optional:
+`~/.config/simul/config.toml`, all keys optional. `simul doctor` and the daemon log name any key simul does not know, such as a misspelled one:
 
 ```toml
 blocked_threshold_ms = 1500  # quiet time before a busy pane's screen is checked

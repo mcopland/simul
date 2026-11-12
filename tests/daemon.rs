@@ -356,3 +356,17 @@ fn live_session_file_drives_state_without_hooks() {
     write_session(&h, &pane, "idle");
     h.wait_state(&pane, Some("idle"));
 }
+
+#[test]
+fn unknown_config_keys_are_logged() {
+    let mut h = Harness::with_config("blocked_treshold_ms = 100\n");
+    h.start_daemon();
+    eventually("the warning in the log", || {
+        h.daemon_log().contains("ignoring unknown config keys")
+    });
+    assert!(
+        h.daemon_log().contains("blocked_treshold_ms"),
+        "{}",
+        h.daemon_log()
+    );
+}

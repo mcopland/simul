@@ -64,6 +64,10 @@ fn gather() -> Vec<Check> {
         Some(sock) => checks.push(check_focus_events(&Tmux::new(sock))),
         None => checks.push(fail("focus-events", "not inside tmux ($TMUX unset)")),
     }
+    checks.push(check_config(
+        crate::config::default_path().as_deref(),
+        crate::config::load_checked().map(|(_, unknown)| unknown),
+    ));
     let socket = paths::client_socket();
     let daemon_up = match &socket {
         Ok(sock) => match client::request::<Ack>(sock, &Request::Ping) {
@@ -117,6 +121,22 @@ fn test_notification() -> Check {
     match sent {
         Ok(()) => pass("notification", "sent; check that it appeared"),
         Err(e) => fail("notification", format!("{e:#}")),
+    }
+}
+
+/// Fails on a config file that doesn't parse or holds keys simul doesn't know.
+fn check_config(path: Option<&Path>, unknown: Result<Vec<String>>) -> Check {
+    let shown = path.map_or_else(|| "no config path".to_owned(), |p| p.display().to_string());
+    match unknown {
+        Ok(keys) if keys.is_empty() => pass("config", shown),
+        Ok(keys) => fail(
+            "config",
+            format!(
+                "{shown}: unknown keys {}; check their spelling against the README",
+                keys.join(", ")
+            ),
+        ),
+        Err(e) => fail("config", format!("{e:#}")),
     }
 }
 
@@ -275,6 +295,20 @@ pub fn first_word(cmd: &str) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn config_check_names_unknown_keys() {
+        let path = Path::new("/c/config.toml");
+        assert!(check_config(Some(path), Ok(vec![])).ok);
+        let c = check_config(Some(path), Ok(vec!["notfy".into(), "sidebar.x".into()]));
+        assert!(!c.ok);
+        assert!(
+            c.detail.contains("/c/config.toml") && c.detail.contains("notfy, sidebar.x"),
+            "{}",
+            c.detail
+        );
+        assert!(!check_config(Some(path), Err(anyhow::anyhow!("invalid config"))).ok);
+    }
 
     #[test]
     fn version_gate() {

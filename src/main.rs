@@ -146,12 +146,22 @@ fn run_daemon(
     if replace {
         daemon::update::replace(&socket, &identity)?;
     }
+    let (config, unknown) = config::load_checked()?;
+    if !unknown.is_empty()
+        && let Some(path) = config::default_path()
+    {
+        simul::log!(
+            "ignoring unknown config keys in {}: {}",
+            path.display(),
+            unknown.join(", ")
+        );
+    }
     let opts = daemon::Options {
         socket,
         tmux: Tmux::new(tmux_socket),
         exe,
         identity,
-        config: config::load()?,
+        config,
         restarted_for,
     };
     tokio::runtime::Builder::new_current_thread()
