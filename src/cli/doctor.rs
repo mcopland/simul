@@ -230,12 +230,25 @@ fn check_daemon_version(socket: &Path) -> Check {
 
 fn path_binary_version() -> Option<(PathBuf, Result<String>)> {
     let bin = find_on_path("simul", env_var("PATH").as_deref())?;
-    let out = std::process::Command::new(&bin)
+    let out = version_of(&bin);
+    Some((bin, out))
+}
+
+/// What `bin --version` prints; an error, with its stderr, if it doesn't run or exits non-zero.
+fn version_of(bin: &Path) -> Result<String> {
+    let out = std::process::Command::new(bin)
         .arg("--version")
         .output()
-        .with_context(|| format!("failed to run {} --version", bin.display()))
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
-    Some((bin, out))
+        .with_context(|| format!("failed to run {} --version", bin.display()))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "{} --version failed ({}): {}",
+            bin.display(),
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 fn claude_settings_paths() -> Vec<PathBuf> {
@@ -414,6 +427,25 @@ mod tests {
         let c = check_path_version("0.10.0", None);
         assert!(c.ok, "hooks use absolute paths, so PATH is optional");
         assert!(c.detail.contains("not on PATH"), "{}", c.detail);
+    }
+
+    #[test]
+    fn version_of_reports_a_binary_that_fails() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("simul");
+        let script = |body: &str| {
+            std::fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        script("echo 'simul 1.2.3'");
+        assert_eq!(version_of(&bin).unwrap(), "simul 1.2.3\n");
+        script("echo 'dyld: missing library' >&2; exit 3");
+        let err = format!("{:#}", version_of(&bin).unwrap_err());
+        assert!(
+            err.contains("simul --version") && err.contains("dyld: missing library"),
+            "{err}"
+        );
     }
 
     #[test]
