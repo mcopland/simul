@@ -142,7 +142,6 @@ fn plain_pane_processes_are_running_then_finished_until_viewed() {
     // The sidebar is hidden here, so check every second rather than every 10.
     let mut h =
         Harness::with_config("blocked_threshold_ms = 100\n[panes]\nhidden_check_secs = 1\n");
-    h.start_daemon();
     // zsh, not sh: macOS's sh shows as bash, so an sh pane can't tell a bash script from
     // its own prompt.
     let zsh = std::process::Command::new("zsh")
@@ -153,6 +152,19 @@ fn plain_pane_processes_are_running_then_finished_until_viewed() {
         "this test needs zsh on PATH: {zsh:?}"
     );
     let pane = h.new_pane("zsh -f");
+    // tmux runs the command through its default shell, which then execs zsh. Where that shell
+    // is not zsh, as on CI, a check in between sees it run and end, and the pane reads as
+    // finished; so the daemon starts once zsh is up.
+    eventually("zsh in the pane", || {
+        h.tmux(&[
+            "display-message",
+            "-p",
+            "-t",
+            &pane,
+            "#{pane_current_command}",
+        ]) == "zsh"
+    });
+    h.start_daemon();
     h.wait_run(&pane, None);
     // Long enough for the once-a-second poll to catch on a loaded machine.
     h.tmux(&["send-keys", "-t", &pane, "sleep 4", "Enter"]);
