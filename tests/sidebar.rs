@@ -824,6 +824,10 @@ fn status_line_restored_when_a_new_daemon_finds_no_sidebar() {
     }
     assert!(!status_format(&h).contains("#S"), "{}", status_format(&h));
     h.start_daemon();
-    eventually("status line restored", || status_format(&h) == "#S custom");
-    assert_eq!(h.tmux(&["show-options", "-gq", "@simul-status-format"]), "");
+    // The daemon restores the line, then clears the saved copy, in two tmux commands.
+    eventually("status line restored and the saved copy cleared", || {
+        status_format(&h) == "#S custom"
+            && h.tmux(&["show-options", "-gq", "@simul-status-format"])
+                .is_empty()
+    });
 }
