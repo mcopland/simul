@@ -59,7 +59,7 @@ Remove the line (or `set -gu @simul-bin`) and reload again to go back to the rel
 
 ### Build from source
 
-Without TPM, or on a platform with no prebuilt binary, build with a Rust toolchain:
+Without TPM, or on a platform with no prebuilt binary, build with Rust 1.89 or newer:
 
 ```sh
 cargo build --release

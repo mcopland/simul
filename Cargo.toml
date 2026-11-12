@@ -2,6 +2,12 @@
 name = "simul"
 version = "0.10.0"
 edition = "2024"
+# Linux's notify-rust needs 1.89; edition 2024's let chains alone need 1.88.
+rust-version = "1.89"
+description = "tmux plugin that tracks coding agents (Claude Code, Kiro CLI) in a sidebar"
+license = "MIT"
+repository = "https://github.com/mcopland/simul"
+publish = false
 
 [dependencies]
 anyhow = "1.0.104"
