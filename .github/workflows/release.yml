@@ -29,8 +29,12 @@ jobs:
             exit 1
           fi
 
+  # The tag push doesn't wait for the ci run on main, so the release runs the checks itself.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   build:
-    needs: check-version
+    needs: [check-version, ci]
     strategy:
       fail-fast: false
       matrix:
