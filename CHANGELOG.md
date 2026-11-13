@@ -4,6 +4,10 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+### Fixed
+
+- A new pane no longer shows `■` before anything ran in it. simul could catch tmux, or the default shell tmux starts the command with, before the pane's own program, so it now judges a new pane from its second check.
+
 ## [0.11.0] - 2026-11-12
 
 ### Added

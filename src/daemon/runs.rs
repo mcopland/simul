@@ -46,7 +46,15 @@ pub struct Runs {
     by_pane: HashMap<String, Run>,
     /// When a snapshot was last read.
     checked: Option<Instant>,
+    /// When each plain pane was first seen, in ms; `None` before the first update. Panes there
+    /// at the first update map to `None`: settled, so they are judged at once.
+    first_seen: Option<HashMap<String, Option<u64>>>,
 }
+
+/// How long a new pane goes unjudged. Its first instants can show tmux's own fork before it
+/// execs, then the default shell tmux runs the pane's command through before that execs it;
+/// neither ran anything, and several looks can land in that time.
+const SETTLE_MS: u64 = 1000;
 
 impl Runs {
     /// Whether a hidden-sidebar check is due, `every` after the last one.
@@ -73,7 +81,16 @@ impl Runs {
         now: u64,
     ) {
         let mut next = HashMap::new();
+        let mut first_seen = HashMap::new();
         for p in snap.panes.iter().filter(|p| !p.is_sidebar && !is_agent(p)) {
+            let born = match &self.first_seen {
+                Some(seen) => seen.get(&p.id).copied().unwrap_or(Some(now)),
+                None => None,
+            };
+            first_seen.insert(p.id.clone(), born);
+            if born.is_some_and(|b| now.saturating_sub(b) < SETTLE_MS) {
+                continue;
+            }
             let viewed = snap.viewed.contains(&p.id);
             let prev = self.by_pane.get(&p.id).map(|r| r.state);
             let shell = pane_shell(&p.launched);
@@ -97,6 +114,7 @@ impl Runs {
             next.insert(p.id.clone(), Run { state, since_ms });
         }
         self.by_pane = next;
+        self.first_seen = Some(first_seen);
     }
 }
 
@@ -323,6 +341,64 @@ mod tests {
             2,
         );
         assert_eq!(state(&r, "%1"), Some(RunState::Finished));
+    }
+
+    #[test]
+    fn a_new_panes_launch_is_not_a_run() {
+        // tmux forks itself, then runs `zsh -f` through its default shell, bash here, which
+        // execs zsh. Looks in between must not read as a command that ran and ended.
+        let mut r = Runs::default();
+        step(
+            &mut r,
+            &launched(snap(&[("%1", "zsh")], &[]), "/bin/zsh"),
+            1,
+        );
+        let both = |second: &str| {
+            let mut s = launched(snap(&[("%1", "zsh"), ("%2", second)], &[]), "/bin/zsh");
+            s.panes[1].launched = "\"zsh -f\"".into();
+            s
+        };
+        step(&mut r, &both("tmux"), 100);
+        step(&mut r, &both("bash"), 150);
+        step(&mut r, &both("bash"), 100 + SETTLE_MS - 1);
+        assert_eq!(state(&r, "%2"), None, "still settling");
+        step(&mut r, &both("zsh"), 100 + SETTLE_MS);
+        assert_eq!(state(&r, "%2"), None, "nothing ran, so nothing finished");
+    }
+
+    #[test]
+    fn a_new_pane_is_judged_once_settled() {
+        for (cmd, want) in [
+            ("bash", RunState::Running),
+            ("cargo", RunState::Running),
+            ("hx", RunState::Interactive),
+        ] {
+            let s = launched(snap(&[("%9", cmd)], &[]), "/bin/zsh");
+            let mut r = Runs::default();
+            step(&mut r, &snap(&[], &[]), 1);
+            step(&mut r, &s, 10);
+            assert_eq!(state(&r, "%9"), None, "{cmd}");
+            step(&mut r, &s, 10 + SETTLE_MS);
+            assert_eq!(
+                r.get("%9"),
+                Some(&Run {
+                    state: want,
+                    since_ms: 10 + SETTLE_MS
+                }),
+                "{cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn panes_there_at_the_first_look_are_judged_at_once() {
+        let mut r = Runs::default();
+        step(
+            &mut r,
+            &launched(snap(&[("%1", "cargo")], &[]), "/bin/zsh"),
+            1,
+        );
+        assert_eq!(state(&r, "%1"), Some(RunState::Running));
     }
 
     #[test]
