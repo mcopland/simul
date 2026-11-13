@@ -502,15 +502,63 @@ fn replace_file(path: &Path, text: &str, backup: bool) -> Result<PathBuf> {
         }
         path.to_path_buf()
     };
-    let tmp = real.with_extension("simul-tmp");
-    std::fs::write(&tmp, text).with_context(|| format!("failed to write {}", tmp.display()))?;
-    if let Ok(meta) = std::fs::metadata(&real) {
-        std::fs::set_permissions(&tmp, meta.permissions())
-            .with_context(|| format!("failed to copy permissions to {}", tmp.display()))?;
+    let tmp = write_temp(&real, text)?;
+    let swapped = std::fs::metadata(&real)
+        .map_or(Ok(()), |meta| {
+            std::fs::set_permissions(&tmp, meta.permissions())
+        })
+        .with_context(|| format!("failed to copy permissions to {}", tmp.display()))
+        .and_then(|()| {
+            std::fs::rename(&tmp, &real)
+                .with_context(|| format!("failed to replace {}", real.display()))
+        });
+    if let Err(e) = swapped {
+        if let Err(rm) = std::fs::remove_file(&tmp) {
+            return Err(e.context(format!("and failed to remove {}: {rm}", tmp.display())));
+        }
+        return Err(e);
     }
-    std::fs::rename(&tmp, &real)
-        .with_context(|| format!("failed to replace {}", real.display()))?;
     Ok(real)
+}
+
+/// The `n`th temp name beside `real` for this process. Temp files sit beside the file they
+/// replace so the rename stays on one filesystem.
+fn temp_path(real: &Path, n: u32) -> PathBuf {
+    let name = real.file_name().unwrap_or_default().to_string_lossy();
+    real.with_file_name(format!(".{name}.simul-{}-{n}.tmp", std::process::id()))
+}
+
+/// Writes `text` to a new temp file beside `real`. It is created only if nothing is there yet,
+/// so a concurrent run's temp file is never overwritten.
+fn write_temp(real: &Path, text: &str) -> Result<PathBuf> {
+    use std::io::Write as _;
+    for n in 0..100 {
+        let tmp = temp_path(real, n);
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                return Err(e).with_context(|| format!("failed to create {}", tmp.display()));
+            }
+        };
+        if let Err(e) = file.write_all(text.as_bytes()) {
+            let err = anyhow::Error::new(e).context(format!("failed to write {}", tmp.display()));
+            if let Err(rm) = std::fs::remove_file(&tmp) {
+                return Err(err.context(format!("and failed to remove it: {rm}")));
+            }
+            return Err(err);
+        }
+        return Ok(tmp);
+    }
+    bail!(
+        "failed to create a temp file beside {}: 100 names are taken; remove stale .{}.simul-*.tmp files",
+        real.display(),
+        real.file_name().unwrap_or_default().to_string_lossy()
+    )
 }
 
 /// Copies `real` to `<name>.simul-bak`, unless a backup exists and `real` already holds simul's
@@ -691,6 +739,37 @@ mod tests {
         std::fs::write(&path, edited.to_string()).unwrap();
         install(&path, Path::new(EXE)).unwrap();
         assert_eq!(backup_of(&path), edited);
+    }
+
+    #[test]
+    fn replace_file_leaves_another_writers_temp_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "{}\n").unwrap();
+        let real = path.canonicalize().unwrap();
+        // Another run's temp files: the old fixed name, and this process's first two names.
+        let theirs = [
+            real.with_extension("simul-tmp"),
+            temp_path(&real, 0),
+            temp_path(&real, 1),
+        ];
+        for t in &theirs {
+            std::fs::write(t, "theirs").unwrap();
+        }
+
+        replace_file(&path, "{\"a\": 1}\n", false).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"a\": 1}\n");
+        for t in &theirs {
+            assert_eq!(
+                std::fs::read_to_string(t).unwrap(),
+                "theirs",
+                "{}",
+                t.display()
+            );
+        }
+        let count = std::fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(count, 1 + theirs.len(), "no temp file of ours is left");
     }
 
     #[test]
