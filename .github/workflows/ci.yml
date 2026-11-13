@@ -4,7 +4,7 @@ name: ci
 on:
   push:
     branches: [main]
-  # Dependabot proposes updates as pull requests.
+  # A pull request, such as one from an outside contributor, gets the same checks as main.
   pull_request:
   workflow_dispatch:
   # release.yml runs these checks on the tagged commit before it builds anything.
