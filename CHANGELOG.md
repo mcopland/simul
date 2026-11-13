@@ -4,6 +4,8 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-11-13
+
 ### Fixed
 
 - `uninstall-hooks kiro` on a symlinked hook file takes simul's hooks out of the file it points to. It removed only the link before, which left the hooks for a dotfiles tool to link back.
@@ -148,7 +150,8 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 - `simul.tmux` entry point that downloads the prebuilt binary matching `VERSION`.
 - Model and effort for each agent in `simul ls`.
 
-[Unreleased]: https://github.com/mcopland/simul/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/mcopland/simul/compare/v0.11.2...HEAD
+[0.11.2]: https://github.com/mcopland/simul/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/mcopland/simul/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/mcopland/simul/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/mcopland/simul/compare/v0.9.0...v0.10.0
