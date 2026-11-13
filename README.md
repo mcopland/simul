@@ -70,7 +70,7 @@ Then add `run-shell /path/to/simul/simul.tmux` to `tmux.conf`. When `target/rele
 
 ### Uninstall
 
-Remove the hooks first, while `simul` is still installed. Only entries tagged `#simul-managed` are removed:
+Remove the hooks first, while `simul` is still installed. Only entries tagged `#simul-managed` are removed. If the Kiro hook file is a symlink, simul takes its hooks out of the file it points to and keeps both files:
 
 ```sh
 simul uninstall-hooks claude            # ~/.claude/settings.json

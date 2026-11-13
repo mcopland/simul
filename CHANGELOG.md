@@ -4,6 +4,12 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+### Fixed
+
+- `uninstall-hooks kiro` on a symlinked hook file takes simul's hooks out of the file it points to. It removed only the link before, which left the hooks for a dotfiles tool to link back.
+- Two `install-hooks` runs at the same time no longer overwrite each other's temporary file.
+- Edits to `.git/info/exclude` replace the whole file at once, so an interrupted write can't truncate it.
+
 ## [0.11.1] - 2026-11-13
 
 ### Fixed

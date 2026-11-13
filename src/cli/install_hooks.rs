@@ -36,10 +36,14 @@ pub fn run_uninstall(agent: &str, project: bool, settings: Option<PathBuf>) -> R
         }
         "kiro" => {
             let path = kiro_path(project, settings)?;
-            if uninstall_kiro(&path)? {
-                println!("removed {}", path.display());
-            } else {
-                println!("no simul hook file at {}", path.display());
+            match uninstall_kiro(&path)? {
+                KiroUninstall::Nothing => println!("no simul hooks at {}", path.display()),
+                KiroUninstall::Removed(gone) => println!("removed {}", gone.display()),
+                KiroUninstall::Emptied { link, file } => println!(
+                    "removed simul's hooks from {} (linked from {}); both files stay",
+                    file.display(),
+                    link.display()
+                ),
             }
             if project {
                 let cwd =
@@ -302,8 +306,8 @@ pub fn kiro_managed(file: &Value) -> Vec<(String, String)> {
 
 /// Writes simul's Kiro hook file, replacing an earlier one but never a file with other hooks.
 /// Fails unless the Kiro hook file at `path` holds only simul's hooks; `verb` names the refused
-/// action in the error.
-fn check_kiro_file_is_ours(path: &Path, verb: &str) -> Result<()> {
+/// action in the error. Returns the parsed file and how many hooks it holds, all simul's.
+fn check_kiro_file_is_ours(path: &Path, verb: &str) -> Result<(Value, usize)> {
     let old = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     let old: Value = serde_json::from_str(&old).with_context(|| {
@@ -329,7 +333,7 @@ fn check_kiro_file_is_ours(path: &Path, verb: &str) -> Result<()> {
             path.display()
         );
     }
-    Ok(())
+    Ok((old, ours))
 }
 
 pub fn install_kiro(path: &Path, exe: &Path) -> Result<PathBuf> {
@@ -451,17 +455,47 @@ pub fn uninstall(path: &Path) -> Result<usize> {
     Ok(removed)
 }
 
-/// Deletes simul's Kiro hook file, refusing one that holds other hooks. A symlink is removed
-/// itself, leaving the file it points to. Returns false if there was no file.
-pub fn uninstall_kiro(path: &Path) -> Result<bool> {
-    if std::fs::symlink_metadata(path).is_err() {
-        return Ok(false);
+/// What `uninstall_kiro` did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum KiroUninstall {
+    /// No file, or one without simul's hooks; nothing was touched.
+    Nothing,
+    /// Deleted this file, or this dangling link.
+    Removed(PathBuf),
+    /// `link` is a symlink: simul's hooks were taken out of `file`, the file it points to,
+    /// and both stay. Deleting `file` could break other links to it, or a file simul doesn't
+    /// own, so that is left to the user.
+    Emptied { link: PathBuf, file: PathBuf },
+}
+
+/// Removes simul's Kiro hooks at `path`, refusing a file that holds other hooks. A plain file
+/// is deleted; through a symlink, the hooks are taken out of the file it points to.
+pub fn uninstall_kiro(path: &Path) -> Result<KiroUninstall> {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return Ok(KiroUninstall::Nothing);
+    };
+    if !path.exists() {
+        std::fs::remove_file(path)
+            .with_context(|| format!("failed to remove dangling link {}", path.display()))?;
+        return Ok(KiroUninstall::Removed(path.to_owned()));
     }
-    if path.exists() {
-        check_kiro_file_is_ours(path, "remove")?;
+    let (mut file, ours) = check_kiro_file_is_ours(path, "remove")?;
+    if ours == 0 {
+        return Ok(KiroUninstall::Nothing);
     }
-    std::fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))?;
-    Ok(true)
+    if !meta.file_type().is_symlink() {
+        std::fs::remove_file(path)
+            .with_context(|| format!("failed to remove {}", path.display()))?;
+        return Ok(KiroUninstall::Removed(path.to_owned()));
+    }
+    file["hooks"] = json!([]);
+    let mut text = serde_json::to_string_pretty(&file).context("failed to encode Kiro hooks")?;
+    text.push('\n');
+    let real = replace_file(path, &text, false)?;
+    Ok(KiroUninstall::Emptied {
+        link: path.to_owned(),
+        file: real,
+    })
 }
 
 /// Whether `path` exists, following symlinks. A symlink whose target is missing is an error:
@@ -937,9 +971,12 @@ mod tests {
     fn uninstall_kiro_removes_only_a_simul_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("simul.json");
-        assert!(!uninstall_kiro(&path).unwrap(), "nothing to remove");
+        assert_eq!(uninstall_kiro(&path).unwrap(), KiroUninstall::Nothing);
         install_kiro(&path, Path::new(EXE)).unwrap();
-        assert!(uninstall_kiro(&path).unwrap());
+        assert_eq!(
+            uninstall_kiro(&path).unwrap(),
+            KiroUninstall::Removed(path.clone())
+        );
         assert!(!path.exists());
 
         let mine = r#"{"version": "v1", "hooks": [{"name": "fmt", "trigger": "Stop", "action": {"type": "command", "command": "/u/fmt.sh"}}]}"#;
@@ -947,6 +984,78 @@ mod tests {
         let err = format!("{:#}", uninstall_kiro(&path).unwrap_err());
         assert!(err.contains("simul.json"), "{err}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), mine);
+    }
+
+    #[test]
+    fn uninstall_kiro_empties_a_linked_file_and_keeps_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("dotfiles/kiro-simul.json");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        install_kiro(&target, Path::new(EXE)).unwrap();
+        // Two links share the file, as from two projects.
+        let links = [dir.path().join("a.json"), dir.path().join("b.json")];
+        for link in &links {
+            std::os::unix::fs::symlink(&target, link).unwrap();
+        }
+
+        assert_eq!(
+            uninstall_kiro(&links[0]).unwrap(),
+            KiroUninstall::Emptied {
+                link: links[0].clone(),
+                file: target.canonicalize().unwrap()
+            }
+        );
+        let left = read_json(&target);
+        assert!(kiro_managed(&left).is_empty(), "{left}");
+        assert_eq!(left["hooks"], json!([]));
+        for link in &links {
+            assert!(link.exists(), "{} still resolves", link.display());
+        }
+        assert_eq!(uninstall_kiro(&links[1]).unwrap(), KiroUninstall::Nothing);
+    }
+
+    #[test]
+    fn uninstall_kiro_leaves_a_file_without_simul_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("settings.json");
+        let link = dir.path().join("simul.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        for text in [r#"{"theme": "dark"}"#, r#"{"hooks": []}"#] {
+            std::fs::write(&target, text).unwrap();
+            assert_eq!(uninstall_kiro(&link).unwrap(), KiroUninstall::Nothing);
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), text);
+            assert!(std::fs::symlink_metadata(&link).is_ok());
+            assert_eq!(uninstall_kiro(&target).unwrap(), KiroUninstall::Nothing);
+            assert!(
+                target.exists(),
+                "a plain file without simul's hooks stays too"
+            );
+        }
+    }
+
+    #[test]
+    fn uninstall_kiro_leaves_a_linked_file_with_other_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("mine.json");
+        let mine = r#"{"version": "v1", "hooks": [{"name": "fmt", "trigger": "Stop", "action": {"type": "command", "command": "/u/fmt.sh"}}]}"#;
+        std::fs::write(&target, mine).unwrap();
+        let link = dir.path().join("simul.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(uninstall_kiro(&link).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), mine);
+        assert!(std::fs::symlink_metadata(&link).is_ok());
+    }
+
+    #[test]
+    fn uninstall_kiro_removes_a_dangling_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("simul.json");
+        std::os::unix::fs::symlink(dir.path().join("gone.json"), &link).unwrap();
+        assert_eq!(
+            uninstall_kiro(&link).unwrap(),
+            KiroUninstall::Removed(link.clone())
+        );
+        assert!(std::fs::symlink_metadata(&link).is_err());
     }
 
     #[test]
@@ -1061,7 +1170,10 @@ mod tests {
             install_kiro(&pkg.join(KIRO_PROJECT_FILE), Path::new(EXE)).unwrap();
         }
 
-        assert!(uninstall_kiro(&a.join(KIRO_PROJECT_FILE)).unwrap());
+        assert_ne!(
+            uninstall_kiro(&a.join(KIRO_PROJECT_FILE)).unwrap(),
+            KiroUninstall::Nothing
+        );
         match unexclude_project_hooks(&a).unwrap() {
             Unexclude::Kept(others) => {
                 assert_eq!(others, ["pkg/b/.kiro/hooks/simul.json"])
@@ -1071,7 +1183,10 @@ mod tests {
         let text = std::fs::read_to_string(&exclude).unwrap();
         assert!(text.contains(KIRO_EXCLUDE_PATTERN), "{text}");
 
-        assert!(uninstall_kiro(&b.join(KIRO_PROJECT_FILE)).unwrap());
+        assert_ne!(
+            uninstall_kiro(&b.join(KIRO_PROJECT_FILE)).unwrap(),
+            KiroUninstall::Nothing
+        );
         assert!(matches!(
             unexclude_project_hooks(&b).unwrap(),
             Unexclude::Removed(_)
