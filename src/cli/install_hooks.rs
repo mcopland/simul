@@ -533,15 +533,14 @@ fn replace_file(path: &Path, text: &str, backup: bool) -> Result<PathBuf> {
         path.to_path_buf()
     };
     let tmp = write_temp(&real, text)?;
-    let swapped = std::fs::metadata(&real)
-        .map_or(Ok(()), |meta| {
-            std::fs::set_permissions(&tmp, meta.permissions())
-        })
-        .with_context(|| format!("failed to copy permissions to {}", tmp.display()))
-        .and_then(|()| {
-            std::fs::rename(&tmp, &real)
-                .with_context(|| format!("failed to replace {}", real.display()))
-        });
+    let swapped = match std::fs::metadata(&real) {
+        Ok(meta) => match_original(&tmp, &meta),
+        Err(_) => Ok(()),
+    }
+    .and_then(|()| {
+        std::fs::rename(&tmp, &real)
+            .with_context(|| format!("failed to replace {}", real.display()))
+    });
     if let Err(e) = swapped {
         if let Err(rm) = std::fs::remove_file(&tmp) {
             return Err(e.context(format!("and failed to remove {}: {rm}", tmp.display())));
@@ -551,6 +550,29 @@ fn replace_file(path: &Path, text: &str, backup: bool) -> Result<PathBuf> {
     Ok(real)
 }
 
+/// Gives `tmp` the mode, owner, and group of the file it replaces. Owner and group only change
+/// when they differ, which takes root, as when simul runs under sudo in another user's repo.
+fn match_original(tmp: &Path, original: &std::fs::Metadata) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::set_permissions(tmp, original.permissions())
+        .with_context(|| format!("failed to copy permissions to {}", tmp.display()))?;
+    let mine =
+        std::fs::metadata(tmp).with_context(|| format!("failed to stat {}", tmp.display()))?;
+    if (mine.uid(), mine.gid()) != (original.uid(), original.gid()) {
+        std::os::unix::fs::chown(tmp, Some(original.uid()), Some(original.gid())).with_context(
+            || {
+                format!(
+                    "failed to give {} the original's owner {}:{}; run simul as that user",
+                    tmp.display(),
+                    original.uid(),
+                    original.gid()
+                )
+            },
+        )?;
+    }
+    Ok(())
+}
+
 /// The `n`th temp name beside `real` for this process. Temp files sit beside the file they
 /// replace so the rename stays on one filesystem.
 fn temp_path(real: &Path, n: u32) -> PathBuf {
@@ -558,15 +580,19 @@ fn temp_path(real: &Path, n: u32) -> PathBuf {
     real.with_file_name(format!(".{name}.simul-{}-{n}.tmp", std::process::id()))
 }
 
-/// Writes `text` to a new temp file beside `real`. It is created only if nothing is there yet,
-/// so a concurrent run's temp file is never overwritten.
+/// Writes `text` to a new temp file beside `real` and flushes it to disk, so the rename can't
+/// land before the data. It is created only if nothing is there yet, so a concurrent run's temp
+/// file is never overwritten, and private, since settings can hold secrets until the original's
+/// mode is copied over.
 fn write_temp(real: &Path, text: &str) -> Result<PathBuf> {
     use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt;
     for n in 0..100 {
         let tmp = temp_path(real, n);
         let mut file = match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
+            .mode(0o600)
             .open(&tmp)
         {
             Ok(f) => f,
@@ -575,7 +601,10 @@ fn write_temp(real: &Path, text: &str) -> Result<PathBuf> {
                 return Err(e).with_context(|| format!("failed to create {}", tmp.display()));
             }
         };
-        if let Err(e) = file.write_all(text.as_bytes()) {
+        if let Err(e) = file
+            .write_all(text.as_bytes())
+            .and_then(|()| file.sync_all())
+        {
             let err = anyhow::Error::new(e).context(format!("failed to write {}", tmp.display()));
             if let Err(rm) = std::fs::remove_file(&tmp) {
                 return Err(err.context(format!("and failed to remove it: {rm}")));
@@ -584,10 +613,13 @@ fn write_temp(real: &Path, text: &str) -> Result<PathBuf> {
         }
         return Ok(tmp);
     }
+    // Names carry this process's id, so the files holding them are left by dead processes that
+    // had the same id; no live run uses them.
     bail!(
-        "failed to create a temp file beside {}: 100 names are taken; remove stale .{}.simul-*.tmp files",
+        "failed to create a temp file beside {}: all 100 names are taken; remove the stale .{}.simul-{}-*.tmp files",
         real.display(),
-        real.file_name().unwrap_or_default().to_string_lossy()
+        real.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
     )
 }
 
@@ -800,6 +832,34 @@ mod tests {
         }
         let count = std::fs::read_dir(dir.path()).unwrap().count();
         assert_eq!(count, 1 + theirs.len(), "no temp file of ours is left");
+    }
+
+    #[test]
+    fn replace_file_creates_a_new_file_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        replace_file(&path, "{}\n", false).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "settings can hold secrets");
+    }
+
+    #[test]
+    fn taken_temp_names_point_at_this_processs_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "{}\n").unwrap();
+        let real = path.canonicalize().unwrap();
+        for n in 0..100 {
+            std::fs::write(temp_path(&real, n), "stale").unwrap();
+        }
+        let err = format!("{:#}", replace_file(&path, "{}\n", false).unwrap_err());
+        let mine = format!(".settings.json.simul-{}-*.tmp", std::process::id());
+        assert!(err.contains(&mine), "{err}");
+        assert!(
+            !err.contains("simul-*"),
+            "other runs' files are live: {err}"
+        );
     }
 
     #[test]
