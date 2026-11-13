@@ -367,6 +367,7 @@ pub fn git_exclude_file(dir: &Path) -> Result<Option<PathBuf>> {
 }
 
 /// Appends `entry` to an exclude file unless a line already equals it; true if it was added.
+/// The file is swapped whole, so an interrupted write can't truncate git's ignore rules.
 pub fn add_exclude(file: &Path, entry: &str) -> Result<bool> {
     let text = match std::fs::read_to_string(file) {
         Ok(t) => t,
@@ -376,17 +377,12 @@ pub fn add_exclude(file: &Path, entry: &str) -> Result<bool> {
     if text.lines().any(|l| l.trim() == entry) {
         return Ok(false);
     }
-    if let Some(dir) = file.parent() {
-        std::fs::create_dir_all(dir)
-            .with_context(|| format!("failed to create {}", dir.display()))?;
-    }
     let sep = if text.is_empty() || text.ends_with('\n') {
         ""
     } else {
         "\n"
     };
-    std::fs::write(file, format!("{text}{sep}{entry}\n"))
-        .with_context(|| format!("failed to write {}", file.display()))?;
+    replace_file(file, &format!("{text}{sep}{entry}\n"), false)?;
     Ok(true)
 }
 
@@ -405,7 +401,7 @@ pub fn remove_exclude(file: &Path, entry: &str) -> Result<bool> {
     if !out.is_empty() {
         out.push('\n');
     }
-    std::fs::write(file, out).with_context(|| format!("failed to write {}", file.display()))?;
+    replace_file(file, &out, false)?;
     Ok(true)
 }
 
@@ -966,6 +962,28 @@ mod tests {
         assert!(remove_exclude(&file, KIRO_EXCLUDE_PATTERN).unwrap());
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "# ignore\n*.log\n");
         assert!(!remove_exclude(&file, KIRO_EXCLUDE_PATTERN).unwrap());
+    }
+
+    #[test]
+    fn exclude_edits_swap_in_a_whole_new_file() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("exclude");
+        std::fs::write(&file, "# ignore\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let inode = |f: &Path| std::fs::metadata(f).unwrap().ino();
+
+        let before = inode(&file);
+        assert!(add_exclude(&file, KIRO_EXCLUDE_PATTERN).unwrap());
+        assert_ne!(inode(&file), before, "a rename, not a rewrite in place");
+        let before = inode(&file);
+        assert!(remove_exclude(&file, KIRO_EXCLUDE_PATTERN).unwrap());
+        assert_ne!(inode(&file), before, "a rename, not a rewrite in place");
+
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "# ignore\n");
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o640, "the mode is kept");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]
