@@ -15,6 +15,9 @@ use super::{Cmd, Exit};
 use crate::log;
 use crate::protocol::{Ack, Request, Toggled};
 
+/// The pause after a failed `accept` before the next one.
+const ACCEPT_RETRY: Duration = Duration::from_millis(100);
+
 /// How long a starting daemon waits for another one that holds the socket lock to answer.
 const LOCK_WAIT: Duration = Duration::from_secs(2);
 
@@ -106,7 +109,12 @@ pub async fn accept(listener: UnixListener, tx: mpsc::Sender<Cmd>) {
                     }
                 });
             }
-            Err(e) => log!("accept failed: {e}"),
+            Err(e) => {
+                log!("accept failed: {e}");
+                // Errors like EMFILE persist for a while; retrying at once would spin and
+                // flood the log.
+                tokio::time::sleep(ACCEPT_RETRY).await;
+            }
         }
     }
 }
