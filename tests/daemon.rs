@@ -399,10 +399,19 @@ fn sigterm_removes_the_daemons_tmux_hooks_and_socket() {
             .collect()
     };
     eventually("the daemon's tmux hooks", || simul_hooks(&h).len() == 3);
+    // Another daemon on this tmux server (a dev build with its own socket) wrote last here.
+    let theirs = "run-shell -b \"SIMUL_SOCKET=/tmp/other.sock simul internal resized\"";
+    h.tmux(&["set-hook", "-g", "client-resized[7463]", theirs]);
     let status = h.term_daemon();
     assert!(status.success(), "daemon exit after SIGTERM: {status:?}");
     assert!(!h.simul_sock.exists(), "socket left behind");
-    assert_eq!(simul_hooks(&h), Vec::<String>::new());
+    let left = simul_hooks(&h);
+    assert_eq!(
+        left.len(),
+        1,
+        "only the other daemon's hook stays: {left:?}"
+    );
+    assert!(left[0].contains("/tmp/other.sock"), "{left:?}");
     assert!(
         h.daemon_log().contains("daemon exiting: terminated"),
         "log: {}",

@@ -2,16 +2,16 @@
 //! doesn't report.
 
 use super::{Daemon, HOOK_INDEX, LAYOUT_HOOK};
-
-/// Every hook the daemon may set, at `HOOK_INDEX`.
-const HOOKS: [&str; 4] = [
-    "pane-focus-in",
-    "pane-focus-out",
-    "client-resized",
-    LAYOUT_HOOK,
-];
 use crate::log;
 use crate::tmux::{shell_quote, tmux_double_quote};
+
+/// The hooks set for the daemon's whole life, and the `simul internal` subcommand each runs.
+/// `LAYOUT_HOOK` comes and goes with the sidebars.
+const HOOKS: [(&str, &str); 3] = [
+    ("pane-focus-in", "refresh"),
+    ("pane-focus-out", "refresh"),
+    ("client-resized", "resized"),
+];
 
 impl Daemon {
     pub(super) async fn query_focus_events(&self) -> bool {
@@ -33,18 +33,13 @@ impl Daemon {
     /// windows outside the control client's session, so hooks poke the daemon.
     pub(super) async fn install_tmux_hooks(&mut self) {
         self.focus_events = self.query_focus_events().await;
-        let refresh = self.hook_command("refresh");
-        let resized = self.hook_command("resized");
-        for (hook, run) in [
-            ("pane-focus-in", &refresh),
-            ("pane-focus-out", &refresh),
-            ("client-resized", &resized),
-        ] {
+        for (hook, sub) in HOOKS {
             let name = format!("{hook}[{HOOK_INDEX}]");
+            let run = self.hook_command(sub);
             if let Err(e) = self
                 .opts
                 .tmux
-                .run_async(&["set-hook", "-g", &name, run])
+                .run_async(&["set-hook", "-g", &name, &run])
                 .await
             {
                 log!("failed to install tmux hook {name}: {e:#}");
@@ -52,13 +47,29 @@ impl Daemon {
         }
     }
 
-    /// Unsets every hook this daemon set, so none is left calling a daemon that is gone.
+    /// Unsets the hooks that still call this daemon, so none is left calling a daemon that
+    /// is gone. Another daemon on the same tmux server may have written the same entries
+    /// since; those stay. Two tmux calls, so a slow tmux leaves all or none of them.
     pub(super) async fn remove_tmux_hooks(&self) {
-        for hook in HOOKS {
-            let name = format!("{hook}[{HOOK_INDEX}]");
-            if let Err(e) = self.opts.tmux.run_async(&["set-hook", "-gu", &name]).await {
-                log!("failed to remove tmux hook {name}: {e:#}");
+        let hooks = HOOKS.iter().map(|(hook, _)| *hook).chain([LAYOUT_HOOK]);
+        let show = chain(hooks.map(|hook| vec!["show-hooks", "-g", hook]));
+        let listing = match self.opts.tmux.run_async(&show).await {
+            Ok(l) => l,
+            Err(e) => {
+                log!("failed to read tmux hooks, leaving them in place: {e:#}");
+                return;
             }
+        };
+        let ours = ours_in(&listing, &self.opts.socket.to_string_lossy());
+        if ours.is_empty() {
+            return;
+        }
+        let unset = chain(
+            ours.iter()
+                .map(|name| vec!["set-hook", "-gu", name.as_str()]),
+        );
+        if let Err(e) = self.opts.tmux.run_async(&unset).await {
+            log!("failed to remove tmux hooks {}: {e:#}", ours.join(", "));
         }
     }
 
@@ -91,6 +102,30 @@ impl Daemon {
     }
 }
 
+/// Joins tmux commands into one invocation's arguments, separated by `;`.
+fn chain<'a>(cmds: impl Iterator<Item = Vec<&'a str>>) -> Vec<&'a str> {
+    let mut args = Vec::new();
+    for cmd in cmds {
+        if !args.is_empty() {
+            args.push(";");
+        }
+        args.extend(cmd);
+    }
+    args
+}
+
+/// The `hook[HOOK_INDEX]` entries in a `show-hooks` listing that run against `socket`.
+fn ours_in(listing: &str, socket: &str) -> Vec<String> {
+    let index = format!("[{HOOK_INDEX}]");
+    let marker = format!("SIMUL_SOCKET={} ", shell_quote(socket));
+    listing
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .filter(|(name, body)| name.ends_with(&index) && body.contains(&marker))
+        .map(|(name, _)| name.to_owned())
+        .collect()
+}
+
 /// The shell line a hook runs. It always succeeds: tmux shows a failed `run-shell` in the
 /// active pane, and the hook outlives a daemon that crashed or a binary that was deleted.
 fn hook_shell(socket: &str, exe: &str, sub: &str) -> String {
@@ -104,6 +139,22 @@ fn hook_shell(socket: &str, exe: &str, sub: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_this_daemons_hooks_are_ours() {
+        let mine = hook_shell("/run/a b/s.sock", "/x/simul", "refresh");
+        let theirs = hook_shell("/run/other/s.sock", "/x/simul", "resized");
+        let listing = format!(
+            "pane-focus-in[7463] run-shell -b \"{mine}\"\n\
+             pane-focus-in[0] run-shell -b \"{mine}\"\n\
+             client-resized[7463] run-shell -b \"{theirs}\"\n\
+             window-layout-changed[7463] run-shell -b \"{mine}\"\n"
+        );
+        assert_eq!(
+            ours_in(&listing, "/run/a b/s.sock"),
+            ["pane-focus-in[7463]", "window-layout-changed[7463]"]
+        );
+    }
 
     #[test]
     fn hook_shell_succeeds_without_the_binary() {
