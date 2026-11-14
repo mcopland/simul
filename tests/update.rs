@@ -83,6 +83,36 @@ fn replace_takes_over_from_another_build() {
 }
 
 #[test]
+fn replace_with_a_broken_config_keeps_the_running_daemon() {
+    let mut h = Harness::new();
+    h.start_daemon();
+    let first = fs::canonicalize(BIN).unwrap();
+    fs::write(
+        h.dir.path().join("config/simul/config.toml"),
+        "blocked_threshold_ms = \"soon\"\n",
+    )
+    .unwrap();
+
+    let other = copy_bin(&h.dir.path().join("other/simul"));
+    let out = common::spawn_retrying(
+        h.simul_at(&other)
+            .args(["daemon", "--replace", "--tmux-socket"])
+            .arg(&h.tmux_sock)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .wait_with_output()
+    .unwrap();
+
+    assert!(!out.status.success(), "a broken config must stop the start");
+    assert_eq!(daemon_exe(&h).as_deref(), first.to_str());
+    let log = h.daemon_log();
+    assert!(log.contains("invalid config"), "{log}");
+    assert!(!log.contains("replaced"), "{log}");
+}
+
+#[test]
 fn replace_leaves_the_same_build_running() {
     let mut h = Harness::new();
     h.start_daemon();

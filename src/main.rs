@@ -139,14 +139,26 @@ fn run_daemon(
         paths::ensure_private_dir(dir)?;
     }
     simul::log::init(&log_path)?;
+    // simul.tmux and the hook shim discard stderr, so the log is the only place this shows.
+    start_daemon(socket, tmux_socket, replace, restarted_for)
+        .inspect_err(|e| simul::log!("daemon exiting on error: {e:#}"))
+}
+
+fn start_daemon(
+    socket: PathBuf,
+    tmux_socket: PathBuf,
+    replace: bool,
+    restarted_for: Option<String>,
+) -> Result<()> {
     let exe = std::env::current_exe().context("failed to locate the simul binary")?;
     // Hooks often run simul through a symlink; resolve it so the plugin's binary is found.
     let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
     let identity = Identity::of(&exe);
+    // Before `replace`: a config this build can't read must not cost the running daemon.
+    let (config, unknown) = config::load_checked()?;
     if replace {
         daemon::update::replace(&socket, &identity)?;
     }
-    let (config, unknown) = config::load_checked()?;
     if !unknown.is_empty()
         && let Some(path) = config::default_path()
     {
