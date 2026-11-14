@@ -532,22 +532,29 @@ fn replace_file(path: &Path, text: &str, backup: bool) -> Result<PathBuf> {
         }
         path.to_path_buf()
     };
-    let tmp = write_temp(&real, text)?;
-    let swapped = match std::fs::metadata(&real) {
-        Ok(meta) => match_original(&tmp, &meta),
-        Err(_) => Ok(()),
-    }
-    .and_then(|()| {
-        std::fs::rename(&tmp, &real)
-            .with_context(|| format!("failed to replace {}", real.display()))
-    });
+    // A missing original is a new file, which keeps the temp file's private mode.
+    let original = std::fs::metadata(&real).ok();
+    write_swapped(&real, text.as_bytes(), original.as_ref())?;
+    Ok(real)
+}
+
+/// Replaces `dest` with `bytes` through a temp file and a rename, so `dest` never holds a part
+/// of them. The temp file first takes the mode and owner of `like`, when given.
+fn write_swapped(dest: &Path, bytes: &[u8], like: Option<&std::fs::Metadata>) -> Result<()> {
+    let tmp = write_temp(dest, bytes)?;
+    let swapped = like
+        .map_or(Ok(()), |meta| match_original(&tmp, meta))
+        .and_then(|()| {
+            std::fs::rename(&tmp, dest)
+                .with_context(|| format!("failed to replace {}", dest.display()))
+        });
     if let Err(e) = swapped {
         if let Err(rm) = std::fs::remove_file(&tmp) {
             return Err(e.context(format!("and failed to remove {}: {rm}", tmp.display())));
         }
         return Err(e);
     }
-    Ok(real)
+    Ok(())
 }
 
 /// Gives `tmp` the mode, owner, and group of the file it replaces. Owner and group only change
@@ -580,11 +587,11 @@ fn temp_path(real: &Path, n: u32) -> PathBuf {
     real.with_file_name(format!(".{name}.simul-{}-{n}.tmp", std::process::id()))
 }
 
-/// Writes `text` to a new temp file beside `real` and flushes it to disk, so the rename can't
+/// Writes `bytes` to a new temp file beside `real` and flushes it to disk, so the rename can't
 /// land before the data. It is created only if nothing is there yet, so a concurrent run's temp
 /// file is never overwritten, and private, since settings can hold secrets until the original's
 /// mode is copied over.
-fn write_temp(real: &Path, text: &str) -> Result<PathBuf> {
+fn write_temp(real: &Path, bytes: &[u8]) -> Result<PathBuf> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt;
     for n in 0..100 {
@@ -601,10 +608,7 @@ fn write_temp(real: &Path, text: &str) -> Result<PathBuf> {
                 return Err(e).with_context(|| format!("failed to create {}", tmp.display()));
             }
         };
-        if let Err(e) = file
-            .write_all(text.as_bytes())
-            .and_then(|()| file.sync_all())
-        {
+        if let Err(e) = file.write_all(bytes).and_then(|()| file.sync_all()) {
             let err = anyhow::Error::new(e).context(format!("failed to write {}", tmp.display()));
             if let Err(rm) = std::fs::remove_file(&tmp) {
                 return Err(err.context(format!("and failed to remove it: {rm}")));
@@ -623,7 +627,7 @@ fn write_temp(real: &Path, text: &str) -> Result<PathBuf> {
     )
 }
 
-/// Copies `real` to `<name>.simul-bak`, unless a backup exists and `real` already holds simul's
+/// Copies `real` to `<name>.simul-bak`, with its mode and owner, unless a backup exists and `real` already holds simul's
 /// hooks: then the backup is the copy from before simul, and overwriting it would lose it.
 fn write_backup(real: &Path) -> Result<()> {
     let old = std::fs::read(real).with_context(|| format!("failed to read {}", real.display()))?;
@@ -636,7 +640,10 @@ fn write_backup(real: &Path) -> Result<()> {
     if has_ours && backup.exists() {
         return Ok(());
     }
-    std::fs::write(&backup, old)
+    // The backup holds the same secrets, so it gets the original's mode and owner.
+    let meta =
+        std::fs::metadata(real).with_context(|| format!("failed to stat {}", real.display()))?;
+    write_swapped(&backup, &old, Some(&meta))
         .with_context(|| format!("failed to write backup {}", backup.display()))
 }
 
@@ -801,6 +808,21 @@ mod tests {
         std::fs::write(&path, edited.to_string()).unwrap();
         install(&path, Path::new(EXE)).unwrap();
         assert_eq!(backup_of(&path), edited);
+    }
+
+    #[test]
+    fn backup_keeps_a_private_settings_files_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "{\"model\": \"opus\"}\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        install(&path, Path::new(EXE)).unwrap();
+        let backup = dir.path().join("settings.json.simul-bak");
+        let mode = std::fs::metadata(&backup).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the backup holds the same secrets");
+        let count = std::fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(count, 2, "no temp file is left");
     }
 
     #[test]
