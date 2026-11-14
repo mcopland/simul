@@ -1,7 +1,10 @@
+use std::fs::{File, TryLockError};
 use std::io::ErrorKind;
-use std::path::Path;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
@@ -12,21 +15,72 @@ use super::{Cmd, Exit};
 use crate::log;
 use crate::protocol::{Ack, Request, Toggled};
 
-/// Binds the daemon socket, or returns `None` if a live daemon already owns it.
-pub fn bind(path: &Path) -> Result<Option<UnixListener>> {
+/// How long a starting daemon waits for another one that holds the socket lock to answer.
+const LOCK_WAIT: Duration = Duration::from_secs(2);
+
+/// Binds the daemon socket, or returns `None` if a live daemon already owns it. The returned
+/// file holds the socket lock; keep it open for as long as the socket is served.
+pub fn bind(path: &Path) -> Result<Option<(UnixListener, File)>> {
+    bind_within(path, LOCK_WAIT)
+}
+
+/// The lock file beside the socket at `path`, like the log.
+fn lock_path(path: &Path) -> PathBuf {
+    path.with_extension("lock")
+}
+
+/// Like `bind`, waiting up to `wait` for a lock holder that does not answer yet.
+///
+/// Taking over a stale socket is check, remove, then bind; two daemons doing it at once could
+/// both bind, and one would run on an unlinked socket. The lock lets only one in. Its file is
+/// close-on-exec, so a self-update's `exec` frees it for the new image.
+fn bind_within(path: &Path, wait: Duration) -> Result<Option<(UnixListener, File)>> {
     if let Some(dir) = path.parent() {
         crate::paths::ensure_private_dir(dir)?;
     }
+    let lock_path = lock_path(path);
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open lock file {}", lock_path.display()))?;
+    let deadline = Instant::now() + wait;
+    loop {
+        match lock.try_lock() {
+            Ok(()) => break,
+            Err(TryLockError::WouldBlock) => {
+                // A holder that answers is a live daemon; one that doesn't is still starting
+                // or just exiting.
+                if std::os::unix::net::UnixStream::connect(path).is_ok() {
+                    return Ok(None);
+                }
+                if Instant::now() >= deadline {
+                    bail!(
+                        "another simul daemon holds {} but does not answer at {} after {wait:?}; stop it with: pkill -f 'simul daemon'",
+                        lock_path.display(),
+                        path.display()
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(TryLockError::Error(e)) => {
+                return Err(e).with_context(|| format!("failed to lock {}", lock_path.display()));
+            }
+        }
+    }
     match UnixListener::bind(path) {
-        Ok(l) => Ok(Some(l)),
+        Ok(l) => Ok(Some((l, lock))),
         Err(e) if e.kind() == ErrorKind::AddrInUse => {
+            // A daemon from before the lock existed may still serve the socket.
             if std::os::unix::net::UnixStream::connect(path).is_ok() {
                 return Ok(None);
             }
             std::fs::remove_file(path)
                 .with_context(|| format!("failed to remove stale socket: {}", path.display()))?;
             UnixListener::bind(path)
-                .map(Some)
+                .map(|l| Some((l, lock)))
                 .with_context(|| format!("failed to bind socket: {}", path.display()))
         }
         Err(e) => Err(e).with_context(|| format!("failed to bind socket: {}", path.display())),
@@ -161,6 +215,68 @@ async fn send(tx: &mpsc::Sender<Cmd>, cmd: Cmd) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A temp dir the daemon accepts for its socket.
+    fn private_dir() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir
+    }
+
+    /// A socket file that nothing listens on, as a crashed daemon leaves it.
+    fn stale_socket(dir: &Path) -> std::path::PathBuf {
+        let path = dir.join("s.sock");
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        assert!(path.exists());
+        path
+    }
+
+    #[tokio::test]
+    async fn a_held_lock_keeps_a_stale_socket_from_a_second_daemon() {
+        let dir = private_dir();
+        let path = stale_socket(dir.path());
+        let holder = std::fs::File::create(lock_path(&path)).unwrap();
+        holder.try_lock().unwrap();
+
+        let err = bind_within(&path, Duration::from_millis(100)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains(&*path.to_string_lossy()),
+            "{err:#}"
+        );
+        assert!(
+            path.exists(),
+            "the stale socket is the lock holder's to take"
+        );
+
+        drop(holder);
+        let bound = bind_within(&path, Duration::from_millis(100)).unwrap();
+        assert!(
+            bound.is_some(),
+            "a free lock lets the stale socket be taken"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_live_daemon_keeps_its_socket() {
+        let dir = private_dir();
+        let path = dir.path().join("s.sock");
+        // An older daemon that holds no lock.
+        let _live = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        assert!(
+            bind_within(&path, Duration::from_millis(100))
+                .unwrap()
+                .is_none()
+        );
+        // A daemon of this build, which also holds the lock.
+        let holder = std::fs::File::create(lock_path(&path)).unwrap();
+        holder.try_lock().unwrap();
+        assert!(
+            bind_within(&path, Duration::from_millis(100))
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn hangups_are_disconnects() {

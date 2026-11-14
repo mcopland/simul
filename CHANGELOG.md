@@ -10,6 +10,7 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 - On WSL with `notify.desktop = true`, a branch name holding a curly single quote (U+2018, U+2019, U+201A, or U+201B) can no longer end the PowerShell string in a notification and run commands.
 - The Claude settings backup, `settings.json.simul-bak`, gets the settings file's mode and owner, so a private settings file no longer leaves a backup others can read. It is also replaced whole, like the settings file.
 - A plugin reload with a config that fails to parse keeps the running daemon instead of stopping it and starting none. The daemon log now records why a daemon failed to start.
+- Two daemons that start at the same moment for one tmux server no longer both run. A lock file beside the socket lets only one take over a stale socket.
 
 ## [0.11.2] - 2026-11-13
 

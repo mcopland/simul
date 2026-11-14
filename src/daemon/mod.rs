@@ -129,7 +129,8 @@ struct Daemon {
 }
 
 pub async fn run(opts: Options) -> Result<()> {
-    let Some(listener) = server::bind(&opts.socket)? else {
+    // `_lock` (not `_`) keeps the socket lock held until the daemon exits.
+    let Some((listener, _lock)) = server::bind(&opts.socket)? else {
         log!("daemon already running at {}", opts.socket.display());
         return Ok(());
     };
