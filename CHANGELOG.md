@@ -13,6 +13,7 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 - Two daemons that start at the same moment for one tmux server no longer both run. A lock file beside the socket lets only one take over a stale socket.
 - With `CLAUDE_CONFIG_DIR` set, `install-hooks claude`, `uninstall-hooks claude`, and `doctor` use `$CLAUDE_CONFIG_DIR/settings.json`, the file Claude Code reads. They used `~/.claude/settings.json` before.
 - `install-hooks kiro --project` and `uninstall-hooks kiro --project` outside a git repo print their notice under a translated git too, instead of failing.
+- A failed toggle shows simul's message, which names the daemon socket and `simul doctor`, not only `'...' toggle returned 1`.
 
 ## [0.11.2] - 2026-11-13
 

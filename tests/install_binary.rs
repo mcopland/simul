@@ -343,6 +343,12 @@ fn plugin_installs_binary_and_binds_key() {
             .any(|l| l.starts_with("bind-key a") && l.contains(&bin)),
         "{log}"
     );
+    // tmux drops a run-shell command's stderr, which names the socket and `simul doctor`.
+    assert!(
+        log.lines()
+            .any(|l| l.starts_with("bind-key a") && l.ends_with(" toggle 2>&1")),
+        "a failed toggle shows simul's own message: {log}"
+    );
     assert!(
         log.lines().any(|l| l.starts_with("run-shell -b")
             && l.contains(&format!("'{bin}' daemon --replace --tmux-socket"))),

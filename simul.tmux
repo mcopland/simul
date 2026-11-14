@@ -81,7 +81,8 @@ main() {
 		*simul*" toggle"*) tmux unbind-key -T prefix "$old" ;;
 		esac
 	fi
-	tmux bind-key "$key" run-shell -b "$(sq "$bin") toggle"
+	# tmux drops run-shell's stderr, which says why a toggle failed.
+	tmux bind-key "$key" run-shell -b "$(sq "$bin") toggle 2>&1"
 	tmux set-option -g @simul-bound-key "$key"
 }
 
