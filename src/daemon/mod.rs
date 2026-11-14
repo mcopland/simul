@@ -37,6 +37,8 @@ const RECONCILE_DEBOUNCE: Duration = Duration::from_millis(50);
 const TICK: Duration = Duration::from_secs(1);
 /// How long a signalled daemon waits for tmux to drop its hooks.
 const SIGNAL_CLEANUP: Duration = Duration::from_secs(2);
+/// How long after SIGTERM or SIGINT a daemon that has not stopped cleanly is ended.
+const SIGNAL_DEADLINE: Duration = Duration::from_secs(5);
 /// Index in tmux hook arrays, so simul's entries never replace the user's.
 const HOOK_INDEX: u32 = 7463;
 const LAYOUT_HOOK: &str = "window-layout-changed";
@@ -140,7 +142,7 @@ pub async fn run(opts: Options) -> Result<()> {
         opts.tmux.socket().display()
     );
     let (tx, mut rx) = mpsc::channel(256);
-    tokio::spawn(server::accept(listener, tx.clone()));
+    let accept = tokio::spawn(server::accept(listener, tx.clone()));
     tokio::spawn(control_mode::run(opts.tmux.clone(), tx.clone()));
     tokio::spawn(ticker(tx.clone()));
     handle_signals(&tx);
@@ -200,6 +202,14 @@ pub async fn run(opts: Options) -> Result<()> {
             None => break Exit::TmuxGone,
         }
     };
+    // Stop answering while the lock is still held: a daemon starting now must wait for the
+    // lock, not find this one answering and leave, only for this one to exit.
+    accept.abort();
+    if let Err(e) = accept.await
+        && !e.is_cancelled()
+    {
+        log!("accept task failed: {e}");
+    }
     match exit {
         Exit::TmuxGone => {
             log!("daemon exiting: tmux server gone");
@@ -209,9 +219,9 @@ pub async fn run(opts: Options) -> Result<()> {
         Exit::Replaced => log!("daemon exiting: replaced by another build"),
         Exit::Terminated => {
             log!("daemon exiting: terminated by a signal");
-            // Hooks go before the socket: while the socket answers, no new daemon starts and
-            // sets hooks that this one would then remove. A hung tmux must not keep the
-            // daemon alive after SIGTERM.
+            // The lock, held until `run` returns, keeps a new daemon from setting hooks
+            // before this one removes them. A hung tmux must not keep the daemon alive
+            // after SIGTERM.
             if tokio::time::timeout(SIGNAL_CLEANUP, d.remove_tmux_hooks())
                 .await
                 .is_err()
@@ -237,6 +247,8 @@ async fn ticker(tx: mpsc::Sender<Cmd>) {
 /// The daemon may be started from a hook inside a pane; closing that pane must not kill it.
 /// SIGTERM and SIGINT stop it through `Cmd::Shutdown`, so it removes its tmux hooks. The
 /// handlers are installed before the hooks are set, so no signal can skip that cleanup.
+/// tokio keeps a handler installed for good, so a daemon whose loop is stuck would ignore
+/// every later signal; a second signal, or no clean stop by `SIGNAL_DEADLINE`, exits at once.
 fn handle_signals(tx: &mpsc::Sender<Cmd>) {
     use tokio::signal::unix::{SignalKind, signal};
     match signal(SignalKind::hangup()) {
@@ -253,10 +265,22 @@ fn handle_signals(tx: &mpsc::Sender<Cmd>) {
             Ok(mut sig) => {
                 let tx = tx.clone();
                 tokio::spawn(async move {
-                    if sig.recv().await.is_some() {
+                    if sig.recv().await.is_none() {
+                        return;
+                    }
+                    let stop = async {
                         // Fails only once the daemon is already exiting.
                         let _ = tx.send(Cmd::Shutdown(Exit::Terminated)).await;
+                        sig.recv().await
+                    };
+                    // A clean stop ends the process before either of these.
+                    match tokio::time::timeout(SIGNAL_DEADLINE, stop).await {
+                        Ok(_) => log!("daemon exiting at once on a second {name}"),
+                        Err(_) => log!(
+                            "daemon exiting at once: no clean stop within {SIGNAL_DEADLINE:?} of {name}"
+                        ),
                     }
+                    std::process::exit(1);
                 });
             }
             Err(e) => log!("failed to install {name} handler: {e}"),

@@ -18,8 +18,10 @@ use crate::protocol::{Ack, Request, Toggled};
 /// The pause after a failed `accept` before the next one.
 const ACCEPT_RETRY: Duration = Duration::from_millis(100);
 
-/// How long a starting daemon waits for another one that holds the socket lock to answer.
-const LOCK_WAIT: Duration = Duration::from_secs(2);
+/// How long a starting daemon waits for another one that holds the socket lock to answer
+/// or to exit. It outlasts a signalled daemon's cleanup, which holds the lock without
+/// answering.
+const LOCK_WAIT: Duration = Duration::from_secs(5);
 
 /// Binds the daemon socket, or returns `None` if a live daemon already owns it. The returned
 /// file holds the socket lock; keep it open for as long as the socket is served.
