@@ -79,7 +79,7 @@ simul uninstall-hooks kiro              # deletes ~/.kiro/hooks/simul.json
 simul uninstall-hooks kiro --project    # deletes ./.kiro/hooks/simul.json and its .git/info/exclude line
 ```
 
-Toggle the sidebar off so tmux gets its status line back. Then delete the `set -g @plugin 'mcopland/simul'` line from `tmux.conf`. Press `prefix + alt + u`, and TPM deletes the plugin directory. Without TPM, delete the `run-shell` line and the checkout instead. Finally, stop the daemon and remove what is left:
+Toggle the sidebar off so tmux gets its status line back. Then delete the `set -g @plugin 'mcopland/simul'` line from `tmux.conf`. Press `prefix + alt + u`, and TPM deletes the plugin directory. Without TPM, delete the `run-shell` line and the checkout instead. Finally, stop the daemon and remove what is left. On `pkill`, the daemon also removes its tmux hooks:
 
 ```sh
 pkill -f 'simul daemon'

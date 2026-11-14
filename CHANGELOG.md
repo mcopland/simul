@@ -4,6 +4,10 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+### Fixed
+
+- Switching panes no longer opens a `'...' returned 1` message after the daemon stops. `pkill -f 'simul daemon'` now removes the daemon's tmux hooks, and a hook left by a crashed daemon or a deleted binary stays silent.
+
 ## [0.11.2] - 2026-11-13
 
 ### Fixed

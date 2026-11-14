@@ -2,6 +2,14 @@
 //! doesn't report.
 
 use super::{Daemon, HOOK_INDEX, LAYOUT_HOOK};
+
+/// Every hook the daemon may set, at `HOOK_INDEX`.
+const HOOKS: [&str; 4] = [
+    "pane-focus-in",
+    "pane-focus-out",
+    "client-resized",
+    LAYOUT_HOOK,
+];
 use crate::log;
 use crate::tmux::{shell_quote, tmux_double_quote};
 
@@ -44,12 +52,22 @@ impl Daemon {
         }
     }
 
+    /// Unsets every hook this daemon set, so none is left calling a daemon that is gone.
+    pub(super) async fn remove_tmux_hooks(&self) {
+        for hook in HOOKS {
+            let name = format!("{hook}[{HOOK_INDEX}]");
+            if let Err(e) = self.opts.tmux.run_async(&["set-hook", "-gu", &name]).await {
+                log!("failed to remove tmux hook {name}: {e:#}");
+            }
+        }
+    }
+
     /// A hook body that runs `simul internal <sub>` against this daemon.
     pub(super) fn hook_command(&self, sub: &str) -> String {
-        let cmd = format!(
-            "SIMUL_SOCKET={} {} internal {sub} >/dev/null 2>&1",
-            shell_quote(&self.opts.socket.to_string_lossy()),
-            shell_quote(&self.opts.exe.to_string_lossy()),
+        let cmd = hook_shell(
+            &self.opts.socket.to_string_lossy(),
+            &self.opts.exe.to_string_lossy(),
+            sub,
         );
         format!("run-shell -b {}", tmux_double_quote(&cmd))
     }
@@ -70,5 +88,30 @@ impl Daemon {
                 if on { "on" } else { "off" }
             );
         }
+    }
+}
+
+/// The shell line a hook runs. It always succeeds: tmux shows a failed `run-shell` in the
+/// active pane, and the hook outlives a daemon that crashed or a binary that was deleted.
+fn hook_shell(socket: &str, exe: &str, sub: &str) -> String {
+    format!(
+        "SIMUL_SOCKET={} {} internal {sub} >/dev/null 2>&1 || true",
+        shell_quote(socket),
+        shell_quote(exe),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hook_shell_succeeds_without_the_binary() {
+        let line = hook_shell("/nonexistent/s.sock", "/nonexistent/simul", "refresh");
+        let status = std::process::Command::new("sh")
+            .args(["-c", &line])
+            .status()
+            .unwrap();
+        assert!(status.success(), "{line:?} exited {status:?}");
     }
 }

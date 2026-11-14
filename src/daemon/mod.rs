@@ -35,6 +35,8 @@ use update::Updater;
 
 const RECONCILE_DEBOUNCE: Duration = Duration::from_millis(50);
 const TICK: Duration = Duration::from_secs(1);
+/// How long a signalled daemon waits for tmux to drop its hooks.
+const SIGNAL_CLEANUP: Duration = Duration::from_secs(2);
 /// Index in tmux hook arrays, so simul's entries never replace the user's.
 const HOOK_INDEX: u32 = 7463;
 const LAYOUT_HOOK: &str = "window-layout-changed";
@@ -88,6 +90,8 @@ pub enum Exit {
     TmuxGone,
     /// Another build asked for the socket (see `update::replace`).
     Replaced,
+    /// SIGTERM or SIGINT, as from `pkill -f 'simul daemon'`.
+    Terminated,
 }
 
 pub struct Options {
@@ -138,7 +142,7 @@ pub async fn run(opts: Options) -> Result<()> {
     tokio::spawn(server::accept(listener, tx.clone()));
     tokio::spawn(control_mode::run(opts.tmux.clone(), tx.clone()));
     tokio::spawn(ticker(tx.clone()));
-    tokio::spawn(ignore_sighup());
+    handle_signals(&tx);
     let plugin = update::plugin_dir(&opts.exe);
     // Lives until the daemon exits.
     let _watcher = plugin
@@ -202,6 +206,19 @@ pub async fn run(opts: Options) -> Result<()> {
         }
         // The socket is the new daemon's to take; removing it could race its bind.
         Exit::Replaced => log!("daemon exiting: replaced by another build"),
+        Exit::Terminated => {
+            log!("daemon exiting: terminated by a signal");
+            // Hooks go before the socket: while the socket answers, no new daemon starts and
+            // sets hooks that this one would then remove. A hung tmux must not keep the
+            // daemon alive after SIGTERM.
+            if tokio::time::timeout(SIGNAL_CLEANUP, d.remove_tmux_hooks())
+                .await
+                .is_err()
+            {
+                log!("tmux did not answer within {SIGNAL_CLEANUP:?}; leaving its hooks in place");
+            }
+            server::remove_socket(&d.opts.socket);
+        }
     }
     Ok(())
 }
@@ -217,11 +234,32 @@ async fn ticker(tx: mpsc::Sender<Cmd>) {
 }
 
 /// The daemon may be started from a hook inside a pane; closing that pane must not kill it.
-async fn ignore_sighup() {
+/// SIGTERM and SIGINT stop it through `Cmd::Shutdown`, so it removes its tmux hooks. The
+/// handlers are installed before the hooks are set, so no signal can skip that cleanup.
+fn handle_signals(tx: &mpsc::Sender<Cmd>) {
     use tokio::signal::unix::{SignalKind, signal};
     match signal(SignalKind::hangup()) {
-        Ok(mut hup) => while hup.recv().await.is_some() {},
+        Ok(mut hup) => {
+            tokio::spawn(async move { while hup.recv().await.is_some() {} });
+        }
         Err(e) => log!("failed to install SIGHUP handler: {e}"),
+    }
+    for (kind, name) in [
+        (SignalKind::terminate(), "SIGTERM"),
+        (SignalKind::interrupt(), "SIGINT"),
+    ] {
+        match signal(kind) {
+            Ok(mut sig) => {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    if sig.recv().await.is_some() {
+                        // Fails only once the daemon is already exiting.
+                        let _ = tx.send(Cmd::Shutdown(Exit::Terminated)).await;
+                    }
+                });
+            }
+            Err(e) => log!("failed to install {name} handler: {e}"),
+        }
     }
 }
 

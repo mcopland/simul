@@ -175,6 +175,28 @@ impl Harness {
         std::fs::read_to_string(self.simul_sock.with_extension("log")).unwrap_or_default()
     }
 
+    /// Sends SIGTERM to the newest daemon, as `pkill` does, and waits for it to exit.
+    pub fn term_daemon(&mut self) -> std::process::ExitStatus {
+        let mut d = self.daemons.pop().expect("no daemon to stop");
+        let status = Command::new("kill")
+            .args(["-TERM", &d.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(status.success(), "kill -TERM {}: {status:?}", d.id());
+        let end = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = d.try_wait().unwrap() {
+                return status;
+            }
+            if Instant::now() > end {
+                // Not reaped otherwise; the test fails below either way.
+                let _ = d.kill();
+                panic!("daemon {} still running 5s after SIGTERM", d.id());
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     pub fn stop_daemon(&mut self) {
         for mut d in self.daemons.drain(..) {
             // Already-exited daemons are fine; the test only needs them gone.

@@ -381,3 +381,31 @@ fn unknown_config_keys_are_logged() {
         h.daemon_log()
     );
 }
+
+#[test]
+fn sigterm_removes_the_daemons_tmux_hooks_and_socket() {
+    let mut h = Harness::new();
+    h.start_daemon();
+    let simul_hooks = |h: &Harness| -> Vec<String> {
+        ["pane-focus-in", "pane-focus-out", "client-resized"]
+            .iter()
+            .flat_map(|hook| {
+                h.tmux(&["show-hooks", "-g", hook])
+                    .lines()
+                    .filter(|l| l.contains("internal "))
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    eventually("the daemon's tmux hooks", || simul_hooks(&h).len() == 3);
+    let status = h.term_daemon();
+    assert!(status.success(), "daemon exit after SIGTERM: {status:?}");
+    assert!(!h.simul_sock.exists(), "socket left behind");
+    assert_eq!(simul_hooks(&h), Vec::<String>::new());
+    assert!(
+        h.daemon_log().contains("daemon exiting: terminated"),
+        "log: {}",
+        h.daemon_log()
+    );
+}
