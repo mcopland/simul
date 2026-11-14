@@ -540,7 +540,11 @@ fn replace_file(path: &Path, text: &str, backup: bool) -> Result<PathBuf> {
         path.to_path_buf()
     };
     // A missing original is a new file, which keeps the temp file's private mode.
-    let original = std::fs::metadata(&real).ok();
+    let original = match std::fs::metadata(&real) {
+        Ok(meta) => Some(meta),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).with_context(|| format!("failed to stat {}", real.display())),
+    };
     write_swapped(&real, text.as_bytes(), original.as_ref())?;
     Ok(real)
 }
