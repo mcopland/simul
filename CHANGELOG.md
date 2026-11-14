@@ -14,7 +14,7 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 - With `CLAUDE_CONFIG_DIR` set, `install-hooks claude`, `uninstall-hooks claude`, and `doctor` use `$CLAUDE_CONFIG_DIR/settings.json`, the file Claude Code reads. They used `~/.claude/settings.json` before.
 - `install-hooks kiro --project` and `uninstall-hooks kiro --project` outside a git repo print their notice under a translated git too, instead of failing.
 - A failed toggle shows simul's message, which names the daemon socket and `simul doctor`, not only `'...' toggle returned 1`.
-- A daemon that can't accept connections, for example out of file descriptors, waits 100 ms between attempts instead of filling its log.
+- A daemon out of file descriptors or memory waits 100 ms between attempts to accept a connection, instead of filling its log.
 
 ## [0.11.2] - 2026-11-13
 
