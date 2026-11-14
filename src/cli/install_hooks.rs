@@ -309,7 +309,6 @@ pub fn kiro_managed(file: &Value) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Writes simul's Kiro hook file, replacing an earlier one but never a file with other hooks.
 /// Fails unless the Kiro hook file at `path` holds only simul's hooks; `verb` names the refused
 /// action in the error. Returns the parsed file and how many hooks it holds, all simul's.
 fn check_kiro_file_is_ours(path: &Path, verb: &str) -> Result<(Value, usize)> {
@@ -341,6 +340,7 @@ fn check_kiro_file_is_ours(path: &Path, verb: &str) -> Result<(Value, usize)> {
     Ok((old, ours))
 }
 
+/// Writes simul's Kiro hook file, replacing an earlier one but never a file with other hooks.
 pub fn install_kiro(path: &Path, exe: &Path) -> Result<PathBuf> {
     if exists(path)? {
         check_kiro_file_is_ours(path, "replace")?;

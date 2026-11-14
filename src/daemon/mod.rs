@@ -74,7 +74,7 @@ pub enum Cmd {
     Identify(oneshot::Sender<Identity>),
     /// The plugin checkout's VERSION file changed.
     PluginChanged,
-    /// A retry armed after a failed install or restart (see `Updater::retry_due`).
+    /// A retry armed after a failed install or restart (see `Updater::take_retry`).
     RetryInstall(u64),
     /// The installer for `version` finished.
     Installed {
@@ -273,6 +273,7 @@ impl Daemon {
                 let _ = reply.send(self.status());
             }
             Cmd::Subscribe(reply) => {
+                // As for List: a requester that hung up needs no reply.
                 let _ = reply.send((self.status(), self.updates.subscribe()));
             }
             Cmd::Refresh => {
@@ -318,6 +319,7 @@ impl Daemon {
             }
             Cmd::Toggle(reply) => {
                 let on = self.toggle().await;
+                // The toggle is done either way; a requester that hung up needs no reply.
                 let _ = reply.send(on);
             }
             Cmd::Resized => self.schedule_width_check(),
@@ -337,9 +339,11 @@ impl Daemon {
                         false
                     }
                 };
+                // The fold is set either way; a requester that hung up needs no reply.
                 let _ = reply.send(ok);
             }
             Cmd::Identify(reply) => {
+                // As for List: a requester that hung up needs no reply.
                 let _ = reply.send(self.opts.identity.clone());
             }
             Cmd::PluginChanged => self.on_plugin_changed(),
@@ -534,7 +538,8 @@ impl Daemon {
         }
     }
 
-    /// Reads what each plain pane's foreground process is doing in the current snapshot,
+    /// Reads what each plain pane's foreground process is doing in the current snapshot.
+    /// It skips panes with a tracked agent and panes whose process is an agent.
     fn apply_runs(&mut self, now: u64) {
         self.runs.mark_checked(Instant::now());
         let store = &self.store;

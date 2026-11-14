@@ -6,7 +6,7 @@ use crate::protocol::{
 };
 use crate::text::fmt_age;
 
-/// What the sidebar lists; `f` switches between the two.
+/// What the sidebar lists; a click on the `view:` footer switches between the two.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
     /// Every session, window, and pane.

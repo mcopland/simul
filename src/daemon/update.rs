@@ -50,7 +50,7 @@ pub enum Next {
     /// The checkout moved on during the install; install this version before restarting.
     Install(String),
     /// Nothing usable was installed; look at the checkout again after `delay`, if `retry` is
-    /// still the latest by then (see `Updater::retry_due`).
+    /// still the latest by then (see `Updater::take_retry`).
     RetryIn { delay: Duration, retry: u64 },
 }
 
