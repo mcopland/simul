@@ -12,6 +12,7 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 - A plugin reload with a config that fails to parse keeps the running daemon instead of stopping it and starting none. The daemon log now records why a daemon failed to start.
 - Two daemons that start at the same moment for one tmux server no longer both run. A lock file beside the socket lets only one take over a stale socket.
 - With `CLAUDE_CONFIG_DIR` set, `install-hooks claude`, `uninstall-hooks claude`, and `doctor` use `$CLAUDE_CONFIG_DIR/settings.json`, the file Claude Code reads. They used `~/.claude/settings.json` before.
+- `install-hooks kiro --project` and `uninstall-hooks kiro --project` outside a git repo print their notice under a translated git too, instead of failing.
 
 ## [0.11.2] - 2026-11-13
 

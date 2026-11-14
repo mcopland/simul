@@ -355,6 +355,8 @@ pub fn install_kiro(path: &Path, exe: &Path) -> Result<PathBuf> {
 pub fn git_exclude_file(dir: &Path) -> Result<Option<PathBuf>> {
     let out = std::process::Command::new("git")
         .args(["rev-parse", "--git-path", "info/exclude"])
+        // The "not a git repository" match below needs git's untranslated message.
+        .env("LC_ALL", "C")
         .current_dir(dir)
         .output()
         .with_context(|| format!("failed to run git in {}", dir.display()))?;
