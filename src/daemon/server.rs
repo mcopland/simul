@@ -25,8 +25,8 @@ const LOCK_WAIT: Duration = Duration::from_secs(5);
 
 /// Binds the daemon socket, or returns `None` if a live daemon already owns it. The returned
 /// file holds the socket lock; keep it open for as long as the socket is served.
-pub fn bind(path: &Path) -> Result<Option<(UnixListener, File)>> {
-    bind_within(path, LOCK_WAIT)
+pub async fn bind(path: &Path) -> Result<Option<(UnixListener, File)>> {
+    bind_within(path, LOCK_WAIT).await
 }
 
 /// The lock file beside the socket at `path`, like the log.
@@ -39,7 +39,7 @@ fn lock_path(path: &Path) -> PathBuf {
 /// Taking over a stale socket is check, remove, then bind; two daemons doing it at once could
 /// both bind, and one would run on an unlinked socket. The lock lets only one in. Its file is
 /// close-on-exec, so a self-update's `exec` frees it for the new image.
-fn bind_within(path: &Path, wait: Duration) -> Result<Option<(UnixListener, File)>> {
+async fn bind_within(path: &Path, wait: Duration) -> Result<Option<(UnixListener, File)>> {
     if let Some(dir) = path.parent() {
         crate::paths::ensure_private_dir(dir)?;
     }
@@ -68,7 +68,7 @@ fn bind_within(path: &Path, wait: Duration) -> Result<Option<(UnixListener, File
                         path.display()
                     );
                 }
-                std::thread::sleep(Duration::from_millis(20));
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
             Err(TryLockError::Error(e)) => {
                 return Err(e).with_context(|| format!("failed to lock {}", lock_path.display()));
@@ -269,7 +269,9 @@ mod tests {
         let path = stale_socket(dir.path());
         let holder = hold_lock(&path);
 
-        let err = bind_within(&path, Duration::from_millis(100)).unwrap_err();
+        let err = bind_within(&path, Duration::from_millis(100))
+            .await
+            .unwrap_err();
         assert!(
             format!("{err:#}").contains(&*path.to_string_lossy()),
             "{err:#}"
@@ -280,7 +282,7 @@ mod tests {
         );
 
         drop(holder);
-        let bound = bind_within(&path, LOCK_WAIT).unwrap();
+        let bound = bind_within(&path, LOCK_WAIT).await.unwrap();
         assert!(
             bound.is_some(),
             "a free lock lets the stale socket be taken"
@@ -295,6 +297,7 @@ mod tests {
         let _live = std::os::unix::net::UnixListener::bind(&path).unwrap();
         assert!(
             bind_within(&path, Duration::from_millis(100))
+                .await
                 .unwrap()
                 .is_none()
         );
@@ -302,6 +305,7 @@ mod tests {
         let _holder = hold_lock(&path);
         assert!(
             bind_within(&path, Duration::from_millis(100))
+                .await
                 .unwrap()
                 .is_none()
         );
