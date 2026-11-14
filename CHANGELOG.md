@@ -7,6 +7,7 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 ### Fixed
 
 - Switching panes no longer opens a `'...' returned 1` message after the daemon stops. `pkill -f 'simul daemon'` now removes the daemon's tmux hooks, and a hook left by a crashed daemon or a deleted binary stays silent.
+- On WSL with `notify.desktop = true`, a branch name holding a curly single quote (U+2018, U+2019, U+201A, or U+201B) can no longer end the PowerShell string in a notification and run commands.
 
 ## [0.11.2] - 2026-11-13
 

@@ -72,9 +72,19 @@ pub fn applescript_quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// PowerShell single-quoted string literal.
+/// PowerShell single-quoted string literal. PowerShell treats the curly and low-9 single
+/// quotes as `'`, so each of them is doubled too, as PowerShell's own escaping does.
 pub fn powershell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            out.push(c);
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
 }
 
 /// tmux expands formats in display-message, so a literal `#` must be doubled.
@@ -270,6 +280,11 @@ mod tests {
     fn quoting() {
         assert_eq!(applescript_quote(r#"a "b" \c"#), r#""a \"b\" \\c""#);
         assert_eq!(powershell_quote("it's"), "'it''s'");
+        // PowerShell also ends a single-quoted string at any of these.
+        assert_eq!(
+            powershell_quote("a\u{2018}b\u{2019}c\u{201A}d\u{201B}e"),
+            "'a\u{2018}\u{2018}b\u{2019}\u{2019}c\u{201A}\u{201A}d\u{201B}\u{201B}e'"
+        );
         assert_eq!(tmux_literal("#{x} #1"), "##{x} ##1");
     }
 
