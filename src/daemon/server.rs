@@ -232,20 +232,40 @@ mod tests {
         dir
     }
 
+    /// Waits until `done`. Other test threads fork to run commands, and until a child execs
+    /// it holds a copy of every fd here: a dropped listener still answers and a dropped lock
+    /// is still held.
+    fn settle(what: &str, mut done: impl FnMut() -> bool) {
+        let end = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < end, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// A socket file that nothing listens on, as a crashed daemon leaves it.
-    fn stale_socket(dir: &Path) -> std::path::PathBuf {
+    fn stale_socket(dir: &Path) -> PathBuf {
         let path = dir.join("s.sock");
         drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        settle("the socket to go stale", || {
+            std::os::unix::net::UnixStream::connect(&path).is_err()
+        });
         assert!(path.exists());
         path
+    }
+
+    /// Takes the socket lock for `path`, as a running daemon holds it.
+    fn hold_lock(path: &Path) -> File {
+        let holder = File::create(lock_path(path)).unwrap();
+        settle("the socket lock", || holder.try_lock().is_ok());
+        holder
     }
 
     #[tokio::test]
     async fn a_held_lock_keeps_a_stale_socket_from_a_second_daemon() {
         let dir = private_dir();
         let path = stale_socket(dir.path());
-        let holder = std::fs::File::create(lock_path(&path)).unwrap();
-        holder.try_lock().unwrap();
+        let holder = hold_lock(&path);
 
         let err = bind_within(&path, Duration::from_millis(100)).unwrap_err();
         assert!(
@@ -258,7 +278,7 @@ mod tests {
         );
 
         drop(holder);
-        let bound = bind_within(&path, Duration::from_millis(100)).unwrap();
+        let bound = bind_within(&path, LOCK_WAIT).unwrap();
         assert!(
             bound.is_some(),
             "a free lock lets the stale socket be taken"
@@ -277,8 +297,7 @@ mod tests {
                 .is_none()
         );
         // A daemon of this build, which also holds the lock.
-        let holder = std::fs::File::create(lock_path(&path)).unwrap();
-        holder.try_lock().unwrap();
+        let _holder = hold_lock(&path);
         assert!(
             bind_within(&path, Duration::from_millis(100))
                 .unwrap()
