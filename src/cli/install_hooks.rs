@@ -643,15 +643,39 @@ fn write_backup(real: &Path) -> Result<()> {
         real.file_name()
             .map_or_else(Default::default, |n| n.to_string_lossy())
     ));
-    let has_ours = serde_json::from_slice::<Value>(&old).is_ok_and(|v| !managed(&v).is_empty());
-    if has_ours && backup.exists() {
-        return Ok(());
-    }
     // The backup holds the same secrets, so it gets the original's mode and owner.
     let meta =
         std::fs::metadata(real).with_context(|| format!("failed to stat {}", real.display()))?;
+    let has_ours = serde_json::from_slice::<Value>(&old).is_ok_and(|v| !managed(&v).is_empty());
+    if has_ours && backup.exists() {
+        // 0.11.2 and earlier wrote backups with the umask's mode.
+        return narrow_mode(&backup, &meta);
+    }
     write_swapped(&backup, &old, Some(&meta))
         .with_context(|| format!("failed to write backup {}", backup.display()))
+}
+
+/// Takes from `file`'s mode every permission `original` lacks.
+fn narrow_mode(file: &Path, original: &std::fs::Metadata) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let have = std::fs::metadata(file)
+        .with_context(|| format!("failed to stat {}", file.display()))?
+        .permissions()
+        .mode()
+        & 0o7777;
+    let want = have & original.permissions().mode();
+    if want != have {
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(want)).with_context(
+            || {
+                format!(
+                    "failed to restrict {} to mode {want:o}; run: chmod {want:o} {}",
+                    file.display(),
+                    file.display()
+                )
+            },
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -830,6 +854,30 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600, "the backup holds the same secrets");
         let count = std::fs::read_dir(dir.path()).unwrap().count();
         assert_eq!(count, 2, "no temp file is left");
+    }
+
+    #[test]
+    fn an_earlier_versions_open_backup_is_tightened() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, "{\"model\": \"opus\"}\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        install(&path, Path::new(EXE)).unwrap();
+        // As 0.11.2 and earlier wrote it.
+        let backup = dir.path().join("settings.json.simul-bak");
+        std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let before = std::fs::read(&backup).unwrap();
+
+        install(&path, Path::new(EXE)).unwrap();
+
+        let mode = std::fs::metadata(&backup).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(
+            std::fs::read(&backup).unwrap(),
+            before,
+            "the backup is kept"
+        );
     }
 
     #[test]

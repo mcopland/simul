@@ -8,7 +8,7 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 - Switching panes no longer opens a `'...' returned 1` message after the daemon stops. `pkill -f 'simul daemon'` now removes the daemon's tmux hooks, and a hook left by a crashed daemon or a deleted binary stays silent.
 - On WSL with `notify.desktop = true`, a branch name holding a curly single quote (U+2018, U+2019, U+201A, or U+201B) can no longer end the PowerShell string in a notification and run commands.
-- The Claude settings backup, `settings.json.simul-bak`, gets the settings file's mode and owner, so a private settings file no longer leaves a backup others can read. It is also replaced whole, like the settings file.
+- The Claude settings backup, `settings.json.simul-bak`, gets the settings file's mode and owner, so a private settings file no longer leaves a backup others can read. A backup that an earlier version left readable loses the permissions the settings file lacks the next time `install-hooks claude` runs. The backup is also replaced whole, like the settings file.
 - A plugin reload with a config that fails to parse keeps the running daemon instead of stopping it and starting none. The daemon log now records why a daemon failed to start.
 - Two daemons that start at the same moment for one tmux server no longer both run. A lock file beside the socket lets only one take over a stale socket.
 - With `CLAUDE_CONFIG_DIR` set, `install-hooks claude`, `uninstall-hooks claude`, and `doctor` use `$CLAUDE_CONFIG_DIR/settings.json`, the file Claude Code reads. They used `~/.claude/settings.json` before.
