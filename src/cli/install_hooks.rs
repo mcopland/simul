@@ -70,9 +70,8 @@ fn claude_settings_path(project: bool, settings: Option<PathBuf>) -> Result<Path
         (Some(p), _) => Ok(p),
         // Local, not shared: the hook embeds this machine's absolute binary path.
         (None, true) => Ok(PathBuf::from(".claude/settings.local.json")),
-        (None, false) => env_var("HOME")
-            .map(|h| PathBuf::from(h).join(".claude/settings.json"))
-            .context("cannot locate ~/.claude/settings.json: $HOME unset"),
+        (None, false) => claude_settings_file(env_var)
+            .context("cannot locate the Claude settings file: set CLAUDE_CONFIG_DIR or HOME"),
     }
 }
 
@@ -261,6 +260,12 @@ pub fn managed(settings: &Value) -> Vec<(String, String)> {
                 .map(move |c| (event.clone(), c.to_owned()))
         })
         .collect()
+}
+
+/// Claude Code's user settings: `$CLAUDE_CONFIG_DIR/settings.json`, else
+/// `~/.claude/settings.json`.
+pub fn claude_settings_file(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    crate::claude_sessions::claude_home(env).map(|home| home.join("settings.json"))
 }
 
 /// Kiro's global hook file: `$KIRO_HOME/hooks/simul.json`, else `~/.kiro/hooks/simul.json`.
@@ -959,6 +964,26 @@ mod tests {
             assert!(err.contains("mine.json"), "{err}");
             assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
         }
+    }
+
+    #[test]
+    fn claude_settings_file_prefers_claude_config_dir() {
+        let env = |vars: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                vars.iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        assert_eq!(
+            claude_settings_file(env(&[("CLAUDE_CONFIG_DIR", "/c"), ("HOME", "/h")])),
+            Some(PathBuf::from("/c/settings.json"))
+        );
+        assert_eq!(
+            claude_settings_file(env(&[("HOME", "/h")])),
+            Some(PathBuf::from("/h/.claude/settings.json"))
+        );
+        assert_eq!(claude_settings_file(env(&[])), None);
     }
 
     #[test]

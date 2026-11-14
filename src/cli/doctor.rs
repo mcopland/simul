@@ -252,8 +252,7 @@ fn version_of(bin: &Path) -> Result<String> {
 }
 
 fn claude_settings_paths() -> Vec<PathBuf> {
-    let mut paths: Vec<PathBuf> = env_var("HOME")
-        .map(|h| PathBuf::from(h).join(".claude/settings.json"))
+    let mut paths: Vec<PathBuf> = install_hooks::claude_settings_file(env_var)
         .into_iter()
         .collect();
     paths.push(PathBuf::from(".claude/settings.local.json"));

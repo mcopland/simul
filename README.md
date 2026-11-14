@@ -29,7 +29,7 @@ ln -s ~/.config/tmux/plugins/simul/bin/simul ~/.local/bin/simul  # with ~/.confi
 Then install the agent hooks:
 
 ```sh
-simul install-hooks claude            # ~/.claude/settings.json
+simul install-hooks claude            # ~/.claude/settings.json ($CLAUDE_CONFIG_DIR if set)
 simul install-hooks claude --project  # ./.claude/settings.local.json
 simul install-hooks kiro              # ~/.kiro/hooks/simul.json ($KIRO_HOME/hooks if set)
 simul install-hooks kiro --project    # ./.kiro/hooks/simul.json, added to .git/info/exclude
@@ -73,7 +73,7 @@ Then add `run-shell /path/to/simul/simul.tmux` to `tmux.conf`. When `target/rele
 Remove the hooks first, while `simul` is still installed. Only entries tagged `#simul-managed` are removed. If the Kiro hook file is a symlink, simul takes its hooks out of the file it points to and keeps both files:
 
 ```sh
-simul uninstall-hooks claude            # ~/.claude/settings.json
+simul uninstall-hooks claude            # ~/.claude/settings.json ($CLAUDE_CONFIG_DIR if set)
 simul uninstall-hooks claude --project  # ./.claude/settings.local.json, in each project you installed into
 simul uninstall-hooks kiro              # deletes ~/.kiro/hooks/simul.json
 simul uninstall-hooks kiro --project    # deletes ./.kiro/hooks/simul.json and its .git/info/exclude line

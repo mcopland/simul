@@ -50,12 +50,16 @@ struct SessionFile {
     parked_job_id: Option<String>,
 }
 
-/// `$CLAUDE_CONFIG_DIR/sessions`, else `$HOME/.claude/sessions`.
-pub fn sessions_dir(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+/// Claude Code's config directory: `$CLAUDE_CONFIG_DIR`, else `$HOME/.claude`.
+pub fn claude_home(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
     env("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
         .or_else(|| env("HOME").map(|h| PathBuf::from(h).join(".claude")))
-        .map(|d| d.join("sessions"))
+}
+
+/// `$CLAUDE_CONFIG_DIR/sessions`, else `$HOME/.claude/sessions`.
+pub fn sessions_dir(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    claude_home(env).map(|d| d.join("sessions"))
 }
 
 /// Live status of every pane with a session file whose process `alive` accepts.
