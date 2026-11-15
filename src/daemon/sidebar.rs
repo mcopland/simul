@@ -7,7 +7,7 @@ use anyhow::Result;
 
 use super::{COLLAPSED, Cmd, Daemon, LAYOUT_HOOK, RECONCILE_DEBOUNCE, width};
 use crate::log;
-use crate::tmux::{PaneInfo, shell_quote};
+use crate::tmux::{PaneInfo, Snapshot, shell_quote};
 
 /// Global tmux option holding the status-format[0] hidden while the sidebar is on.
 const SAVED_STATUS: &str = "@simul-status-format";
@@ -33,11 +33,49 @@ pub struct Sidebars {
     pub on: bool,
     /// Windows seen at the last reconcile; only windows new since then get a sidebar.
     pub known_windows: HashSet<String>,
+    /// With `lazy`, windows given a sidebar since toggle-on; one closed by hand stays closed.
+    pub seeded: HashSet<String>,
+    /// With `lazy`, shown windows whose sidebar failed to open; each gets another try once
+    /// it is hidden and shown again, not on every reconcile.
+    pub failed: HashSet<String>,
     /// Sessions folded in the sidebar, as read from `COLLAPSED` at the last reconcile.
     pub collapsed: BTreeSet<String>,
     pub widths_pending: bool,
     /// Sidebar widths last asked of tmux (see `width::resizes`).
     pub width_requested: width::Requested,
+}
+
+impl Sidebars {
+    /// With `lazy`, the windows due a sidebar: shown, and neither given one since toggle-on
+    /// nor failed since they were last shown. Sorted, so sidebars open in a stable order.
+    fn lazy_due(&mut self, snap: &Snapshot) -> Vec<String> {
+        let windows: HashSet<&str> = snap.panes.iter().map(|p| p.window_id.as_str()).collect();
+        // Sidebars adopted from an earlier daemon count; closed windows don't.
+        self.seeded.extend(
+            snap.panes
+                .iter()
+                .filter(|p| p.is_sidebar)
+                .map(|p| p.window_id.clone()),
+        );
+        self.seeded.retain(|w| windows.contains(w.as_str()));
+        self.failed.retain(|w| snap.shown_windows.contains(w));
+        let mut due: Vec<String> = snap
+            .shown_windows
+            .iter()
+            .filter(|w| !self.seeded.contains(*w) && !self.failed.contains(*w))
+            .cloned()
+            .collect();
+        due.sort();
+        due
+    }
+
+    fn opened(&mut self, window: String, ok: bool) {
+        if ok {
+            self.seeded.insert(window);
+        } else {
+            self.failed.insert(window);
+        }
+    }
 }
 
 impl Daemon {
@@ -81,10 +119,39 @@ impl Daemon {
             .collect()
     }
 
+    /// Windows without a sidebar, other than those in `skip`, sorted.
+    fn eager_due(&self, skip: &HashSet<String>) -> Vec<String> {
+        let have = self.windows_with_sidebar();
+        let mut due: Vec<String> = self
+            .windows()
+            .into_iter()
+            .filter(|w| !have.contains(w) && !skip.contains(w))
+            .collect();
+        due.sort();
+        due
+    }
+
+    /// Opens sidebars where they are due: with `lazy`, see `Sidebars::lazy_due`; without,
+    /// every window but those in `skip`.
+    async fn open_due(&mut self, skip: &HashSet<String>) {
+        if !self.opts.config.sidebar.lazy {
+            for window in self.eager_due(skip) {
+                self.add_sidebar(&window).await;
+            }
+            return;
+        }
+        for window in self.sidebar.lazy_due(&self.snapshot) {
+            let ok = self.add_sidebar(&window).await;
+            self.sidebar.opened(window, ok);
+        }
+    }
+
     pub(super) async fn toggle(&mut self) -> bool {
         self.reconcile().await;
         if self.sidebar.on {
             self.sidebar.on = false;
+            self.sidebar.seeded.clear();
+            self.sidebar.failed.clear();
             for pane in self.snapshot.panes.iter().filter(|p| p.is_sidebar) {
                 if let Err(e) = self
                     .opts
@@ -102,10 +169,7 @@ impl Daemon {
             }
         } else {
             self.sidebar.on = true;
-            let have = self.windows_with_sidebar();
-            for window in self.windows().difference(&have) {
-                self.add_sidebar(window).await;
-            }
+            self.open_due(&HashSet::new()).await;
             self.set_layout_hook(true).await;
             if self.opts.config.sidebar.hide_status
                 && let Err(e) = self.hide_status().await
@@ -189,15 +253,8 @@ impl Daemon {
     pub(super) async fn maintain_sidebars(&mut self) {
         let windows = self.windows();
         if self.sidebar.on {
-            let have = self.windows_with_sidebar();
-            let new: Vec<String> = windows
-                .difference(&self.sidebar.known_windows)
-                .filter(|w| !have.contains(*w))
-                .cloned()
-                .collect();
-            for window in &new {
-                self.add_sidebar(window).await;
-            }
+            let known = std::mem::take(&mut self.sidebar.known_windows);
+            self.open_due(&known).await;
         }
         self.sidebar.known_windows = windows;
         let lone: Vec<String> = self
@@ -267,7 +324,8 @@ impl Daemon {
         }
     }
 
-    pub(super) async fn add_sidebar(&self, window: &str) {
+    /// Whether a pane opened, even if tagging it failed: one more attempt would open another.
+    pub(super) async fn add_sidebar(&self, window: &str) -> bool {
         let cmd = self.sidebar_command();
         let split = [
             "split-window",
@@ -285,7 +343,7 @@ impl Daemon {
             Ok(p) => p.trim().to_owned(),
             Err(e) => {
                 log!("failed to open sidebar in {window}: {e:#}");
-                return;
+                return false;
             }
         };
         // The actor awaits this before handling the next reconcile, so no snapshot sees an
@@ -293,7 +351,7 @@ impl Daemon {
         let tag = ["set-option", "-p", "-t", &pane, "@simul-sidebar", "1"];
         if let Err(e) = self.opts.tmux.run_async(&tag).await {
             log!("failed to tag sidebar {pane}: {e:#}");
-            return;
+            return true;
         }
         self.tag_sidebar_build(&pane).await;
         // The split fired window-layout-changed before the tag existed; rerun the user's
@@ -303,6 +361,7 @@ impl Daemon {
         if let Err(e) = self.opts.tmux.run_async(&rerun).await {
             log!("failed to rerun layout hooks for {pane}: {e:#}");
         }
+        true
     }
 
     /// Brings every sidebar in `panes` back to its share of the window (see `width::resizes`).
@@ -314,5 +373,83 @@ impl Daemon {
                 log!("failed to resize sidebar {pane} to {cols} columns: {e:#}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pane(id: &str, window: &str, is_sidebar: bool) -> PaneInfo {
+        PaneInfo {
+            id: id.into(),
+            window_id: window.into(),
+            is_sidebar,
+            ..PaneInfo::default()
+        }
+    }
+
+    fn set(windows: &[&str]) -> HashSet<String> {
+        windows.iter().map(|w| (*w).to_owned()).collect()
+    }
+
+    fn snap(panes: Vec<PaneInfo>, shown: &[&str]) -> Snapshot {
+        Snapshot {
+            panes,
+            shown_windows: set(shown),
+            ..Snapshot::default()
+        }
+    }
+
+    #[test]
+    fn lazy_opens_shown_windows_once_each() {
+        let mut s = Sidebars::default();
+        let panes = || {
+            vec![
+                pane("%1", "@1", false),
+                pane("%2", "@1", false),
+                pane("%3", "@2", false),
+                pane("%4", "@3", false),
+            ]
+        };
+        assert_eq!(s.lazy_due(&snap(panes(), &["@3", "@1"])), ["@1", "@3"]);
+        s.opened("@1".into(), true);
+        s.opened("@3".into(), true);
+        assert!(s.lazy_due(&snap(panes(), &["@1", "@3"])).is_empty());
+        assert_eq!(s.lazy_due(&snap(panes(), &["@2"])), ["@2"]);
+    }
+
+    #[test]
+    fn lazy_skips_adopted_sidebars_and_ones_closed_by_hand() {
+        let mut s = Sidebars::default();
+        let adopted = vec![pane("%1", "@1", false), pane("%2", "@1", true)];
+        assert!(s.lazy_due(&snap(adopted, &["@1"])).is_empty());
+        let closed = vec![pane("%1", "@1", false)];
+        assert!(s.lazy_due(&snap(closed, &["@1"])).is_empty());
+    }
+
+    #[test]
+    fn lazy_retries_a_failed_window_after_it_is_hidden_and_shown_again() {
+        let mut s = Sidebars::default();
+        let panes = || vec![pane("%1", "@1", false), pane("%2", "@2", false)];
+        assert_eq!(s.lazy_due(&snap(panes(), &["@1"])), ["@1"]);
+        s.opened("@1".into(), false);
+        assert!(
+            s.lazy_due(&snap(panes(), &["@1"])).is_empty(),
+            "not every reconcile"
+        );
+        assert!(
+            s.lazy_due(&snap(panes(), &["@2"]))
+                .contains(&"@2".to_owned())
+        );
+        assert_eq!(s.lazy_due(&snap(panes(), &["@1"])), ["@1"]);
+    }
+
+    #[test]
+    fn lazy_forgets_closed_windows() {
+        let mut s = Sidebars::default();
+        s.opened("@9".into(), true);
+        s.lazy_due(&snap(vec![pane("%1", "@1", false)], &[]));
+        assert!(s.seeded.is_empty());
     }
 }

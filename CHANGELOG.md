@@ -4,6 +4,10 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+### Added
+
+- `lazy = true` under `[sidebar]` opens a window's sidebar the first time it is on screen, instead of in every window at toggle, so windows you never look at run no sidebar process.
+
 ## [0.11.3] - 2026-11-14
 
 ### Fixed

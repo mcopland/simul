@@ -37,6 +37,10 @@ pub struct Snapshot {
     pub panes: Vec<PaneInfo>,
     /// Panes the user is looking at right now.
     pub viewed: HashSet<String>,
+    /// Windows on some terminal: the current window of a session a client shows, whether
+    /// or not that terminal has focus. With no client attached, the current window of every
+    /// session, where one would land on attaching.
+    pub shown_windows: HashSet<String>,
 }
 
 pub const PANES_FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_id}\t#{pane_active}\t#{window_active}\t#{pane_current_command}\t#{pane_current_path}\t#{@simul-sidebar}\t#{window_panes}\t#{@simul-collapsed}\t#{pane_width}\t#{window_width}\t#{window_zoomed_flag}\t#{?pane_start_command,#{pane_start_command},#{?default-command,#{default-command},#{default-shell}}}\t#{window_name}";
@@ -119,6 +123,15 @@ pub fn parse_snapshot(panes: &str, clients: &str, focus_events: bool) -> Snapsho
             (counts && !session.is_empty()).then_some(session)
         })
         .collect();
+    let showing_sessions: HashSet<&str> = clients
+        .lines()
+        .filter_map(|line| {
+            let mut f = line.split('\t');
+            let session = f.next()?;
+            let control = f.next()?.split(',').any(|flag| flag == "control-mode");
+            (!control && !session.is_empty()).then_some(session)
+        })
+        .collect();
     let mut snap = Snapshot::default();
     let mut seen = HashSet::new();
     for line in panes.lines() {
@@ -155,6 +168,13 @@ pub fn parse_snapshot(panes: &str, clients: &str, focus_events: bool) -> Snapsho
         };
         if pane_active == "1" && window_active == "1" && viewing_sessions.contains(session) {
             snap.viewed.insert(id.to_owned());
+        }
+        // Before the check below: a linked window is listed once per session, and may be
+        // current in any of them.
+        if window_active == "1"
+            && (showing_sessions.is_empty() || showing_sessions.contains(session))
+        {
+            snap.shown_windows.insert(window_id.to_owned());
         }
         if !seen.insert(id) {
             continue;
@@ -309,6 +329,35 @@ mod tests {
         let clients = "work\tattached,focused,control-mode,no-output\t\n";
         assert!(parse_snapshot(PANES, clients, false).viewed.is_empty());
         assert!(parse_snapshot(PANES, clients, true).viewed.is_empty());
+    }
+
+    fn shown(panes: &str, clients: &str) -> HashSet<String> {
+        parse_snapshot(panes, clients, true).shown_windows
+    }
+
+    fn set(ids: &[&str]) -> HashSet<String> {
+        ids.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn shown_windows_are_current_in_a_session_a_client_shows() {
+        assert_eq!(
+            shown(PANES, "main\tattached,UTF-8\t/dev/ttys001\n"),
+            set(&["@1"]),
+            "focus doesn't matter; @2 isn't current and work has no client"
+        );
+        assert_eq!(
+            shown(PANES, "work\tattached,focused,control-mode,no-output\t\n"),
+            set(&["@1", "@3"]),
+            "a control client alone is no client: every session's current window"
+        );
+        assert_eq!(shown(PANES, ""), set(&["@1", "@3"]));
+    }
+
+    #[test]
+    fn linked_window_is_shown_through_any_session() {
+        let panes = "%1\ta\t1\t@1\t1\t0\tclaude\t/w\t\t1\t\t80\t80\t0\t\tx\n%1\tb\t3\t@1\t1\t1\tclaude\t/w\t\t1\t\t80\t80\t0\t\tx\n%2\ta\t2\t@2\t1\t1\tsh\t/w\t\t1\t\t80\t80\t0\t\ty\n";
+        assert_eq!(shown(panes, "b\tattached\t/dev/ttys1\n"), set(&["@1"]));
     }
 
     #[test]
