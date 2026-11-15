@@ -4,6 +4,8 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-11-15
+
 ### Changed
 
 - Sidebars use less CPU. Each one redraws when the daemon reports a change, on a click, or when an age it shows ticks over, instead of four times a second, and ages tick only in windows on screen. The daemon sends a status only when it changed, not every second, and a sidebar learns its window from that status instead of asking tmux every 5 seconds.
@@ -168,7 +170,8 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 - `simul.tmux` entry point that downloads the prebuilt binary matching `VERSION`.
 - Model and effort for each agent in `simul ls`.
 
-[Unreleased]: https://github.com/mcopland/simul/compare/v0.11.3...HEAD
+[Unreleased]: https://github.com/mcopland/simul/compare/v0.11.4...HEAD
+[0.11.4]: https://github.com/mcopland/simul/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/mcopland/simul/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/mcopland/simul/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/mcopland/simul/compare/v0.11.0...v0.11.1
