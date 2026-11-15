@@ -213,11 +213,15 @@ pub fn windows(snap: &Snapshot) -> Vec<WindowInfo> {
                     index: p.window,
                     name: p.window_name.clone(),
                     panes: Vec::new(),
+                    sidebar: None,
+                    shown: snap.shown_windows.contains(&p.window_id),
                 });
                 out.len() - 1
             }
         };
-        if !p.is_sidebar {
+        if p.is_sidebar {
+            out[i].sidebar = Some(p.id.clone());
+        } else {
             out[i].panes.push(PaneSummary {
                 id: p.id.clone(),
                 command: p.current_command.clone(),
@@ -391,6 +395,8 @@ mod tests {
                         pane("%1", "2.1.307", true, "/w/a"),
                         pane("%2", "zsh", false, "/w/a"),
                     ],
+                    sidebar: None,
+                    shown: true,
                 },
                 WindowInfo {
                     id: "@2".into(),
@@ -398,6 +404,8 @@ mod tests {
                     index: 2,
                     name: "web".into(),
                     panes: vec![pane("%3", "claude", true, "/w/b")],
+                    sidebar: None,
+                    shown: false,
                 },
                 WindowInfo {
                     id: "@3".into(),
@@ -405,6 +413,8 @@ mod tests {
                     index: 1,
                     name: "my\ttabbed name".into(),
                     panes: vec![pane("%4", "claude", true, "/w/c")],
+                    sidebar: Some("%5".into()),
+                    shown: true,
                 },
             ]
         );

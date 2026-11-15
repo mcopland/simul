@@ -8,6 +8,10 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 - `lazy = true` under `[sidebar]` opens a window's sidebar the first time it is on screen, instead of in every window at toggle, so windows you never look at run no sidebar process.
 
+### Changed
+
+- Sidebars use less CPU. Each one redraws when the daemon reports a change, on a click, or when an age it shows ticks over, instead of four times a second, and ages tick only in windows on screen. The daemon sends a status only when it changed, not every second, and a sidebar learns its window from that status instead of asking tmux every 5 seconds.
+
 ## [0.11.3] - 2026-11-14
 
 ### Fixed

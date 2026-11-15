@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use crate::protocol::{
     GitStatus, PaneRecord, PaneSummary, Run, RunState, State, Status, WindowInfo,
@@ -755,6 +756,35 @@ pub enum Action {
     },
 }
 
+/// How long until any age the sidebar shows, of an agent or a run, reads differently;
+/// `None` when it shows none. Ages count whole seconds, minutes, hours, then days. Runs
+/// show only in the `all` view, where a folded session hides them.
+pub fn next_age_change(status: &Status, now_ms: u64) -> Option<Duration> {
+    let runs = status
+        .windows
+        .iter()
+        .filter(|w| !status.collapsed.contains(&w.session))
+        .flat_map(|w| &w.panes)
+        .filter_map(|p| counted_run(p).map(|r| r.since_ms));
+    status
+        .panes
+        .iter()
+        .map(|r| r.since_ms)
+        .chain(runs)
+        .map(|since| {
+            let age = now_ms.saturating_sub(since);
+            let unit: u64 = match age {
+                0..60_000 => 1_000,
+                60_000..3_600_000 => 60_000,
+                3_600_000..86_400_000 => 3_600_000,
+                _ => 86_400_000,
+            };
+            unit - age % unit
+        })
+        .min()
+        .map(Duration::from_millis)
+}
+
 #[derive(Debug, Default)]
 pub struct App {
     pub status: Option<Status>,
@@ -842,6 +872,19 @@ impl App {
 
     pub fn set_location(&mut self, window: String) {
         self.own_window = Some(window);
+    }
+
+    /// Finds this sidebar's window as the one whose sidebar is `own_pane`, and returns
+    /// whether that window is shown; `None` if no window lists it, as from an older daemon.
+    pub fn locate(&mut self, own_pane: &str) -> Option<bool> {
+        let status = self.status.as_ref()?;
+        let w = status
+            .windows
+            .iter()
+            .find(|w| w.sidebar.as_deref() == Some(own_pane))?;
+        let shown = w.shown;
+        self.own_window = Some(w.id.clone());
+        Some(shown)
     }
 
     pub fn toggle_mode(&mut self) {
@@ -964,7 +1007,81 @@ mod tests {
                     run: None,
                 })
                 .collect(),
+            sidebar: None,
+            shown: true,
         }
+    }
+
+    #[test]
+    fn ages_change_at_the_next_unit_boundary() {
+        let mut s = status();
+        assert_eq!(
+            next_age_change(&s, 125_000),
+            Some(Duration::from_millis(55_000)),
+            "2m until 3m"
+        );
+        assert_eq!(
+            next_age_change(&status_with_runs(), 125_000),
+            Some(Duration::from_millis(1_000)),
+            "%10 has run 5s"
+        );
+        let mut folded = status_with_runs();
+        folded.collapsed = vec!["me".into()];
+        assert_eq!(
+            next_age_change(&folded, 125_000),
+            Some(Duration::from_millis(55_000)),
+            "a folded session's runs draw no age"
+        );
+        let mut interactive = status();
+        for p in interactive.windows.iter_mut().flat_map(|w| &mut w.panes) {
+            p.run = Some(Run {
+                state: RunState::Interactive,
+                since_ms: 124_500,
+            });
+        }
+        assert_eq!(
+            next_age_change(&interactive, 125_000),
+            Some(Duration::from_millis(55_000)),
+            "an interactive pane draws no age"
+        );
+        s.panes[0].since_ms = 125_000 - 59_500;
+        assert_eq!(
+            next_age_change(&s, 125_000),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(
+            next_age_change(&s, 1_000),
+            Some(Duration::from_millis(1_000)),
+            "a time ahead of the clock reads 0s"
+        );
+        for r in &mut s.panes {
+            r.since_ms = 0;
+        }
+        assert_eq!(
+            next_age_change(&s, 3_600_001),
+            Some(Duration::from_millis(3_599_999))
+        );
+        assert_eq!(
+            next_age_change(&s, 86_400_000 + 5),
+            Some(Duration::from_millis(86_400_000 - 5))
+        );
+        s.panes.clear();
+        assert_eq!(next_age_change(&s, 1), None, "plain panes show no age");
+    }
+
+    #[test]
+    fn locates_its_window_by_its_sidebar_pane() {
+        let mut s = status();
+        s.windows[2].sidebar = Some("%90".into());
+        s.windows[2].shown = false;
+        let mut app = App {
+            status: Some(s),
+            ..App::default()
+        };
+        assert_eq!(app.locate("%91"), None);
+        assert_eq!(app.own_window, None);
+        assert_eq!(app.locate("%90"), Some(false));
+        assert_eq!(app.own_window.as_deref(), Some("@me3"));
     }
 
     fn window(id: &str, label: &str) -> Line {

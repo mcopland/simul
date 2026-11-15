@@ -885,3 +885,52 @@ fn status_line_restored_when_a_new_daemon_finds_no_sidebar() {
                 .is_empty()
     });
 }
+
+#[test]
+fn an_unchanged_status_is_not_sent_again() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut h = Harness::new();
+    h.start_daemon();
+    toggle(&h);
+    eventually("sidebar running", || {
+        sidebars(&h).iter().all(|s| {
+            h.tmux(&[
+                "display-message",
+                "-p",
+                "-t",
+                &s.0,
+                "#{pane_current_command}",
+            ]) == "simul"
+        })
+    });
+    let mut stream = UnixStream::connect(&h.simul_sock).unwrap();
+    stream.write_all(b"{\"type\":\"subscribe\"}\n").unwrap();
+    // A gap of 2.5s holds at least two of the reconciles that run every second while
+    // sidebars are shown; a status resent unchanged would never leave one. Statuses from
+    // the sidebar's start may still arrive at first.
+    let quiet = Duration::from_millis(2500);
+    stream.set_read_timeout(Some(quiet)).unwrap();
+    let mut lines = BufReader::new(stream).lines();
+    let start = std::time::Instant::now();
+    loop {
+        match lines.next() {
+            Some(Ok(line)) => assert!(
+                start.elapsed() < Duration::from_secs(15),
+                "statuses never stopped coming; the last: {line}"
+            ),
+            Some(Err(e)) => {
+                assert!(
+                    matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ),
+                    "{e}"
+                );
+                break;
+            }
+            None => panic!("the daemon closed the subscription"),
+        }
+    }
+}

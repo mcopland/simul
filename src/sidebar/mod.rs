@@ -18,14 +18,21 @@ use crate::protocol::{Ack, Request, RunState, State, Status, now_ms};
 use crate::tmux::Tmux;
 use model::{Action, App, Line, Mark, Mode, Tone};
 
+/// How often a sidebar asks tmux for its window when the daemon's status doesn't say, as
+/// from a daemon before 0.12.
 const LOCATION_REFRESH: Duration = Duration::from_secs(5);
 /// Lines one wheel notch scrolls.
 const SCROLL_STEP: usize = 3;
 const RECONNECT: Duration = Duration::from_secs(1);
+/// How long a failed click or tmux lookup stays in the footer. The daemon sends a status
+/// only on a change, and in a quiet session none may come to clear it.
+const ERROR_SHOWN: Duration = Duration::from_secs(5);
 
 enum Update {
     Status(Status),
     Disconnected(String),
+    Input(Event),
+    InputFailed(String),
 }
 
 pub fn run() -> Result<()> {
@@ -36,6 +43,7 @@ pub fn run() -> Result<()> {
     let own_pane = env_var("TMUX_PANE");
     let (tx, rx) = mpsc::channel();
     let subscribe_socket = socket.clone();
+    let input_tx = tx.clone();
     std::thread::spawn(move || subscribe_forever(&subscribe_socket, &tx));
 
     let mut terminal = ratatui::init();
@@ -45,6 +53,7 @@ pub fn run() -> Result<()> {
         crossterm::event::EnableFocusChange
     )
     .context("failed to enable mouse capture and focus reporting")?;
+    std::thread::spawn(move || read_input(&input_tx));
     let result = ui_loop(&mut terminal, &rx, &tmux, &socket, own_pane.as_deref());
     // Restoring the terminal is best effort; the pane is usually being closed anyway.
     let _ = crossterm::execute!(
@@ -78,9 +87,25 @@ fn subscribe_forever(socket: &std::path::Path, tx: &mpsc::Sender<Update>) {
     }
 }
 
+/// Forwards terminal input, so the UI waits on one channel for input and status alike.
+fn read_input(tx: &mpsc::Sender<Update>) {
+    loop {
+        let update = match event::read() {
+            Ok(ev) => Update::Input(ev),
+            Err(e) => Update::InputFailed(format!("failed to read terminal input: {e}")),
+        };
+        let failed = matches!(update, Update::InputFailed(_));
+        if tx.send(update).is_err() || failed {
+            return;
+        }
+    }
+}
+
 struct View {
     app: App,
     error: Option<String>,
+    /// When `error` goes away on its own; `None` for one that lasts until a status clears it.
+    error_expires: Option<Instant>,
     offset: usize,
     /// Rows the list had in the last frame; the footer is the row below them.
     list_height: usize,
@@ -94,10 +119,31 @@ impl View {
         View {
             app,
             error: None,
+            error_expires: None,
             offset: 0,
             list_height: 0,
             highlighted: None,
         }
+    }
+
+    /// Shows `error` in the footer, for `lasts` or until a status arrives.
+    fn show_error(&mut self, error: String, lasts: Option<Duration>) {
+        self.error = Some(error);
+        self.error_expires = lasts.map(|d| Instant::now() + d);
+    }
+
+    fn clear_error(&mut self) -> Option<String> {
+        self.error_expires = None;
+        self.error.take()
+    }
+
+    /// Clears an error whose time is up at `now`; whether it did.
+    fn expire_error(&mut self, now: Instant) -> bool {
+        if self.error_expires.is_some_and(|t| now >= t) {
+            self.clear_error();
+            return true;
+        }
+        false
     }
 
     /// A left click acts on the line under it, or on the footer switches the view; the wheel
@@ -107,7 +153,7 @@ impl View {
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) if row >= self.list_height => {
                 // The footer shows an error in place of the view; a click dismisses it.
-                if self.error.take().is_none() {
+                if self.clear_error().is_none() {
                     self.app.toggle_mode();
                 }
                 Action::None
@@ -126,6 +172,15 @@ impl View {
     }
 }
 
+/// How long until the ages drawn `since_drawn` ago, at `status.now_ms`, read differently. It
+/// counts from the draw, not from now, so a boundary passed since then redraws at once.
+fn tick_wait(status: &Status, since_drawn: Duration) -> Option<Duration> {
+    model::next_age_change(status, status.now_ms).map(|d| d.saturating_sub(since_drawn))
+}
+
+/// Draws only when something changed: a status, input, or, while this sidebar's window is
+/// on a terminal, an age ticking over. Off screen, ages wait for the next status, which the
+/// window coming on screen brings.
 fn ui_loop(
     terminal: &mut ratatui::DefaultTerminal,
     rx: &mpsc::Receiver<Update>,
@@ -137,60 +192,139 @@ fn ui_loop(
         home: crate::paths::env_var("HOME").unwrap_or_default(),
         ..App::default()
     });
+    // Until a status places this sidebar, it asks tmux for its window and ticks as if shown.
+    let mut located = false;
+    let mut shown = true;
     let mut location_checked: Option<Instant> = None;
+    let mut dirty = true;
+    let mut drawn_at = Instant::now();
     loop {
-        while let Ok(update) = rx.try_recv() {
-            match update {
-                Update::Status(s) => {
-                    view.error = None;
-                    view.app.set_status(s);
-                }
-                Update::Disconnected(e) => view.error = Some(format!("daemon unavailable: {e}")),
-            }
-        }
-        if location_checked.is_none_or(|t| t.elapsed() >= LOCATION_REFRESH) {
-            location_checked = Some(Instant::now());
-            if let Some(pane) = own_pane {
-                match tmux.run(&["display-message", "-p", "-t", pane, "#{window_id}"]) {
-                    Ok(out) if !out.trim().is_empty() => {
-                        view.app.set_location(out.trim().to_owned());
-                    }
-                    Ok(_) => view.error = Some(format!("tmux reported no window for {pane}")),
-                    Err(e) => view.error = Some(format!("{e:#}")),
-                }
-            }
-        }
-        if let Some(status) = view.app.status.as_mut() {
-            status.now_ms = now_ms();
-        }
-        terminal
-            .draw(|f| render(f, &mut view))
-            .context("failed to draw sidebar")?;
-
-        if !event::poll(Duration::from_millis(250)).context("failed to poll terminal input")? {
-            continue;
-        }
-        let Event::Mouse(m) = event::read().context("failed to read terminal input")? else {
-            continue;
-        };
-        // tmux focuses the pane you click; hand focus straight back to the pane you were in,
-        // before a jump, so a jump to this window lands on that pane. Focus that arrives by
-        // keyboard stays, so tmux's pane cycling can pass through the sidebar.
-        if matches!(m.kind, MouseEventKind::Down(_))
+        if !located
             && let Some(pane) = own_pane
-            && let Err(e) = refocus(tmux, pane)
+            && location_checked.is_none_or(|t| t.elapsed() >= LOCATION_REFRESH)
         {
-            view.error = Some(format!("{e:#}"));
+            location_checked = Some(Instant::now());
+            match tmux.run(&["display-message", "-p", "-t", pane, "#{window_id}"]) {
+                Ok(out) if !out.trim().is_empty() => {
+                    let window = out.trim();
+                    if view.app.own_window.as_deref() != Some(window) {
+                        view.app.set_location(window.to_owned());
+                        dirty = true;
+                    }
+                }
+                Ok(_) => {
+                    view.show_error(
+                        format!("tmux reported no window for {pane}"),
+                        Some(ERROR_SHOWN),
+                    );
+                    dirty = true;
+                }
+                Err(e) => {
+                    view.show_error(format!("{e:#}"), Some(ERROR_SHOWN));
+                    dirty = true;
+                }
+            }
         }
-        let action = view.on_mouse(m);
-        let result = match action {
-            Action::None => Ok(()),
-            Action::Jump(target) => jump(tmux, &target),
-            Action::Collapse { session, collapsed } => collapse(socket, session, collapsed),
+        if dirty {
+            if let Some(status) = view.app.status.as_mut() {
+                status.now_ms = now_ms();
+            }
+            terminal
+                .draw(|f| render(f, &mut view))
+                .context("failed to draw sidebar")?;
+            drawn_at = Instant::now();
+            dirty = false;
+        }
+
+        let tick = view
+            .app
+            .status
+            .as_ref()
+            .filter(|_| shown)
+            .and_then(|s| tick_wait(s, drawn_at.elapsed()));
+        let expires = view
+            .error_expires
+            .map(|t| t.saturating_duration_since(Instant::now()));
+        let relocate = (!located && own_pane.is_some()).then(|| {
+            location_checked.map_or(Duration::ZERO, |t| {
+                LOCATION_REFRESH.saturating_sub(t.elapsed())
+            })
+        });
+        let update = match tick.into_iter().chain(relocate).chain(expires).min() {
+            Some(wait) => match rx.recv_timeout(wait) {
+                Ok(update) => update,
+                // An age ticked over, an error's time is up, or the location is due a check,
+                // which the top of the loop makes.
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let aged = tick.is_some()
+                        && view
+                            .app
+                            .status
+                            .as_ref()
+                            .and_then(|s| tick_wait(s, drawn_at.elapsed()))
+                            == Some(Duration::ZERO);
+                    let expired = view.expire_error(Instant::now());
+                    dirty |= aged || expired;
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    anyhow::bail!("sidebar input and daemon threads both stopped")
+                }
+            },
+            None => rx
+                .recv()
+                .context("sidebar input and daemon threads both stopped")?,
         };
-        if let Err(e) = result {
-            view.error = Some(format!("{e:#}"));
+        match update {
+            Update::Status(s) => {
+                dirty = true;
+                view.clear_error();
+                view.app.set_status(s);
+                match own_pane.and_then(|pane| view.app.locate(pane)) {
+                    Some(on_screen) => {
+                        located = true;
+                        shown = on_screen;
+                    }
+                    None => {
+                        located = false;
+                        shown = true;
+                    }
+                }
+            }
+            Update::Disconnected(e) => {
+                view.show_error(format!("daemon unavailable: {e}"), None);
+                dirty = true;
+                shown = true;
+            }
+            Update::InputFailed(e) => anyhow::bail!(e),
+            Update::Input(Event::Mouse(m)) => {
+                on_mouse(&mut view, m, tmux, socket, own_pane);
+                dirty = true;
+            }
+            Update::Input(Event::Resize(..)) => dirty = true,
+            Update::Input(_) => {}
         }
+    }
+}
+
+fn on_mouse(view: &mut View, m: MouseEvent, tmux: &Tmux, socket: &Path, own_pane: Option<&str>) {
+    // tmux focuses the pane you click; hand focus straight back to the pane you were in,
+    // before a jump, so a jump to this window lands on that pane. Focus that arrives by
+    // keyboard stays, so tmux's pane cycling can pass through the sidebar.
+    if matches!(m.kind, MouseEventKind::Down(_))
+        && let Some(pane) = own_pane
+        && let Err(e) = refocus(tmux, pane)
+    {
+        view.show_error(format!("{e:#}"), Some(ERROR_SHOWN));
+    }
+    let action = view.on_mouse(m);
+    let result = match action {
+        Action::None => Ok(()),
+        Action::Jump(target) => jump(tmux, &target),
+        Action::Collapse { session, collapsed } => collapse(socket, session, collapsed),
+    };
+    if let Err(e) = result {
+        view.show_error(format!("{e:#}"), Some(ERROR_SHOWN));
     }
 }
 
@@ -396,6 +530,8 @@ mod tests {
                 git: None,
                 run: None,
             }],
+            sidebar: None,
+            shown: true,
         }
     }
 
@@ -688,6 +824,40 @@ mod tests {
         assert_eq!(view.on_mouse(left(7)), Action::None);
         assert_eq!(view.error, None);
         assert_eq!(view.app.mode, Mode::All);
+    }
+
+    #[test]
+    fn a_tick_counts_from_the_draw_so_a_boundary_since_then_redraws_at_once() {
+        let mut s = two_sessions();
+        s.now_ms = 3_599_999;
+        let mut rec = agent("%1", State::Working, "a");
+        rec.since_ms = 0;
+        s.panes = vec![rec];
+        assert_eq!(
+            tick_wait(&s, Duration::ZERO),
+            Some(Duration::from_millis(1))
+        );
+        assert_eq!(
+            tick_wait(&s, Duration::from_millis(2)),
+            Some(Duration::ZERO),
+            "59m drawn, 1h now"
+        );
+    }
+
+    #[test]
+    fn a_passing_error_expires_and_a_lasting_one_does_not() {
+        let mut view = view_of(two_sessions(), None);
+        view.show_error("jump failed".into(), Some(Duration::ZERO));
+        assert!(view.expire_error(Instant::now()));
+        assert_eq!(view.error, None);
+        view.show_error("jump failed".into(), Some(Duration::from_secs(60)));
+        assert!(!view.expire_error(Instant::now()));
+        view.show_error("daemon unavailable: gone".into(), None);
+        assert!(
+            !view.expire_error(Instant::now() + Duration::from_secs(3600)),
+            "a later lasting error drops the earlier one's expiry"
+        );
+        assert!(view.error.is_some());
     }
 
     /// Draws one window of session `a` whose pane %1 (cwd `/`) has `run`, at time 5s.

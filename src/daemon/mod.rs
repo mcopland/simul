@@ -120,6 +120,8 @@ struct Daemon {
     focus_events: bool,
     tx: mpsc::Sender<Cmd>,
     updates: broadcast::Sender<Status>,
+    /// The status last sent to subscribers; one that differs only in time isn't sent again.
+    published: Option<Status>,
     reconcile_pending: bool,
     sidebar: Sidebars,
     notify_gate: notify::Gate,
@@ -172,6 +174,7 @@ pub async fn run(opts: Options) -> Result<()> {
         focus_events: false,
         tx,
         updates,
+        published: None,
         reconcile_pending: false,
         sidebar: Sidebars::default(),
         notify_gate: notify::Gate::default(),
@@ -387,9 +390,27 @@ impl Daemon {
         }
     }
 
-    fn publish(&self) {
-        // No subscribers is the normal case when no sidebar is open.
-        let _ = self.updates.send(self.status());
+    /// Sends the status to subscribers if it changed. A reconcile runs every second while
+    /// sidebars are shown; resending an unchanged status would wake every sidebar to redraw
+    /// the same lines. Sidebars tick their ages on their own.
+    fn publish(&mut self) {
+        // No subscribers is the normal case when no sidebar is open. The first status after
+        // one subscribes goes out even if unchanged, as `published` may predate its join.
+        if self.updates.receiver_count() == 0 {
+            self.published = None;
+            return;
+        }
+        let status = self.status();
+        if self
+            .published
+            .as_ref()
+            .is_some_and(|last| last.same_but_time(&status))
+        {
+            return;
+        }
+        self.published = Some(status.clone());
+        // Fails only when the last subscriber left since the count above; nobody to tell.
+        let _ = self.updates.send(status);
     }
 
     fn on_hook(&mut self, env: Envelope) {

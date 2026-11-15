@@ -214,6 +214,23 @@ pub struct Status {
     pub collapsed: Vec<String>,
 }
 
+impl Status {
+    /// Whether `other` says the same as this, maybe at another time.
+    pub fn same_but_time(&self, other: &Status) -> bool {
+        let Status {
+            now_ms: _,
+            sidebar,
+            panes,
+            windows,
+            collapsed,
+        } = self;
+        *sidebar == other.sidebar
+            && *panes == other.panes
+            && *windows == other.windows
+            && *collapsed == other.collapsed
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowInfo {
     pub id: String,
@@ -223,6 +240,22 @@ pub struct WindowInfo {
     /// Non-sidebar panes in tmux's order; absent from daemons before 0.2.
     #[serde(default)]
     pub panes: Vec<PaneSummary>,
+    /// The window's sidebar pane, which finds its own window by it; absent from daemons
+    /// before 0.12, and left off the wire when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar: Option<String>,
+    /// Whether the window is on some terminal (see `Snapshot::shown_windows`); a sidebar
+    /// elsewhere skips drawing. Left off the wire when true, which older daemons imply.
+    #[serde(default = "shown_default", skip_serializing_if = "is_shown")]
+    pub shown: bool,
+}
+
+fn shown_default() -> bool {
+    true
+}
+
+fn is_shown(shown: &bool) -> bool {
+    *shown
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -307,6 +340,8 @@ mod tests {
             serde_json::from_value(json!({"id": "@1", "session": "s", "index": 1, "name": "n"}))
                 .unwrap();
         assert!(w.panes.is_empty());
+        assert_eq!(w.sidebar, None);
+        assert!(w.shown, "from an older daemon, a sidebar draws as if shown");
         let p: PaneSummary =
             serde_json::from_value(json!({"id": "%1", "command": "zsh", "active": true})).unwrap();
         assert_eq!(p.run, None);
@@ -351,6 +386,30 @@ mod tests {
             r#""deleted":0,"modified":0,"untracked":0,"stashed":0},"run":null}]}],"#,
             r#""collapsed":["other"]}"#,
         ));
+    }
+
+    #[test]
+    fn window_sidebar_and_shown_are_on_the_wire_only_when_set() {
+        round_trips::<WindowInfo>(concat!(
+            r#"{"id":"@1","session":"s","index":1,"name":"n","panes":[],"#,
+            r#""sidebar":"%9","shown":false}"#,
+        ));
+        let w: WindowInfo = serde_json::from_str(
+            r#"{"id":"@1","session":"s","index":1,"name":"n","panes":[],"shown":false}"#,
+        )
+        .unwrap();
+        assert!(!w.shown);
+    }
+
+    #[test]
+    fn statuses_differ_in_more_than_their_time() {
+        let a: Status =
+            serde_json::from_value(json!({"now_ms": 1, "sidebar": false, "panes": []})).unwrap();
+        let mut b = a.clone();
+        b.now_ms = 2;
+        assert!(a.same_but_time(&b));
+        b.sidebar = true;
+        assert!(!a.same_but_time(&b));
     }
 
     #[test]
