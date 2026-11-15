@@ -28,6 +28,9 @@ pub struct PaneInfo {
     pub window_width: u16,
     /// Whether a pane in this window is zoomed.
     pub window_zoomed: bool,
+    /// Titled `SIDEBAR_TITLE` but untagged: a sidebar as a session restore such as
+    /// tmux-resurrect brings it back, which keeps pane titles but not pane options.
+    pub restored_sidebar: bool,
     pub window_name: String,
 }
 
@@ -43,7 +46,11 @@ pub struct Snapshot {
     pub shown_windows: HashSet<String>,
 }
 
-pub const PANES_FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_id}\t#{pane_active}\t#{window_active}\t#{pane_current_command}\t#{pane_current_path}\t#{@simul-sidebar}\t#{window_panes}\t#{@simul-collapsed}\t#{pane_width}\t#{window_width}\t#{window_zoomed_flag}\t#{?pane_start_command,#{pane_start_command},#{?default-command,#{default-command},#{default-shell}}}\t#{window_name}";
+/// The pane title every sidebar carries, so one brought back by a session restore can be found.
+/// `PANES_FORMAT` repeats it.
+pub const SIDEBAR_TITLE: &str = "simul-sidebar";
+
+pub const PANES_FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_id}\t#{pane_active}\t#{window_active}\t#{pane_current_command}\t#{pane_current_path}\t#{@simul-sidebar}\t#{window_panes}\t#{@simul-collapsed}\t#{pane_width}\t#{window_width}\t#{window_zoomed_flag}\t#{==:#{pane_title},simul-sidebar}\t#{?pane_start_command,#{pane_start_command},#{?default-command,#{default-command},#{default-shell}}}\t#{window_name}";
 pub const CLIENTS_FORMAT: &str = "#{client_session}\t#{client_flags}\t#{client_tty}";
 
 #[derive(Clone, Debug)]
@@ -136,7 +143,7 @@ pub fn parse_snapshot(panes: &str, clients: &str, focus_events: bool) -> Snapsho
     let mut seen = HashSet::new();
     for line in panes.lines() {
         // The window name comes last so a tab inside it stays part of the name.
-        let f: Vec<&str> = line.splitn(16, '\t').collect();
+        let f: Vec<&str> = line.splitn(17, '\t').collect();
         let [
             id,
             session,
@@ -152,6 +159,7 @@ pub fn parse_snapshot(panes: &str, clients: &str, focus_events: bool) -> Snapsho
             width,
             window_width,
             zoomed,
+            titled,
             launched,
             window_name,
         ] = f[..]
@@ -194,6 +202,7 @@ pub fn parse_snapshot(panes: &str, clients: &str, focus_events: bool) -> Snapsho
             width,
             window_width,
             window_zoomed: zoomed == "1",
+            restored_sidebar: titled == "1" && sidebar != "1",
             window_name: window_name.to_owned(),
         });
     }
@@ -265,11 +274,11 @@ pub fn tmux_double_quote(s: &str) -> String {
 mod tests {
     use super::*;
 
-    const PANES: &str = "%1\tmain\t1\t@1\t1\t1\t2.1.307\t/w/a\t\t2\t\t120\t200\t0\t\tapi\n\
-%2\tmain\t1\t@1\t0\t1\tzsh\t/w/a\t\t2\t\t79\t200\t0\t\tapi\n\
-%3\tmain\t2\t@2\t1\t0\tclaude\t/w/b\t\t1\t\t200\t200\t0\t\tweb\n\
-%4\twork\t1\t@3\t1\t1\tclaude\t/w/c\t\t2\t1\t150\t200\t1\t\tmy\ttabbed name\n\
-%5\twork\t1\t@3\t0\t1\tsimul\t/w/c\t1\t2\t1\t49\t200\t1\t\"exec simul sidebar\"\tmy\ttabbed name\n";
+    const PANES: &str = "%1\tmain\t1\t@1\t1\t1\t2.1.307\t/w/a\t\t2\t\t120\t200\t0\t0\t\tapi\n\
+%2\tmain\t1\t@1\t0\t1\tzsh\t/w/a\t\t2\t\t79\t200\t0\t1\t\tapi\n\
+%3\tmain\t2\t@2\t1\t0\tclaude\t/w/b\t\t1\t\t200\t200\t0\t0\t\tweb\n\
+%4\twork\t1\t@3\t1\t1\tclaude\t/w/c\t\t2\t1\t150\t200\t1\t0\t\tmy\ttabbed name\n\
+%5\twork\t1\t@3\t0\t1\tsimul\t/w/c\t1\t2\t1\t49\t200\t1\t1\t\"exec simul sidebar\"\tmy\ttabbed name\n";
 
     #[test]
     fn parses_panes() {
@@ -292,8 +301,14 @@ mod tests {
                 width: 120,
                 window_width: 200,
                 window_zoomed: false,
+                restored_sidebar: false,
                 window_name: "api".into(),
             }
+        );
+        assert!(snap.panes[1].restored_sidebar, "titled, untagged");
+        assert!(
+            !snap.panes[4].restored_sidebar,
+            "tagged sidebars are not restored ones"
         );
         assert!(snap.panes[4].is_sidebar);
         assert_eq!(snap.panes[4].launched, "\"exec simul sidebar\"");
@@ -302,6 +317,11 @@ mod tests {
         assert!(snap.panes[3].session_collapsed, "a session option");
         assert!(!snap.panes[1].active);
         assert_eq!(snap.panes[3].window_name, "my\ttabbed name");
+    }
+
+    #[test]
+    fn panes_format_matches_the_sidebar_title() {
+        assert!(PANES_FORMAT.contains(&format!("#{{pane_title}},{SIDEBAR_TITLE}}}")));
     }
 
     #[test]
@@ -360,13 +380,13 @@ mod tests {
 
     #[test]
     fn linked_window_is_shown_through_any_session() {
-        let panes = "%1\ta\t1\t@1\t1\t0\tclaude\t/w\t\t1\t\t80\t80\t0\t\tx\n%1\tb\t3\t@1\t1\t1\tclaude\t/w\t\t1\t\t80\t80\t0\t\tx\n%2\ta\t2\t@2\t1\t1\tsh\t/w\t\t1\t\t80\t80\t0\t\ty\n";
+        let panes = "%1\ta\t1\t@1\t1\t0\tclaude\t/w\t\t1\t\t80\t80\t0\t0\t\tx\n%1\tb\t3\t@1\t1\t1\tclaude\t/w\t\t1\t\t80\t80\t0\t0\t\tx\n%2\ta\t2\t@2\t1\t1\tsh\t/w\t\t1\t\t80\t80\t0\t0\t\ty\n";
         assert_eq!(shown(panes, "b\tattached\t/dev/ttys1\n"), set(&["@1"]));
     }
 
     #[test]
     fn linked_windows_are_listed_once() {
-        let panes = "%1\ta\t1\t@1\t1\t0\tclaude\t/w\t\t1\t\t80\t80\t0\t\tx\n%1\tb\t3\t@1\t1\t1\tclaude\t/w\t\t1\t\t80\t80\t0\t\tx\n";
+        let panes = "%1\ta\t1\t@1\t1\t0\tclaude\t/w\t\t1\t\t80\t80\t0\t0\t\tx\n%1\tb\t3\t@1\t1\t1\tclaude\t/w\t\t1\t\t80\t80\t0\t0\t\tx\n";
         let snap = parse_snapshot(panes, "b\tattached,focused\t/dev/ttys1\n", true);
         assert_eq!(snap.panes.len(), 1);
         assert_eq!(snap.viewed, HashSet::from(["%1".to_string()]));

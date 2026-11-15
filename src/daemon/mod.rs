@@ -526,7 +526,7 @@ impl Daemon {
     }
 
     async fn reconcile(&mut self) {
-        let snap = match self.opts.tmux.snapshot(self.focus_events).await {
+        let mut snap = match self.opts.tmux.snapshot(self.focus_events).await {
             Ok(s) => s,
             Err(e) => {
                 log!("reconcile failed: {e:#}");
@@ -552,6 +552,9 @@ impl Daemon {
                 log!("failed to restore the status line: {e:#}");
             }
         }
+        // Before agent tracking and `maintain_sidebars`, so neither takes an adopted sidebar
+        // for a plain pane, or a window that has one for a window that needs one.
+        let turned_on = self.adopt_restored_sidebars(&mut snap).await && !self.sidebar.on;
         let transitions = self.store.reconcile(&snap, now);
         self.windows = tmux::windows(&snap);
         self.sidebar.collapsed = snap
@@ -563,6 +566,9 @@ impl Daemon {
         self.snapshot = snap;
         self.apply_runs(now);
         self.refresh_git();
+        if turned_on {
+            self.show_sidebars().await;
+        }
         self.maintain_sidebars().await;
         // Layout changes in the control client's session trigger a reconcile, so this also
         // snaps those sidebars back to their share; the layout hook covers other sessions.

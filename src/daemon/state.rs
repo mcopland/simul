@@ -544,6 +544,7 @@ mod tests {
             width: 80,
             window_width: 80,
             window_zoomed: false,
+            restored_sidebar: false,
             window_name: "api".into(),
         }
     }

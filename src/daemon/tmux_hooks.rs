@@ -103,7 +103,7 @@ impl Daemon {
 }
 
 /// Joins tmux commands into one invocation's arguments, separated by `;`.
-fn chain<'a>(cmds: impl Iterator<Item = Vec<&'a str>>) -> Vec<&'a str> {
+pub(super) fn chain<'a>(cmds: impl Iterator<Item = Vec<&'a str>>) -> Vec<&'a str> {
     let mut args = Vec::new();
     for cmd in cmds {
         if !args.is_empty() {

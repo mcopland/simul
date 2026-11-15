@@ -4,6 +4,10 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+### Fixed
+
+- After tmux-resurrect restores a session, each window gets its sidebar back instead of an empty shell pane where the sidebar was. Sidebars now carry the pane title `simul-sidebar`, which resurrect restores, and the daemon restarts a restored pane with that title as a sidebar and turns the sidebar on. A shell that sets its own pane title at startup can still leave the empty pane.
+
 ## [0.11.4] - 2026-11-15
 
 ### Changed

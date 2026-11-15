@@ -5,9 +5,10 @@ use std::collections::{BTreeSet, HashSet};
 
 use anyhow::Result;
 
+use super::tmux_hooks::chain;
 use super::{COLLAPSED, Cmd, Daemon, LAYOUT_HOOK, RECONCILE_DEBOUNCE, width};
 use crate::log;
-use crate::tmux::{PaneInfo, shell_quote};
+use crate::tmux::{PaneInfo, SIDEBAR_TITLE, Snapshot, shell_quote};
 
 /// Global tmux option holding the status-format[0] hidden while the sidebar is on.
 const SAVED_STATUS: &str = "@simul-status-format";
@@ -15,6 +16,17 @@ const SAVED_STATUS: &str = "@simul-status-format";
 /// Pane option naming the build a sidebar runs (see `Identity::tag`), so a daemon that takes
 /// over can restart sidebars still running an older one.
 const SIDEBAR_EXE: &str = "@simul-sidebar-exe";
+
+/// The tmux commands that mark `pane` as a sidebar running `build` (see `Identity::tag`): the
+/// tag the daemon finds sidebars by, the build, and the title a session restore keeps when it
+/// drops pane options (see `PaneInfo::restored_sidebar`).
+fn sidebar_marks<'a>(pane: &'a str, build: &'a str) -> [Vec<&'a str>; 3] {
+    [
+        vec!["set-option", "-p", "-t", pane, "@simul-sidebar", "1"],
+        vec!["set-option", "-p", "-t", pane, SIDEBAR_EXE, build],
+        vec!["select-pane", "-t", pane, "-T", SIDEBAR_TITLE],
+    ]
+}
 
 /// The right-hand part of tmux's default status-format[0]: status-right alone, without the
 /// session name and window list the sidebar repeats.
@@ -81,6 +93,16 @@ impl Daemon {
             .collect()
     }
 
+    /// Windows holding a restored sidebar not yet adopted, which need no new one.
+    fn windows_with_restored_sidebar(&self) -> HashSet<String> {
+        self.snapshot
+            .panes
+            .iter()
+            .filter(|p| p.restored_sidebar)
+            .map(|p| p.window_id.clone())
+            .collect()
+    }
+
     pub(super) async fn toggle(&mut self) -> bool {
         self.reconcile().await;
         if self.sidebar.on {
@@ -101,22 +123,78 @@ impl Daemon {
                 log!("failed to restore the status line: {e:#}");
             }
         } else {
-            self.sidebar.on = true;
-            let have = self.windows_with_sidebar();
-            for window in self.windows().difference(&have) {
-                self.add_sidebar(window).await;
-            }
-            self.set_layout_hook(true).await;
-            if self.opts.config.sidebar.hide_status
-                && let Err(e) = self.hide_status().await
-            {
-                log!("failed to hide the status line: {e:#}");
-            }
+            self.show_sidebars().await;
         }
         self.sidebar.known_windows = self.windows();
         self.publish();
         self.schedule_reconcile();
         self.sidebar.on
+    }
+
+    /// Turns the sidebar on: a sidebar in every window that has none, the width hook, and, if
+    /// configured, the cut-down status line.
+    pub(super) async fn show_sidebars(&mut self) {
+        self.sidebar.on = true;
+        let mut have = self.windows_with_sidebar();
+        have.extend(self.windows_with_restored_sidebar());
+        for window in self.windows().difference(&have) {
+            self.add_sidebar(window).await;
+        }
+        // The snapshot doesn't show the sidebars just added, so the next reconcile mustn't
+        // take their windows for new ones.
+        self.sidebar.known_windows = self.windows();
+        self.set_layout_hook(true).await;
+        if self.opts.config.sidebar.hide_status
+            && let Err(e) = self.hide_status().await
+        {
+            log!("failed to hide the status line: {e:#}");
+        }
+    }
+
+    /// Restarts as sidebars the panes a session restore brought back in their place (see
+    /// `PaneInfo::restored_sidebar`), and marks them as sidebars in `snap`. Returns whether any
+    /// were adopted.
+    ///
+    /// A slot alone in its window waits: the restore adds the window's other panes after it,
+    /// and a lone sidebar is closed, which would close the window under the restore. A window
+    /// keeps at most one sidebar, so a slot beside another stays a plain pane.
+    pub(super) async fn adopt_restored_sidebars(&self, snap: &mut Snapshot) -> bool {
+        let cmd = self.sidebar_command();
+        let build = self.opts.identity.tag();
+        let mut have: HashSet<String> = snap
+            .panes
+            .iter()
+            .filter(|p| p.is_sidebar)
+            .map(|p| p.window_id.clone())
+            .collect();
+        let mut adopted = false;
+        for pane in snap.panes.iter_mut() {
+            if !pane.restored_sidebar || pane.window_panes < 2 || have.contains(&pane.window_id) {
+                continue;
+            }
+            let id = pane.id.clone();
+            let mut cmds = vec![vec!["respawn-pane", "-k", "-t", &id, &cmd]];
+            cmds.extend(sidebar_marks(&id, &build));
+            // The restore's layout changes fired while this was a plain pane; rerun the user's
+            // hooks so any that skip sidebars see it, as `add_sidebar` does.
+            cmds.push(vec!["set-hook", "-R", "-t", &id, LAYOUT_HOOK]);
+            if pane.active {
+                // The sidebar lies left of the window's other panes.
+                cmds.push(vec!["select-pane", "-R", "-t", &id]);
+            }
+            // One tmux call, which stops at a failed command, so a sidebar never runs untagged
+            // and gets restarted by every later reconcile.
+            if let Err(e) = self.opts.tmux.run_async(&chain(cmds.into_iter())).await {
+                log!("failed to restart restored sidebar {id}: {e:#}");
+                continue;
+            }
+            log!("adopted restored sidebar {id}");
+            pane.is_sidebar = true;
+            pane.restored_sidebar = false;
+            have.insert(pane.window_id.clone());
+            adopted = true;
+        }
+        adopted
     }
 
     /// Folds or unfolds `session` in every sidebar. tmux sends no notification for an option
@@ -189,7 +267,9 @@ impl Daemon {
     pub(super) async fn maintain_sidebars(&mut self) {
         let windows = self.windows();
         if self.sidebar.on {
-            let have = self.windows_with_sidebar();
+            let mut have = self.windows_with_sidebar();
+            // Adopted once the restore gives its window a second pane.
+            have.extend(self.windows_with_restored_sidebar());
             let new: Vec<String> = windows
                 .difference(&self.sidebar.known_windows)
                 .filter(|w| !have.contains(*w))
@@ -223,14 +303,6 @@ impl Daemon {
         )
     }
 
-    pub(super) async fn tag_sidebar_build(&self, pane: &str) {
-        let tag = self.opts.identity.tag();
-        let set = ["set-option", "-p", "-t", pane, SIDEBAR_EXE, &tag];
-        if let Err(e) = self.opts.tmux.run_async(&set).await {
-            log!("failed to tag sidebar {pane} with its build: {e:#}");
-        }
-    }
-
     /// Restarts in place each sidebar left by another build, such as the daemon this one
     /// replaced, so the sidebar runs this build's code too.
     pub(super) async fn restart_stale_sidebars(&self) {
@@ -259,10 +331,10 @@ impl Daemon {
             if build == Some(tag.as_str()) || !seen.insert(pane) {
                 continue;
             }
-            let respawn = ["respawn-pane", "-k", "-t", pane, &cmd];
-            match self.opts.tmux.run_async(&respawn).await {
-                Ok(_) => self.tag_sidebar_build(pane).await,
-                Err(e) => log!("failed to restart sidebar {pane}: {e:#}"),
+            let respawn = vec!["respawn-pane", "-k", "-t", pane, &cmd];
+            let cmds = std::iter::once(respawn).chain(sidebar_marks(pane, &tag));
+            if let Err(e) = self.opts.tmux.run_async(&chain(cmds)).await {
+                log!("failed to restart sidebar {pane}: {e:#}");
             }
         }
     }
@@ -289,19 +361,15 @@ impl Daemon {
             }
         };
         // The actor awaits this before handling the next reconcile, so no snapshot sees an
-        // untagged sidebar and adds a second one.
-        let tag = ["set-option", "-p", "-t", &pane, "@simul-sidebar", "1"];
-        if let Err(e) = self.opts.tmux.run_async(&tag).await {
+        // untagged sidebar and adds a second one. The split fired window-layout-changed before
+        // the tag existed; the rerun lets the user's hooks that skip sidebars (e.g. pane-count
+        // checks) see it. It also reruns simul's own width hook, which is cheap: the width is
+        // already right.
+        let build = self.opts.identity.tag();
+        let rerun = vec!["set-hook", "-R", "-t", &pane, LAYOUT_HOOK];
+        let cmds = sidebar_marks(&pane, &build).into_iter().chain([rerun]);
+        if let Err(e) = self.opts.tmux.run_async(&chain(cmds)).await {
             log!("failed to tag sidebar {pane}: {e:#}");
-            return;
-        }
-        self.tag_sidebar_build(&pane).await;
-        // The split fired window-layout-changed before the tag existed; rerun the user's
-        // hooks so any that skip sidebars (e.g. pane-count checks) see it. This also reruns
-        // simul's own width hook, which is cheap: the width is already right.
-        let rerun = ["set-hook", "-R", "-t", &pane, LAYOUT_HOOK];
-        if let Err(e) = self.opts.tmux.run_async(&rerun).await {
-            log!("failed to rerun layout hooks for {pane}: {e:#}");
         }
     }
 

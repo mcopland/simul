@@ -880,3 +880,218 @@ fn an_unchanged_status_is_not_sent_again() {
         }
     }
 }
+
+/// Session restore tools such as tmux-resurrect bring back pane titles but not pane options,
+/// so the title is how a restored sidebar is recognized.
+const SIDEBAR_TITLE: &str = "simul-sidebar";
+
+/// What tmux-resurrect leaves where a sidebar was: a plain shell pane at the left of `window`,
+/// titled like a sidebar but without the `@simul-sidebar` tag. Returns its pane id.
+fn restored_slot(h: &Harness, window: &str) -> String {
+    let pane = h.tmux(&[
+        "split-window",
+        "-hbfd",
+        // At the sidebar's width, as the restored layout leaves it, so no resize follows.
+        "-l",
+        "25%",
+        "-t",
+        window,
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "sh",
+    ]);
+    h.tmux(&["select-pane", "-t", &pane, "-T", SIDEBAR_TITLE]);
+    pane
+}
+
+fn pane_field(h: &Harness, pane: &str, format: &str) -> String {
+    h.tmux(&["display-message", "-p", "-t", pane, format])
+}
+
+fn adopted(h: &Harness, pane: &str) -> bool {
+    pane_field(h, pane, "#{@simul-sidebar} #{pane_current_command}") == "1 simul"
+}
+
+#[test]
+fn sidebars_carry_the_restore_title() {
+    let mut h = Harness::new();
+    h.new_pane("sleep 600");
+    h.start_daemon();
+    toggle(&h);
+    let found = sidebars(&h);
+    assert_eq!(found.len(), 2);
+    for (pane, ..) in found {
+        assert_eq!(pane_field(&h, &pane, "#{pane_title}"), SIDEBAR_TITLE);
+    }
+}
+
+#[test]
+fn a_restored_sidebar_becomes_a_sidebar_again() {
+    let mut h = Harness::new();
+    h.tmux(&["set-option", "-g", "status-format[0]", "#S custom"]);
+    let slot = restored_slot(&h, "t:");
+    h.start_daemon();
+    eventually("restored slot adopted", || adopted(&h, &slot));
+    assert_eq!(sidebars(&h).len(), 1, "no second sidebar");
+    assert_eq!(pane_field(&h, "t:", "#{window_panes}"), "2");
+    // Adoption tags the pane a few tmux commands before it cuts the status line.
+    eventually("status line cut down", || !status_format(&h).contains("#S"));
+    // The sidebar counts as on, so a toggle hides it rather than adding more.
+    toggle(&h);
+    eventually("sidebars removed", || sidebars(&h).is_empty());
+    assert_eq!(status_format(&h), "#S custom");
+}
+
+/// Waits for a status from the daemon that lists `pane` as a plain pane: proof that a
+/// reconcile saw it and left it one.
+fn wait_listed_plain(h: &Harness, pane: &str) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    let mut stream = UnixStream::connect(&h.simul_sock).unwrap();
+    stream.write_all(b"{\"type\":\"subscribe\"}\n").unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let needle = format!("\"id\":\"{pane}\"");
+    for line in BufReader::new(stream).lines() {
+        let line = line.unwrap_or_else(|e| panic!("no status listed {pane}: {e}"));
+        if line.contains(&needle) {
+            return;
+        }
+    }
+    panic!("the daemon closed the subscription before listing {pane}");
+}
+
+/// A new window named `name` in session `t` whose only pane is a restored slot, created and
+/// titled in one tmux invocation, so no reconcile sees it untitled. Returns the pane id.
+fn lone_restored_slot(h: &Harness, name: &str) -> String {
+    let dir = h.dir.path().to_string_lossy().into_owned();
+    let target = format!("t:{name}");
+    h.tmux(&[
+        "new-window",
+        "-d",
+        "-t",
+        "t:",
+        "-n",
+        name,
+        "-c",
+        &dir,
+        "sh",
+        ";",
+        "select-pane",
+        "-t",
+        &target,
+        "-T",
+        SIDEBAR_TITLE,
+    ]);
+    pane_field(h, &target, "#{pane_id}")
+}
+
+#[test]
+fn a_sidebar_restored_while_the_daemon_runs_turns_the_sidebar_on_everywhere() {
+    let mut h = Harness::new();
+    h.start_daemon();
+    // Past the first reconcile, which would see every window as new.
+    wait_listed_plain(&h, &h.first_pane());
+    let pane = h.new_pane("sleep 600");
+    let window = pane_field(&h, &pane, "#{window_id}");
+    let slot = restored_slot(&h, &window);
+    eventually("restored slot adopted", || adopted(&h, &slot));
+    assert_eq!(pane_field(&h, &window, "#{window_panes}"), "2");
+    // The sidebar is on now, so the window that had none gets one, and each window has one.
+    eventually("one sidebar in every window", || {
+        let found = sidebars(&h);
+        let with: HashSet<String> = found.iter().map(|(_, w, _)| w.clone()).collect();
+        found.len() == with.len() && with == windows(&h)
+    });
+}
+
+#[test]
+fn a_lone_restored_slot_waits_for_a_second_pane() {
+    let mut h = Harness::new();
+    h.start_daemon();
+    let slot = lone_restored_slot(&h, "restored");
+    // A restore creates the slot first and its window's other panes after; adopting it alone
+    // would close it as a lone sidebar, and the window with it.
+    wait_listed_plain(&h, &slot);
+    assert_eq!(pane_field(&h, &slot, "#{@simul-sidebar}"), "");
+    h.tmux(&["split-window", "-hd", "-t", &slot, "sleep 600"]);
+    eventually("restored slot adopted", || adopted(&h, &slot));
+}
+
+#[test]
+fn a_restore_while_the_sidebar_is_on_leaves_one_sidebar_per_window() {
+    let mut h = Harness::new();
+    h.start_daemon();
+    toggle(&h);
+    let slot = lone_restored_slot(&h, "restored");
+    let window = pane_field(&h, &slot, "#{window_id}");
+    wait_listed_plain(&h, &slot);
+    assert_eq!(
+        pane_field(&h, &window, "#{window_panes}"),
+        "1",
+        "no fresh sidebar"
+    );
+    h.tmux(&["split-window", "-hd", "-t", &slot, "sleep 600"]);
+    eventually("restored slot adopted", || adopted(&h, &slot));
+    assert_eq!(pane_field(&h, &window, "#{window_panes}"), "2");
+}
+
+#[test]
+fn a_titled_pane_beside_a_sidebar_stays_a_pane() {
+    let mut h = Harness::new();
+    h.start_daemon();
+    toggle(&h);
+    h.stop_daemon();
+    let pane = h.tmux(&[
+        "split-window",
+        "-hd",
+        "-t",
+        "t:",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "sh",
+    ]);
+    h.tmux(&["select-pane", "-t", &pane, "-T", SIDEBAR_TITLE]);
+    h.start_daemon();
+    wait_listed_plain(&h, &pane);
+    assert_eq!(pane_field(&h, &pane, "#{@simul-sidebar}"), "");
+    assert_eq!(sidebars(&h).len(), 1);
+}
+
+#[test]
+fn an_adopted_sidebar_hands_focus_to_its_neighbor() {
+    let mut h = Harness::new();
+    let slot = restored_slot(&h, "t:");
+    h.tmux(&["select-pane", "-t", &slot]);
+    h.start_daemon();
+    eventually("restored slot adopted", || adopted(&h, &slot));
+    eventually("focus left the sidebar", || {
+        pane_field(&h, &slot, "#{pane_active}") == "0"
+    });
+}
+
+#[test]
+fn layout_hooks_see_an_adopted_sidebar() {
+    let mut h = Harness::new();
+    // The user hook from layout_hooks_see_the_sidebar_tag: borders off with one real pane.
+    h.tmux(&[
+        "set-hook",
+        "-g",
+        "window-layout-changed",
+        "if -F \"#{==:#{P:#{?#{@simul-sidebar},,x}},x}\" \"setw pane-border-status off\" \"setw pane-border-status top\"",
+    ]);
+    let slot = restored_slot(&h, "t:");
+    // The split ran the hook while the slot was a plain pane.
+    assert_eq!(
+        h.tmux(&["show-options", "-wv", "-t", "t:0", "pane-border-status"]),
+        "top"
+    );
+    h.start_daemon();
+    eventually("restored slot adopted", || adopted(&h, &slot));
+    eventually("borders off with one real pane", || {
+        h.tmux(&["show-options", "-wv", "-t", "t:0", "pane-border-status"]) == "off"
+    });
+}

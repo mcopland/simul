@@ -181,6 +181,8 @@ bind x if -F '#{==:#{P:#{?#{@simul-sidebar},,x}},x}' \
 
 After opening a sidebar, simul re-runs `window-layout-changed` hooks, so hooks that use this check see the sidebar's tag.
 
+Sidebar panes are also titled `simul-sidebar`. Session restore tools such as tmux-resurrect keep pane titles but not pane options, so after a restore the daemon finds the pane with that title in each window and runs the sidebar in it again.
+
 ## Config
 
 `~/.config/simul/config.toml`, all keys optional. `simul doctor` and the daemon log name any key simul does not know, such as a misspelled one:
