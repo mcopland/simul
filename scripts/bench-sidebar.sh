@@ -1,30 +1,22 @@
 #!/usr/bin/env bash
 # Measures what shown sidebars cost on an isolated tmux server: 3 sessions with 13 windows,
 # one attached client that switches windows every 10 seconds.
-# Usage: bench-sidebar.sh <simul-bin> <lazy: true|false|none> [secs] [label]
+# Usage: bench-sidebar.sh <simul-bin> [secs] [label]
 # Prints one tab-separated row: label, sidebars, sidebar/daemon/tmux/total CPU seconds over
-# the run, and the sidebars' summed RSS in MB. "none" leaves lazy out of the config, for
-# builds that predate it.
+# the run, and the sidebars' summed memory in MB: physical footprint where macOS's
+# `footprint` exists, else RSS, which counts the shared binary once per sidebar.
 
 set -euo pipefail
 
-usage="usage: bench-sidebar.sh <simul-bin> <lazy: true|false|none> [secs] [label]"
+usage="usage: bench-sidebar.sh <simul-bin> [secs] [label]"
 bin=${1:?$usage}
-lazy=${2:?$usage}
-secs=${3:-120}
-label=${4:-"$(basename "$(dirname "$(dirname "$(dirname "$bin")")")")/lazy=$lazy"}
+secs=${2:-120}
+label=${3:-$bin}
 
 [ -x "$bin" ] || {
 	echo "bench-sidebar: not an executable: $bin" >&2
 	exit 1
 }
-case "$lazy" in
-true | false | none) ;;
-*)
-	echo "bench-sidebar: lazy must be true, false, or none, not $lazy" >&2
-	exit 1
-	;;
-esac
 # Sidebars are found by the binary's path in ps, as the daemon resolves it: absolute, with
 # symlinks such as macOS's /tmp resolved.
 bin=$(cd "$(dirname "$bin")" && pwd -P)/$(basename "$bin")
@@ -47,10 +39,7 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$dir/config/simul" "$dir/claude" "$dir/kiro"
-{
-	printf '[notify]\nenabled = false\n'
-	[ "$lazy" = none ] || printf '[sidebar]\nlazy = %s\n' "$lazy"
-} >"$dir/config/simul/config.toml"
+printf '[notify]\nenabled = false\n' >"$dir/config/simul/config.toml"
 
 export SIMUL_SOCKET=$dir/s.sock
 export XDG_CONFIG_HOME=$dir/config
@@ -123,8 +112,8 @@ cpu() {
 		END { printf "%.2f\n", total }'
 }
 
-# Sidebars that start during the run (lazy) count from zero, so sample them at the end only;
-# the ones present at the start are subtracted.
+# A sidebar that starts during the run counts from zero; only those present at the start
+# have their starting CPU subtracted.
 start_sidebars=$(sidebar_pids)
 sidebar0=$(cpu "$start_sidebars")
 daemon0=$(cpu "$daemon_pid")
@@ -145,13 +134,27 @@ sidebar1=$(cpu "$end_sidebars")
 daemon1=$(cpu "$daemon_pid")
 server1=$(cpu "$server_pid")
 count=$(echo "$end_sidebars" | wc -w | tr -d ' ')
-rss_mb=0
-if [ "$count" -gt 0 ]; then
-	rss_mb=$(ps -o rss= -p "$(echo "$end_sidebars" | xargs | tr ' ' ',')" | awk '{ t += $1 } END { printf "%.1f\n", t / 1024 }')
-fi
+# MB summed over a space-separated pid list.
+mem() {
+	local pid
+	[ -z "$1" ] && {
+		echo 0
+		return
+	}
+	if command -v footprint >/dev/null; then
+		for pid in $1; do
+			footprint -p "$pid"
+		done | awk '
+			$1 == "phys_footprint:" { v = $2; if ($3 == "MB") v *= 1024; else if ($3 == "B") v /= 1024; t += v }
+			END { printf "%.1f\n", t / 1024 }'
+	else
+		ps -o rss= -p "$(echo "$1" | xargs | tr ' ' ',')" | awk '{ t += $1 } END { printf "%.1f\n", t / 1024 }'
+	fi
+}
+mem_mb=$(mem "$end_sidebars")
 
 awk -v l="$label" -v c="$count" -v s0="$sidebar0" -v s1="$sidebar1" -v d0="$daemon0" \
-	-v d1="$daemon1" -v t0="$server0" -v t1="$server1" -v r="$rss_mb" 'BEGIN {
+	-v d1="$daemon1" -v t0="$server0" -v t1="$server1" -v r="$mem_mb" 'BEGIN {
 	s = s1 - s0; d = d1 - d0; t = t1 - t0
 	printf "%s\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%s\n", l, c, s, d, t, s + d + t, r
 }'
