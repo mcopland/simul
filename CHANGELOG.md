@@ -4,6 +4,8 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-11-14
+
 ### Fixed
 
 - Switching panes no longer opens a `'...' returned 1` message after the daemon stops. `pkill -f 'simul daemon'` now removes the daemon's tmux hooks, and a hook left by a crashed daemon or a deleted binary stays silent.
@@ -162,7 +164,8 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 - `simul.tmux` entry point that downloads the prebuilt binary matching `VERSION`.
 - Model and effort for each agent in `simul ls`.
 
-[Unreleased]: https://github.com/mcopland/simul/compare/v0.11.2...HEAD
+[Unreleased]: https://github.com/mcopland/simul/compare/v0.11.3...HEAD
+[0.11.3]: https://github.com/mcopland/simul/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/mcopland/simul/compare/v0.11.1...v0.11.2
 [0.11.1]: https://github.com/mcopland/simul/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/mcopland/simul/compare/v0.10.0...v0.11.0
