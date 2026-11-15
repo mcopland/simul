@@ -114,8 +114,6 @@ The sidebar is for the mouse. It never keeps focus: tmux hands focus straight ba
 
 The sidebar takes a quarter of its window's width and returns to it after you drag its border or resize the terminal. It lists every session, every `window_index:window_name` in it, and every pane in each window, whether or not an agent runs there.
 
-Each window's sidebar is its own process. With `lazy = true` under `[sidebar]`, toggling opens a sidebar only in the windows on screen, and another window gets one the first time you switch to it, so windows you never look at cost nothing. On that first visit the window reflows once as its sidebar opens. With no terminal attached, each session's current window counts as on screen. A sidebar you close by hand stays closed until you toggle again, or until the daemon restarts.
-
 An agent pane is one line: a state symbol, where it is, and time in the current state (the agent name stands in when where it is is unknown); any other pane shows only where it is.
 
 Where a pane is reads like a starship prompt: in a git repo, the branch (or `HEAD`) followed by status markers, rechecked every 5 seconds while the sidebar is shown; elsewhere, its directory with each parent cut to one letter, from home when under it (`~/dev/simul/examples` is `/d/s/examples`, and home is `~`).
@@ -192,7 +190,6 @@ blocked_threshold_ms = 1500  # quiet time before a busy pane's screen is checked
 
 [sidebar]
 hide_status = true  # hide the session and windows from tmux's status line while the sidebar is shown
-lazy = false        # open a window's sidebar the first time it is on screen, not in every window at toggle
 
 [notify]
 enabled = true   # tmux status-line messages

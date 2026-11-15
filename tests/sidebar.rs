@@ -92,60 +92,6 @@ fn new_window_gets_a_sidebar_while_on() {
     eventually("sidebar in new window", || sidebars(&h).len() == 2);
 }
 
-fn window_of(h: &Harness, pane: &str) -> String {
-    h.tmux(&["display-message", "-p", "-t", pane, "#{window_id}"])
-}
-
-fn sidebar_windows(h: &Harness) -> HashSet<String> {
-    sidebars(h).into_iter().map(|s| s.1).collect()
-}
-
-#[test]
-fn lazy_sidebars_open_in_a_window_when_it_is_first_shown() {
-    let mut h = Harness::with_config("blocked_threshold_ms = 100\n[sidebar]\nlazy = true\n");
-    let shown = window_of(&h, &h.first_pane());
-    let other = window_of(&h, &h.new_pane("sleep 600"));
-    let unvisited = window_of(&h, &h.new_pane("sleep 600"));
-    h.start_daemon();
-    toggle(&h);
-    assert_eq!(sidebar_windows(&h), HashSet::from([shown.clone()]));
-    assert!(
-        !poll(Duration::from_millis(500), || sidebar_windows(&h).len() > 1),
-        "a window not shown got a sidebar: {:?}",
-        sidebar_windows(&h)
-    );
-
-    h.tmux(&["select-window", "-t", &other]);
-    eventually("sidebar in the window just shown", || {
-        sidebar_windows(&h) == HashSet::from([shown.clone(), other.clone()])
-    });
-    assert!(!sidebar_windows(&h).contains(&unvisited));
-
-    toggle(&h);
-    eventually("sidebars removed", || sidebars(&h).is_empty());
-}
-
-#[test]
-fn lazy_sidebar_closed_by_hand_stays_closed() {
-    let mut h = Harness::with_config("blocked_threshold_ms = 100\n[sidebar]\nlazy = true\n");
-    let shown = window_of(&h, &h.first_pane());
-    let other = window_of(&h, &h.new_pane("sleep 600"));
-    h.start_daemon();
-    toggle(&h);
-    let (pane, ..) = sidebars(&h).pop().expect("a sidebar in the shown window");
-    h.tmux(&["kill-pane", "-t", &pane]);
-    h.tmux(&["select-window", "-t", &other]);
-    eventually("sidebar in the other window", || {
-        sidebar_windows(&h).contains(&other)
-    });
-    h.tmux(&["select-window", "-t", &shown]);
-    assert!(
-        !poll(Duration::from_secs(1), || sidebar_windows(&h)
-            .contains(&shown)),
-        "the closed sidebar came back"
-    );
-}
-
 #[test]
 fn closing_the_last_other_pane_closes_the_window() {
     let mut h = Harness::new();

@@ -22,9 +22,6 @@ pub struct SidebarConfig {
     /// Hide the session and windows from tmux's first status line, keeping status-right,
     /// while the sidebar is shown.
     pub hide_status: bool,
-    /// Open a window's sidebar the first time the window is on screen, not in every window
-    /// at toggle, so windows never looked at cost no sidebar process.
-    pub lazy: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -84,10 +81,7 @@ impl Default for Config {
 
 impl Default for SidebarConfig {
     fn default() -> SidebarConfig {
-        SidebarConfig {
-            hide_status: true,
-            lazy: false,
-        }
+        SidebarConfig { hide_status: true }
     }
 }
 
@@ -178,10 +172,6 @@ mod tests {
         let cfg = load_from(&dir.path().join("nope.toml")).unwrap();
         assert_eq!(cfg, Config::default());
         assert!(cfg.sidebar.hide_status);
-        assert!(
-            !cfg.sidebar.lazy,
-            "every window gets a sidebar at toggle by default"
-        );
         assert_eq!(cfg.notify.dedupe_secs, 10);
         assert!(!cfg.notify.desktop, "system notifications are opt-in");
         assert!(!cfg.notify.bell, "the terminal bell is opt-in");
@@ -230,13 +220,6 @@ mod tests {
         let cfg = load_from(&path).unwrap();
         assert!(!cfg.sidebar.hide_status);
         assert!(cfg.notify.enabled);
-        std::fs::write(&path, "[sidebar]\nlazy = true\n").unwrap();
-        let cfg = load_from(&path).unwrap();
-        assert!(cfg.sidebar.lazy);
-        assert!(
-            cfg.sidebar.hide_status,
-            "the rest of the table keeps defaults"
-        );
         assert_eq!(cfg.blocked_threshold_ms, 1500);
     }
 
