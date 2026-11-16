@@ -382,7 +382,10 @@ impl Daemon {
             Cmd::Resized => self.schedule_width_check(),
             Cmd::CheckWidths => {
                 self.sidebar.widths_pending = false;
-                self.check_widths().await;
+                // As in `schedule_width_check`: the reconcile will do it.
+                if !self.reconcile_pending {
+                    self.check_widths().await;
+                }
             }
             Cmd::Collapse {
                 session,

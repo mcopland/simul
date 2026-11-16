@@ -53,9 +53,10 @@ pub struct Sidebars {
 
 impl Daemon {
     /// Layout hooks fire on every step of a border drag, so checks are debounced, and skipped
-    /// while no sidebar is shown.
+    /// while no sidebar is shown. A pending reconcile reasserts widths itself, and a layout
+    /// change in the control client's session has scheduled one before its hook arrives.
     pub(super) fn schedule_width_check(&mut self) {
-        if !self.sidebar.on || self.sidebar.widths_pending {
+        if !self.sidebar.on || self.sidebar.widths_pending || self.reconcile_pending {
             return;
         }
         self.sidebar.widths_pending = true;
