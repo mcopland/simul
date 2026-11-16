@@ -49,16 +49,16 @@ echo "raw rows:"
 cat "$rows"
 echo
 printf 'median of %s runs, %ss each\n' "$runs" "$secs"
-printf '%-10s %8s %12s %11s %9s %10s %12s\n' build sidebars "sidebar cpu" "daemon cpu" "tmux cpu" "total cpu" "sidebar mem"
+printf '%-10s %8s %12s %11s %9s %10s %13s %12s\n' build sidebars "sidebar cpu" "daemon cpu" "tmux cpu" "total cpu" "children cpu" "sidebar mem"
 for build in "$@"; do
 	awk -F '\t' -v v="${build%%=*}" '
-		$1 == v { n++; for (c = 2; c <= 7; c++) col[c, n] = $c + 0 }
+		$1 == v { n++; for (c = 2; c <= 8; c++) col[c, n] = $c + 0 }
 		function median(c,   i, j, t, a) {
 			for (i = 1; i <= n; i++) a[i] = col[c, i]
 			for (i = 2; i <= n; i++) for (j = i; j > 1 && a[j - 1] > a[j]; j--) { t = a[j]; a[j] = a[j - 1]; a[j - 1] = t }
 			return n % 2 ? a[(n + 1) / 2] : (a[n / 2] + a[n / 2 + 1]) / 2
 		}
 		END {
-			printf "%-10s %8d %11.2fs %10.2fs %8.2fs %9.2fs %9.1f MB\n", v, median(2), median(3), median(4), median(5), median(6), median(7)
+			printf "%-10s %8d %11.2fs %10.2fs %8.2fs %9.2fs %12.2fs %9.1f MB\n", v, median(2), median(3), median(4), median(5), median(6), median(7), median(8)
 		}' "$rows"
 done
