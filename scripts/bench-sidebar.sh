@@ -32,9 +32,17 @@ sock=$dir/t.sock
 daemon_pid=""
 client_pid=""
 hooks_pid=""
+# Stops the hook loop and waits for it. Killing it would leave a hook in flight, which
+# starts a new daemon if it finds the old one gone.
+stop_hooks() {
+	[ -n "$hooks_pid" ] || return 0
+	: >"$dir/stop-hooks"
+	wait "$hooks_pid" || true
+	hooks_pid=""
+}
 cleanup() {
 	{
-		[ -n "$hooks_pid" ] && kill "$hooks_pid"
+		stop_hooks
 		[ -n "$client_pid" ] && kill "$client_pid"
 		tmux -S "$sock" kill-server
 		[ -n "$daemon_pid" ] && kill "$daemon_pid"
@@ -124,10 +132,14 @@ wait_for "the daemon socket" test -S "$SIMUL_SOCKET"
 "$bin" toggle >/dev/null
 
 agent_pane=$(t display-message -p -t s1:0 '#{pane_id}')
-hook() { TMUX_PANE=$agent_pane "$bin" hook claude "$1" <"$dir/hooks/$1.json"; }
+# A failed hook is reported, and the load goes on.
+hook() {
+	TMUX_PANE=$agent_pane "$bin" hook claude "$1" <"$dir/hooks/$1.json" ||
+		echo "bench-sidebar: hook $1 failed" >&2
+}
 hook SessionStart
 hook UserPromptSubmit
-while :; do
+while [ ! -e "$dir/stop-hooks" ]; do
 	hook PreToolUse
 	sleep 0.25
 	hook PostToolUse
@@ -194,9 +206,7 @@ mem() {
 }
 mem_mb=$(mem "$end_sidebars")
 
-kill "$hooks_pid"
-wait "$hooks_pid" 2>/dev/null || true
-hooks_pid=""
+stop_hooks
 # The daemon logs its own and its children's CPU as it exits.
 kill "$daemon_pid"
 wait "$daemon_pid" || true
