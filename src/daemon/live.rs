@@ -17,6 +17,8 @@ pub struct LiveFiles {
     pub kiro_dir: Option<PathBuf>,
     /// Last failure reading either directory, so a persistent one is logged once.
     error: Option<String>,
+    /// Lent to each read of Kiro's files, which runs on a blocking thread.
+    kiro_cache: kiro_sessions::Cache,
 }
 
 impl LiveFiles {
@@ -25,6 +27,7 @@ impl LiveFiles {
             claude_dir,
             kiro_dir,
             error: None,
+            kiro_cache: kiro_sessions::Cache::default(),
         }
     }
 
@@ -57,6 +60,8 @@ impl Daemon {
             return;
         }
         let kiro_panes = self.store.kiro_panes();
+        // A reader that panics takes the cache with it; the next read starts a new one.
+        let mut kiro_cache = std::mem::take(&mut self.live.kiro_cache);
         let read = tokio::task::spawn_blocking(move || {
             let mut found = claude_sessions::Sessions::default();
             let mut merge = |read: Result<claude_sessions::Sessions>| match read {
@@ -74,14 +79,16 @@ impl Daemon {
                     &dir,
                     &kiro_panes,
                     claude_sessions::pid_alive,
+                    &mut kiro_cache,
                 ));
             }
-            found
+            (found, kiro_cache)
         })
         .await;
         // Panes a failed source covered lose their live status, so the screen scrape takes over.
         let (live, error) = match read {
-            Ok(found) => {
+            Ok((found, kiro_cache)) => {
+                self.live.kiro_cache = kiro_cache;
                 let error = (!found.skipped.is_empty()).then(|| found.skipped.join("; "));
                 (found.live, error)
             }

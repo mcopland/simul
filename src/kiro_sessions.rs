@@ -3,10 +3,11 @@
 //! log, and `session.json`. See `fixtures/CALIBRATION.md`. Anything unreadable means "no live
 //! status" for that pane, so the screen scrape takes over.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -33,6 +34,25 @@ pub struct Pane {
     pub session: String,
     pub session_id: String,
 }
+
+/// What the last read of each session found, by session id, so a log that has not changed
+/// since is not read again. The daemon keeps one across reads.
+#[derive(Debug, Default)]
+pub struct Cache {
+    sessions: HashMap<String, Cached>,
+}
+
+#[derive(Debug)]
+struct Cached {
+    dir: PathBuf,
+    /// `messages.jsonl` and `session.json` as they were before the read.
+    files: [Stamp; 2],
+    status: Option<(LiveStatus, u64)>,
+}
+
+/// A file's length and modification time; `None` for a missing file. A file without a
+/// modification time is read every time.
+type Stamp = Option<(u64, Option<SystemTime>)>;
 
 #[derive(Deserialize)]
 struct Lock {
@@ -71,39 +91,50 @@ pub fn sessions_dir(env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
     kiro_home(env).map(|d| d.join("sessions"))
 }
 
-/// Live status of each pane whose session is open in a process `alive` accepts.
-pub fn read(dir: &Path, panes: &[Pane], alive: impl Fn(i32) -> bool) -> Result<Sessions> {
-    if panes.is_empty() {
-        return Ok(Sessions::default());
-    }
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Sessions::default()),
-        Err(e) => {
-            return Err(e)
-                .with_context(|| format!("failed to list Kiro sessions in {}", dir.display()));
-        }
-    };
-    let mut hashes = Vec::new();
-    for entry in entries {
-        let entry =
-            entry.with_context(|| format!("failed to list Kiro sessions in {}", dir.display()))?;
-        hashes.push(entry.path());
-    }
+/// Live status of each pane whose session is open in a process `alive` accepts. `cache`
+/// remembers each session's directory and last status between calls.
+pub fn read(
+    dir: &Path,
+    panes: &[Pane],
+    alive: impl Fn(i32) -> bool,
+    cache: &mut Cache,
+) -> Result<Sessions> {
+    cache
+        .sessions
+        .retain(|id, _| panes.iter().any(|p| p.session_id == *id));
+    // Listed on the first session whose directory isn't remembered.
+    let mut hashes: Option<Vec<PathBuf>> = None;
     let mut out = Sessions::default();
     for p in panes {
         // The id becomes a path component.
         if !valid_id(&p.session_id) {
             continue;
         }
-        let Some(session) = hashes
-            .iter()
-            .map(|h| h.join(&p.session_id))
-            .find(|d| d.is_dir())
-        else {
-            continue;
+        let mut cached = cache
+            .sessions
+            .remove(&p.session_id)
+            .filter(|c| c.dir.is_dir());
+        let session = match &cached {
+            Some(c) => c.dir.clone(),
+            None => {
+                if hashes.is_none() {
+                    match list_hashes(dir)? {
+                        Some(h) => hashes = Some(h),
+                        None => return Ok(Sessions::default()),
+                    }
+                }
+                let mut found = hashes.iter().flatten().map(|h| h.join(&p.session_id));
+                let Some(session) = found.find(|d| d.is_dir()) else {
+                    continue;
+                };
+                session
+            }
         };
-        match read_session(&session, &alive) {
+        let read = read_session(&session, &alive, &mut cached);
+        if let Some(c) = cached {
+            cache.sessions.insert(p.session_id.clone(), c);
+        }
+        match read {
             Ok(Some((status, updated_ms))) => out.live.push(Live {
                 pane: p.pane.clone(),
                 session: p.session.clone(),
@@ -120,6 +151,25 @@ pub fn read(dir: &Path, panes: &[Pane], alive: impl Fn(i32) -> bool) -> Result<S
     Ok(out)
 }
 
+/// The entries of `dir`, or `None` if it does not exist.
+fn list_hashes(dir: &Path) -> Result<Option<Vec<PathBuf>>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(e)
+                .with_context(|| format!("failed to list Kiro sessions in {}", dir.display()));
+        }
+    };
+    let mut hashes = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.with_context(|| format!("failed to list Kiro sessions in {}", dir.display()))?;
+        hashes.push(entry.path());
+    }
+    Ok(Some(hashes))
+}
+
 /// `sess_` followed only by ASCII letters, digits, `-`, and `_`.
 fn valid_id(id: &str) -> bool {
     id.strip_prefix("sess_")
@@ -129,8 +179,14 @@ fn valid_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// `Ok(None)` for a session that is closed, stale, torn mid-write, or not yet decided.
-fn read_session(dir: &Path, alive: impl Fn(i32) -> bool) -> io::Result<Option<(LiveStatus, u64)>> {
+/// `Ok(None)` for a session that is closed, stale, torn mid-write, or not yet decided. The
+/// owner is checked every time; the files are read only when they changed since `cached`,
+/// which is left holding this read, or `None` after a failure.
+fn read_session(
+    dir: &Path,
+    alive: impl Fn(i32) -> bool,
+    cached: &mut Option<Cached>,
+) -> io::Result<Option<(LiveStatus, u64)>> {
     let Some(lock) = read_optional(&dir.join(".lock"))? else {
         return Ok(None);
     };
@@ -138,6 +194,38 @@ fn read_session(dir: &Path, alive: impl Fn(i32) -> bool) -> io::Result<Option<(L
         Ok(lock) if alive(lock.pid) => {}
         _ => return Ok(None),
     }
+    // Taken before the read: a write in between makes the next read see a change.
+    let files = [
+        stamp(&dir.join("messages.jsonl"))?,
+        stamp(&dir.join("session.json"))?,
+    ];
+    let known = files.iter().flatten().all(|(_, mtime)| mtime.is_some());
+    if let Some(c) = cached.as_ref()
+        && known
+        && c.files == files
+    {
+        return Ok(c.status);
+    }
+    *cached = None;
+    let status = read_files(dir)?;
+    *cached = Some(Cached {
+        dir: dir.to_owned(),
+        files,
+        status,
+    });
+    Ok(status)
+}
+
+fn stamp(path: &Path) -> io::Result<Stamp> {
+    match std::fs::metadata(path) {
+        Ok(m) => Ok(Some((m.len(), m.modified().ok()))),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// The status in an open session's `messages.jsonl` and `session.json`.
+fn read_files(dir: &Path) -> io::Result<Option<(LiveStatus, u64)>> {
     let log = match read_tail(&dir.join("messages.jsonl"), TAIL_BYTES) {
         Ok(t) => t,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
@@ -492,7 +580,7 @@ mod tests {
             Some("waiting_on_user"),
         );
         let panes = [pane("%1", "sess_a"), pane("%2", "sess_b-2")];
-        let got = read(root.path(), &panes, |_| true).unwrap();
+        let got = read(root.path(), &panes, |_| true, &mut Cache::default()).unwrap();
         assert!(got.skipped.is_empty(), "{:?}", got.skipped);
         assert_eq!(
             got.live,
@@ -522,7 +610,7 @@ mod tests {
             pane("%8", "other"),
             pane("%9", "sess_"),
         ];
-        let got = read(r, &panes, |pid| pid != 9).unwrap();
+        let got = read(r, &panes, |pid| pid != 9, &mut Cache::default()).unwrap();
         assert!(got.skipped.is_empty(), "{:?}", got.skipped);
         assert_eq!(got.live, vec![live("%1", LiveStatus::Idle)]);
     }
@@ -547,16 +635,123 @@ mod tests {
         std::fs::remove_file(bad.join("messages.jsonl")).unwrap();
         std::fs::create_dir(bad.join("messages.jsonl")).unwrap();
         let panes = [pane("%1", "sess_a"), pane("%2", "sess_b")];
-        let got = read(root.path(), &panes, |_| true).unwrap();
+        let got = read(root.path(), &panes, |_| true, &mut Cache::default()).unwrap();
         assert_eq!(got.live, vec![live("%1", LiveStatus::Idle)]);
         assert_eq!(got.skipped.len(), 1);
         assert!(got.skipped[0].contains("sess_b"), "{:?}", got.skipped);
     }
 
+    /// Rewrites `path` with `text` and gives it back the modification time it had.
+    fn rewrite_keeping_mtime(path: &Path, text: &str) {
+        let mtime = std::fs::metadata(path).unwrap().modified().unwrap();
+        std::fs::write(path, text).unwrap();
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+    }
+
+    #[test]
+    fn an_unchanged_log_is_not_read_again() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = write_session(
+            root.path(),
+            "h",
+            "sess_a",
+            Some(r#"{"pid":7}"#),
+            Some("idle"),
+        );
+        let panes = [pane("%1", "sess_a")];
+        let mut cache = Cache::default();
+        let got = read(root.path(), &panes, |_| true, &mut cache).unwrap();
+        assert_eq!(got.live, vec![live("%1", LiveStatus::Idle)]);
+        // Same length and time, a second later: only a reread could see it.
+        let later = log(&[turn_start(1), turn_end(3, "end_turn")]);
+        rewrite_keeping_mtime(&dir.join("messages.jsonl"), &later);
+        let got = read(root.path(), &panes, |_| true, &mut cache).unwrap();
+        assert_eq!(got.live, vec![live("%1", LiveStatus::Idle)], "remembered");
+        let fresh = read(root.path(), &panes, |_| true, &mut Cache::default()).unwrap();
+        assert_eq!(fresh.live[0].updated_ms, T0 + 3000, "the rewrite differs");
+    }
+
+    #[test]
+    fn a_changed_log_or_session_file_is_read_again() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = write_session(
+            root.path(),
+            "h",
+            "sess_a",
+            Some(r#"{"pid":7}"#),
+            Some("idle"),
+        );
+        let panes = [pane("%1", "sess_a")];
+        let mut cache = Cache::default();
+        read(root.path(), &panes, |_| true, &mut cache).unwrap();
+        std::fs::write(
+            dir.join("session.json"),
+            r#"{"id":"sess_a","status":"waiting_on_user"}"#,
+        )
+        .unwrap();
+        let got = read(root.path(), &panes, |_| true, &mut cache).unwrap();
+        assert_eq!(got.live, vec![live("%1", LiveStatus::Asking)]);
+        let mut text = std::fs::read_to_string(dir.join("messages.jsonl")).unwrap();
+        text.push_str(&format!("{}\n", turn_start(4)));
+        std::fs::write(dir.join("messages.jsonl"), text).unwrap();
+        let got = read(root.path(), &panes, |_| true, &mut cache).unwrap();
+        assert_eq!(got.live.len(), 1);
+        assert_eq!(
+            (got.live[0].status, got.live[0].updated_ms),
+            (LiveStatus::Busy, T0 + 4000)
+        );
+    }
+
+    #[test]
+    fn a_remembered_session_needs_a_live_owner() {
+        let root = tempfile::tempdir().unwrap();
+        write_session(
+            root.path(),
+            "h",
+            "sess_a",
+            Some(r#"{"pid":7}"#),
+            Some("idle"),
+        );
+        let panes = [pane("%1", "sess_a")];
+        let mut cache = Cache::default();
+        let got = read(root.path(), &panes, |_| true, &mut cache).unwrap();
+        assert_eq!(got.live.len(), 1);
+        let got = read(root.path(), &panes, |_| false, &mut cache).unwrap();
+        assert!(got.live.is_empty(), "{:?}", got.live);
+    }
+
+    #[test]
+    fn a_session_whose_pane_left_is_forgotten() {
+        let root = tempfile::tempdir().unwrap();
+        write_session(
+            root.path(),
+            "h",
+            "sess_a",
+            Some(r#"{"pid":7}"#),
+            Some("idle"),
+        );
+        let mut cache = Cache::default();
+        read(root.path(), &[pane("%1", "sess_a")], |_| true, &mut cache).unwrap();
+        assert_eq!(cache.sessions.len(), 1);
+        read(root.path(), &[pane("%2", "sess_b")], |_| true, &mut cache).unwrap();
+        assert_eq!(cache.sessions.len(), 0);
+    }
+
     #[test]
     fn missing_dir_has_no_sessions() {
         let root = tempfile::tempdir().unwrap();
-        let got = read(&root.path().join("nope"), &[pane("%1", "sess_a")], |_| true).unwrap();
+        let got = read(
+            &root.path().join("nope"),
+            &[pane("%1", "sess_a")],
+            |_| true,
+            &mut Cache::default(),
+        )
+        .unwrap();
         assert!(got.live.is_empty() && got.skipped.is_empty());
     }
 
