@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -8,8 +8,15 @@ use crate::protocol::GitStatus;
 pub async fn status(cwd: &str) -> Result<Option<GitStatus>> {
     // A pane outside any repo is read every few seconds while the sidebar shows it; a few
     // stats answer that without a git process. `GIT_DIR` can make any directory a repo.
-    if std::env::var_os("GIT_DIR").is_none() && !in_repo(Path::new(cwd)) {
-        return Ok(None);
+    if std::env::var_os("GIT_DIR").is_none() {
+        let dir = PathBuf::from(cwd);
+        // Off the daemon's one thread: a stat on a hung network mount blocks.
+        let found = tokio::task::spawn_blocking(move || in_repo(&dir))
+            .await
+            .with_context(|| format!("the repo check for {cwd} panicked"))?;
+        if !found {
+            return Ok(None);
+        }
     }
     let out = tokio::process::Command::new("git")
         // Like starship: never take index.lock away from the user's own git commands.
@@ -26,9 +33,13 @@ pub async fn status(cwd: &str) -> Result<Option<GitStatus>> {
 }
 
 /// Whether `dir` or a parent holds `.git`: a directory, or the file a worktree or submodule
-/// has instead.
+/// has instead. Parents are those of the real path, as git finds them. A directory that
+/// can't be resolved is outside, as git would fail in it too.
 fn in_repo(dir: &Path) -> bool {
-    dir.ancestors().any(|d| d.join(".git").exists())
+    let Ok(real) = std::fs::canonicalize(dir) else {
+        return false;
+    };
+    real.ancestors().any(|d| d.join(".git").exists())
 }
 
 /// Parses `git status --porcelain=v2 --branch --show-stash` output.
@@ -93,6 +104,10 @@ mod tests {
         std::fs::write(worktree.join(".git"), "gitdir: /elsewhere\n").unwrap();
         assert!(in_repo(&worktree));
         assert!(!in_repo(&tmp.path().join("missing")));
+        // git resolves the link before it looks for `.git`.
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&sub, &link).unwrap();
+        assert!(in_repo(&link));
     }
 
     #[test]
