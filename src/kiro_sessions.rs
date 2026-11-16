@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -45,14 +45,26 @@ pub struct Cache {
 #[derive(Debug)]
 struct Cached {
     dir: PathBuf,
+    /// The last read of the session's files; `None` until one succeeds.
+    read: Option<LastRead>,
+}
+
+#[derive(Debug)]
+struct LastRead {
     /// `messages.jsonl` and `session.json` as they were before the read.
     files: [Stamp; 2],
+    /// When they were stamped.
+    at: SystemTime,
     status: Option<(LiveStatus, u64)>,
 }
 
-/// A file's length and modification time; `None` for a missing file. A file without a
-/// modification time is read every time.
+/// A file's length and modification time; `None` for a missing file.
 type Stamp = Option<(u64, Option<SystemTime>)>;
+
+/// How long before a read a file must have last changed for its stamp to prove it unchanged
+/// since. Some filesystems keep whole seconds, so a write within the same second as the read
+/// keeps the time; like git's racy-clean check, such a file is read again.
+const SETTLED: Duration = Duration::from_secs(2);
 
 #[derive(Deserialize)]
 struct Lock {
@@ -110,12 +122,12 @@ pub fn read(
         if !valid_id(&p.session_id) {
             continue;
         }
-        let mut cached = cache
+        let cached = cache
             .sessions
             .remove(&p.session_id)
             .filter(|c| c.dir.is_dir());
-        let session = match &cached {
-            Some(c) => c.dir.clone(),
+        let (session, mut last) = match cached {
+            Some(c) => (c.dir, c.read),
             None => {
                 if hashes.is_none() {
                     match list_hashes(dir)? {
@@ -127,13 +139,17 @@ pub fn read(
                 let Some(session) = found.find(|d| d.is_dir()) else {
                     continue;
                 };
-                session
+                (session, None)
             }
         };
-        let read = read_session(&session, &alive, &mut cached);
-        if let Some(c) = cached {
-            cache.sessions.insert(p.session_id.clone(), c);
-        }
+        let read = read_session(&session, &alive, &mut last);
+        cache.sessions.insert(
+            p.session_id.clone(),
+            Cached {
+                dir: session.clone(),
+                read: last,
+            },
+        );
         match read {
             Ok(Some((status, updated_ms))) => out.live.push(Live {
                 pane: p.pane.clone(),
@@ -180,12 +196,13 @@ fn valid_id(id: &str) -> bool {
 }
 
 /// `Ok(None)` for a session that is closed, stale, torn mid-write, or not yet decided. The
-/// owner is checked every time; the files are read only when they changed since `cached`,
-/// which is left holding this read, or `None` after a failure.
+/// owner is checked every time; the files are read again only when they changed since
+/// `last`, or changed too close to it to tell. `last` is left holding the latest read, or
+/// `None` after a failure.
 fn read_session(
     dir: &Path,
     alive: impl Fn(i32) -> bool,
-    cached: &mut Option<Cached>,
+    last: &mut Option<LastRead>,
 ) -> io::Result<Option<(LiveStatus, u64)>> {
     let Some(lock) = read_optional(&dir.join(".lock"))? else {
         return Ok(None);
@@ -194,26 +211,32 @@ fn read_session(
         Ok(lock) if alive(lock.pid) => {}
         _ => return Ok(None),
     }
-    // Taken before the read: a write in between makes the next read see a change.
+    let prev = last.take();
+    // Stamped before the read: a write in between makes the next read see a change.
+    let at = SystemTime::now();
     let files = [
         stamp(&dir.join("messages.jsonl"))?,
         stamp(&dir.join("session.json"))?,
     ];
-    let known = files.iter().flatten().all(|(_, mtime)| mtime.is_some());
-    if let Some(c) = cached.as_ref()
-        && known
-        && c.files == files
+    if let Some(prev) = prev
+        && prev.files == files
+        && settled(&files, prev.at)
     {
-        return Ok(c.status);
+        let status = prev.status;
+        *last = Some(prev);
+        return Ok(status);
     }
-    *cached = None;
     let status = read_files(dir)?;
-    *cached = Some(Cached {
-        dir: dir.to_owned(),
-        files,
-        status,
-    });
+    *last = Some(LastRead { files, at, status });
     Ok(status)
+}
+
+/// Whether every file present last changed `SETTLED` or more before `at`.
+fn settled(files: &[Stamp; 2], at: SystemTime) -> bool {
+    files
+        .iter()
+        .flatten()
+        .all(|(_, mtime)| mtime.is_some_and(|m| m + SETTLED <= at))
 }
 
 fn stamp(path: &Path) -> io::Result<Stamp> {
@@ -641,6 +664,17 @@ mod tests {
         assert!(got.skipped[0].contains("sess_b"), "{:?}", got.skipped);
     }
 
+    /// Sets `path`'s modification time to `secs` seconds ago.
+    fn age(path: &Path, secs: u64) {
+        let then = SystemTime::now() - std::time::Duration::from_secs(secs);
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(then)
+            .unwrap();
+    }
+
     /// Rewrites `path` with `text` and gives it back the modification time it had.
     fn rewrite_keeping_mtime(path: &Path, text: &str) {
         let mtime = std::fs::metadata(path).unwrap().modified().unwrap();
@@ -663,6 +697,8 @@ mod tests {
             Some(r#"{"pid":7}"#),
             Some("idle"),
         );
+        age(&dir.join("messages.jsonl"), 10);
+        age(&dir.join("session.json"), 10);
         let panes = [pane("%1", "sess_a")];
         let mut cache = Cache::default();
         let got = read(root.path(), &panes, |_| true, &mut cache).unwrap();
@@ -674,6 +710,36 @@ mod tests {
         assert_eq!(got.live, vec![live("%1", LiveStatus::Idle)], "remembered");
         let fresh = read(root.path(), &panes, |_| true, &mut Cache::default()).unwrap();
         assert_eq!(fresh.live[0].updated_ms, T0 + 3000, "the rewrite differs");
+    }
+
+    #[test]
+    fn a_log_written_just_before_its_read_is_read_again() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = write_session(
+            root.path(),
+            "h",
+            "sess_a",
+            Some(r#"{"pid":7}"#),
+            Some("idle"),
+        );
+        let panes = [pane("%1", "sess_a")];
+        let mut cache = Cache::default();
+        read(root.path(), &panes, |_| true, &mut cache).unwrap();
+        // Within one tick of a coarse clock, as on HFS+, a rewrite keeps the time.
+        let later = log(&[turn_start(1), turn_end(3, "end_turn")]);
+        rewrite_keeping_mtime(&dir.join("messages.jsonl"), &later);
+        let got = read(root.path(), &panes, |_| true, &mut cache).unwrap();
+        assert_eq!(got.live[0].updated_ms, T0 + 3000);
+    }
+
+    #[test]
+    fn a_closed_session_keeps_its_place() {
+        let root = tempfile::tempdir().unwrap();
+        write_session(root.path(), "h", "sess_a", None, Some("idle"));
+        let mut cache = Cache::default();
+        read(root.path(), &[pane("%1", "sess_a")], |_| true, &mut cache).unwrap();
+        let place = cache.sessions.get("sess_a").map(|c| c.dir.clone());
+        assert_eq!(place, Some(root.path().join("h").join("sess_a")));
     }
 
     #[test]
