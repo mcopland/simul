@@ -120,7 +120,7 @@ struct Daemon {
     focus_events: bool,
     tx: mpsc::Sender<Cmd>,
     updates: broadcast::Sender<Status>,
-    /// The status last sent to subscribers; one that differs only in time isn't sent again.
+    /// The status last sent to subscribers; one a sidebar would draw the same isn't sent.
     published: Option<Status>,
     reconcile_pending: bool,
     sidebar: Sidebars,
@@ -425,9 +425,10 @@ impl Daemon {
         }
     }
 
-    /// Sends the status to subscribers if it changed. A reconcile runs every second while
-    /// sidebars are shown; resending an unchanged status would wake every sidebar to redraw
-    /// the same lines. Sidebars tick their ages on their own.
+    /// Sends the status to subscribers if a sidebar would draw it differently. A reconcile
+    /// runs every second while sidebars are shown, and agents send a hook per tool call;
+    /// resending would wake every sidebar to redraw the same lines. Sidebars tick their ages
+    /// on their own.
     fn publish(&mut self) {
         // No subscribers is the normal case when no sidebar is open. The first status after
         // one subscribes goes out even if unchanged, as `published` may predate its join.
@@ -439,7 +440,7 @@ impl Daemon {
         if self
             .published
             .as_ref()
-            .is_some_and(|last| last.same_but_time(&status))
+            .is_some_and(|last| last.draws_same(&status))
         {
             return;
         }

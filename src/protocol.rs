@@ -109,6 +109,48 @@ pub struct PaneRecord {
 }
 
 impl PaneRecord {
+    /// Whether `other` draws as this does in a sidebar. Every tool hook sets `last_event_ms`
+    /// and `pending_tool`, which no sidebar draws; comparing them would wake every sidebar
+    /// for each tool call.
+    pub fn draws_same(&self, other: &PaneRecord) -> bool {
+        let PaneRecord {
+            pane,
+            agent,
+            state,
+            since_ms,
+            last_event_ms: _,
+            session_id,
+            cwd,
+            branch,
+            pending_tool: _,
+            error,
+            model,
+            effort,
+            transcript,
+            session,
+            window,
+            window_id,
+            window_name,
+            active,
+        } = self;
+        *pane == other.pane
+            && *agent == other.agent
+            && *state == other.state
+            && *since_ms == other.since_ms
+            && *session_id == other.session_id
+            && *cwd == other.cwd
+            && *branch == other.branch
+            && *error == other.error
+            && *model == other.model
+            && *effort == other.effort
+            && *transcript == other.transcript
+            && *session == other.session
+            && *window == other.window
+            && *window_id == other.window_id
+            && *window_name == other.window_name
+            && *active == other.active
+    }
+
     /// A pane first seen at `now`, with nothing known about it yet.
     pub fn new(pane: &str, agent: Agent, state: State, now: u64) -> PaneRecord {
         PaneRecord {
@@ -151,7 +193,8 @@ pub enum Request {
     /// Fire-and-forget; the daemon sends no reply.
     Hook(Envelope),
     List,
-    /// Replies with a `Status` now and another after every change.
+    /// Replies with a `Status` now and another after every change a sidebar draws (see
+    /// `Status::draws_same`). Use `List` for the other fields' latest values.
     Subscribe,
     Ping,
     Refresh,
@@ -215,8 +258,9 @@ pub struct Status {
 }
 
 impl Status {
-    /// Whether `other` says the same as this, maybe at another time.
-    pub fn same_but_time(&self, other: &Status) -> bool {
+    /// Whether a sidebar would draw `other` as it draws this. The time is not drawn, and
+    /// neither are the fields `PaneRecord::draws_same` skips.
+    pub fn draws_same(&self, other: &Status) -> bool {
         let Status {
             now_ms: _,
             sidebar,
@@ -225,7 +269,8 @@ impl Status {
             collapsed,
         } = self;
         *sidebar == other.sidebar
-            && *panes == other.panes
+            && panes.len() == other.panes.len()
+            && panes.iter().zip(&other.panes).all(|(a, b)| a.draws_same(b))
             && *windows == other.windows
             && *collapsed == other.collapsed
     }
@@ -407,9 +452,33 @@ mod tests {
             serde_json::from_value(json!({"now_ms": 1, "sidebar": false, "panes": []})).unwrap();
         let mut b = a.clone();
         b.now_ms = 2;
-        assert!(a.same_but_time(&b));
+        assert!(a.draws_same(&b));
         b.sidebar = true;
-        assert!(!a.same_but_time(&b));
+        assert!(!a.draws_same(&b));
+    }
+
+    #[test]
+    fn a_hook_time_or_pending_tool_alone_draws_the_same() {
+        let status = |rec: PaneRecord| Status {
+            now_ms: 1,
+            sidebar: true,
+            panes: vec![rec],
+            windows: Vec::new(),
+            collapsed: Vec::new(),
+        };
+        let a = PaneRecord::new("%1", Agent::Claude, State::Working, 10);
+        let mut b = a.clone();
+        b.last_event_ms = 20;
+        b.pending_tool = Some("Bash".into());
+        assert!(status(a.clone()).draws_same(&status(b.clone())));
+        b.state = State::Done;
+        assert!(!status(a.clone()).draws_same(&status(b)));
+        let mut c = a.clone();
+        c.model = Some("claude-opus-5-5".into());
+        assert!(!status(a.clone()).draws_same(&status(c)));
+        let mut both = status(a.clone());
+        both.panes.push(a.clone());
+        assert!(!status(a).draws_same(&both), "a pane more");
     }
 
     #[test]

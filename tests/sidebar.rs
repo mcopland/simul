@@ -832,16 +832,17 @@ fn status_line_restored_when_a_new_daemon_finds_no_sidebar() {
     });
 }
 
-#[test]
-fn an_unchanged_status_is_not_sent_again() {
+/// Subscribes once every sidebar runs and statuses from their start have stopped: no status
+/// for 2.5s, which holds at least two of the reconciles that run every second while sidebars
+/// are shown. The reader keeps that timeout.
+fn subscribe_when_quiet(
+    h: &Harness,
+) -> std::io::Lines<std::io::BufReader<std::os::unix::net::UnixStream>> {
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixStream;
 
-    let mut h = Harness::new();
-    h.start_daemon();
-    toggle(&h);
     eventually("sidebar running", || {
-        sidebars(&h).iter().all(|s| {
+        sidebars(h).iter().all(|s| {
             h.tmux(&[
                 "display-message",
                 "-p",
@@ -853,11 +854,7 @@ fn an_unchanged_status_is_not_sent_again() {
     });
     let mut stream = UnixStream::connect(&h.simul_sock).unwrap();
     stream.write_all(b"{\"type\":\"subscribe\"}\n").unwrap();
-    // A gap of 2.5s holds at least two of the reconciles that run every second while
-    // sidebars are shown; a status resent unchanged would never leave one. Statuses from
-    // the sidebar's start may still arrive at first.
-    let quiet = Duration::from_millis(2500);
-    stream.set_read_timeout(Some(quiet)).unwrap();
+    stream.set_read_timeout(Some(QUIET)).unwrap();
     let mut lines = BufReader::new(stream).lines();
     let start = std::time::Instant::now();
     loop {
@@ -867,17 +864,60 @@ fn an_unchanged_status_is_not_sent_again() {
                 "statuses never stopped coming; the last: {line}"
             ),
             Some(Err(e)) => {
-                assert!(
-                    matches!(
-                        e.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ),
-                    "{e}"
-                );
-                break;
+                assert_timed_out(&e);
+                return lines;
             }
             None => panic!("the daemon closed the subscription"),
         }
+    }
+}
+
+const QUIET: Duration = Duration::from_millis(2500);
+
+fn assert_timed_out(e: &std::io::Error) {
+    assert!(
+        matches!(
+            e.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ),
+        "{e}"
+    );
+}
+
+#[test]
+fn an_unchanged_status_is_not_sent_again() {
+    let mut h = Harness::new();
+    h.start_daemon();
+    toggle(&h);
+    // A status resent unchanged would never leave a quiet gap.
+    subscribe_when_quiet(&h);
+}
+
+#[test]
+fn tool_hooks_send_no_status_until_the_turn_ends() {
+    let mut h = Harness::new();
+    let agent = h.new_pane("sleep 600");
+    h.start_daemon();
+    h.hook_fixture(&agent, "UserPromptSubmit", "UserPromptSubmit");
+    // The first tool hook brings the effort, which sidebars draw; later ones repeat it.
+    h.hook_fixture(&agent, "PreToolUse", "PreToolUse");
+    h.hook_fixture(&agent, "PostToolUse", "PostToolUse");
+    h.wait_state(&agent, Some("working"));
+    toggle(&h);
+    let mut lines = subscribe_when_quiet(&h);
+    // They change only the hook time and the pending tool, which no sidebar draws.
+    h.hook_fixture(&agent, "PreToolUse", "PreToolUse");
+    h.hook_fixture(&agent, "PostToolUse", "PostToolUse");
+    match lines.next() {
+        Some(Ok(line)) => panic!("a tool hook sent a status: {line}"),
+        Some(Err(e)) => assert_timed_out(&e),
+        None => panic!("the daemon closed the subscription"),
+    }
+    h.hook_fixture(&agent, "Stop", "Stop");
+    match lines.next() {
+        Some(Ok(line)) => assert!(line.contains(r#""state":"done""#), "{line}"),
+        Some(Err(e)) => panic!("no status after Stop: {e}"),
+        None => panic!("the daemon closed the subscription"),
     }
 }
 
