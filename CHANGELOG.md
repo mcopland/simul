@@ -4,6 +4,13 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+### Changed
+
+- Sidebars no longer wake on each tool call an agent makes. The daemon sends a status only when a sidebar would draw it differently, and a tool call changes nothing a sidebar draws.
+- The daemon starts fewer processes while the sidebar is shown. One tmux call reads panes, clients, and `focus-events`, where two or three ran before. A pane outside any git repo no longer runs `git status` every 5 seconds. A layout change in the daemon's own session takes one look at tmux, not two.
+- A click on a sidebar row jumps with one tmux call instead of three.
+- The daemon reads a Kiro session log again only when the log or `session.json` changed, not every second. It no longer reads Claude Code's session files while no Claude pane is open.
+
 ## [0.11.5] - 2026-11-15
 
 ### Fixed
