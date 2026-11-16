@@ -417,4 +417,10 @@ fn sigterm_removes_the_daemons_tmux_hooks_and_socket() {
         "log: {}",
         h.daemon_log()
     );
+    // The benchmark reads this line for the CPU of the daemon and the processes it ran.
+    assert!(
+        h.daemon_log().contains("daemon cpu: own "),
+        "log: {}",
+        h.daemon_log()
+    );
 }

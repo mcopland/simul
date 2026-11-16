@@ -234,7 +234,42 @@ pub async fn run(opts: Options) -> Result<()> {
             server::remove_socket(&d.opts.socket);
         }
     }
+    match cpu_used() {
+        Ok((own, children)) => log!("{}", cpu_line(own, children)),
+        Err(e) => log!("failed to read the daemon's CPU time: {e}"),
+    }
     Ok(())
+}
+
+/// CPU time, user and system, of this process and of the children it waited for: tmux
+/// queries, git, and the agents' screens. `scripts/bench-sidebar.sh` reads it from the log.
+fn cpu_used() -> std::io::Result<(Duration, Duration)> {
+    Ok((rusage(libc::RUSAGE_SELF)?, rusage(libc::RUSAGE_CHILDREN)?))
+}
+
+fn rusage(who: libc::c_int) -> std::io::Result<Duration> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    // SAFETY: `who` is RUSAGE_SELF or RUSAGE_CHILDREN, and `usage` is a valid, writable
+    // rusage that the call fills on success; it is read only after a zero return.
+    let rc = unsafe { libc::getrusage(who, usage.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: getrusage returned 0, so it wrote the whole struct; it was zeroed before anyway.
+    let usage = unsafe { usage.assume_init() };
+    let time = |t: libc::timeval| {
+        Duration::from_secs(u64::try_from(t.tv_sec).unwrap_or(0))
+            + Duration::from_micros(u64::try_from(t.tv_usec).unwrap_or(0))
+    };
+    Ok(time(usage.ru_utime) + time(usage.ru_stime))
+}
+
+fn cpu_line(own: Duration, children: Duration) -> String {
+    format!(
+        "daemon cpu: own {:.3}s children {:.3}s",
+        own.as_secs_f64(),
+        children.as_secs_f64()
+    )
 }
 
 async fn ticker(tx: mpsc::Sender<Cmd>) {
@@ -617,5 +652,25 @@ impl Daemon {
             self.on_transitions(changed, "screen");
             self.publish();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_line_gives_seconds_to_the_millisecond() {
+        assert_eq!(
+            cpu_line(
+                Duration::from_micros(1_234_567),
+                Duration::from_millis(5_678)
+            ),
+            "daemon cpu: own 1.235s children 5.678s"
+        );
+        assert_eq!(
+            cpu_line(Duration::ZERO, Duration::ZERO),
+            "daemon cpu: own 0.000s children 0.000s"
+        );
     }
 }
