@@ -5,10 +5,9 @@ use std::collections::{BTreeSet, HashSet};
 
 use anyhow::Result;
 
-use super::tmux_hooks::chain;
 use super::{COLLAPSED, Cmd, Daemon, LAYOUT_HOOK, RECONCILE_DEBOUNCE, width};
 use crate::log;
-use crate::tmux::{PaneInfo, SIDEBAR_TITLE, Snapshot, shell_quote};
+use crate::tmux::{PaneInfo, SIDEBAR_TITLE, Snapshot, chain, shell_quote};
 
 /// Global tmux option holding the status-format[0] hidden while the sidebar is on.
 const SAVED_STATUS: &str = "@simul-status-format";
@@ -70,7 +69,7 @@ impl Daemon {
 
     /// Reasserts widths from a fresh look at the panes, without a full reconcile.
     pub(super) async fn check_widths(&mut self) {
-        match self.opts.tmux.snapshot(self.focus_events).await {
+        match self.opts.tmux.snapshot().await {
             Ok(snap) => self.reassert_widths(&snap.panes).await,
             Err(e) => log!("failed to read panes to check sidebar widths: {e:#}"),
         }

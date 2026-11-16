@@ -51,7 +51,11 @@ pub struct Snapshot {
 pub const SIDEBAR_TITLE: &str = "simul-sidebar";
 
 pub const PANES_FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_id}\t#{pane_active}\t#{window_active}\t#{pane_current_command}\t#{pane_current_path}\t#{@simul-sidebar}\t#{window_panes}\t#{@simul-collapsed}\t#{pane_width}\t#{window_width}\t#{window_zoomed_flag}\t#{==:#{pane_title},simul-sidebar}\t#{?pane_start_command,#{pane_start_command},#{?default-command,#{default-command},#{default-shell}}}\t#{window_name}";
-pub const CLIENTS_FORMAT: &str = "#{client_session}\t#{client_flags}\t#{client_tty}";
+/// Starts with `client` and a tab, which no `PANES_FORMAT` line or option line can, so client
+/// lines can be told apart in `SNAPSHOT`'s output.
+pub const CLIENTS_FORMAT: &str = "client\t#{client_session}\t#{client_flags}\t#{client_tty}";
+const CLIENT_PREFIX: &str = "client\t";
+const FOCUS_EVENTS_PREFIX: &str = "focus-events ";
 
 #[derive(Clone, Debug)]
 pub struct Tmux {
@@ -102,15 +106,52 @@ impl Tmux {
         self.check(args, out)
     }
 
-    pub async fn snapshot(&self, focus_events: bool) -> Result<Snapshot> {
-        let panes = self
-            .run_async(&["list-panes", "-a", "-F", PANES_FORMAT])
-            .await?;
-        let clients = self
-            .run_async(&["list-clients", "-F", CLIENTS_FORMAT])
-            .await?;
+    /// Panes, clients, and `focus-events`, from one tmux process.
+    pub async fn snapshot(&self) -> Result<Snapshot> {
+        let args = chain(
+            [
+                vec!["list-panes", "-a", "-F", PANES_FORMAT],
+                vec!["show-options", "-g", "focus-events"],
+                vec!["list-clients", "-F", CLIENTS_FORMAT],
+            ]
+            .into_iter(),
+        );
+        let out = self.run_async(&args).await?;
+        let (panes, clients, focus_events) = split_snapshot(&out);
         Ok(parse_snapshot(&panes, &clients, focus_events))
     }
+}
+
+/// Joins tmux commands into one invocation's arguments, separated by `;`.
+pub fn chain<'a>(cmds: impl Iterator<Item = Vec<&'a str>>) -> Vec<&'a str> {
+    let mut args = Vec::new();
+    for cmd in cmds {
+        if !args.is_empty() {
+            args.push(";");
+        }
+        args.extend(cmd);
+    }
+    args
+}
+
+/// Splits `Tmux::snapshot`'s output into `list-panes` lines, `list-clients` lines without
+/// their prefix, and whether `focus-events` is on. Pane lines start with the pane id's `%`.
+pub fn split_snapshot(out: &str) -> (String, String, bool) {
+    let mut panes = String::new();
+    let mut clients = String::new();
+    let mut focus_events = false;
+    for line in out.lines() {
+        if line.starts_with('%') {
+            panes.push_str(line);
+            panes.push('\n');
+        } else if let Some(client) = line.strip_prefix(CLIENT_PREFIX) {
+            clients.push_str(client);
+            clients.push('\n');
+        } else if let Some(value) = line.strip_prefix(FOCUS_EVENTS_PREFIX) {
+            focus_events = value.trim() == "on";
+        }
+    }
+    (panes, clients, focus_events)
 }
 
 /// Builds a snapshot from `list-panes -a` and `list-clients` output.
@@ -438,6 +479,48 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// One `list-panes ; show-options ; list-clients` reply, as `Tmux::snapshot` gets it.
+    fn chained(focus: &str, clients: &str) -> String {
+        format!("{PANES}focus-events {focus}\n{clients}")
+    }
+
+    #[test]
+    fn splits_a_chained_snapshot() {
+        let raw = "client\tmain\tattached,focused,UTF-8\t/dev/ttys001\n\
+                   client\twork\tattached,focused,control-mode,no-output\t\n";
+        let (panes, clients, focus) = split_snapshot(&chained("on", raw));
+        assert_eq!(panes, PANES);
+        assert_eq!(
+            clients,
+            "main\tattached,focused,UTF-8\t/dev/ttys001\n\
+             work\tattached,focused,control-mode,no-output\t\n"
+        );
+        assert!(focus);
+        let (_, _, focus) = split_snapshot(&chained("off", raw));
+        assert!(!focus);
+    }
+
+    #[test]
+    fn a_chained_snapshot_may_have_no_clients() {
+        let (panes, clients, focus) = split_snapshot(&chained("on", ""));
+        assert_eq!(panes, PANES);
+        assert_eq!(clients, "");
+        assert!(focus);
+        assert_eq!(parse_snapshot(&panes, &clients, focus).panes.len(), 5);
+    }
+
+    #[test]
+    fn a_window_named_like_a_prefix_stays_a_pane() {
+        let panes = "%1\tclient\t1\t@1\t1\t1\tsh\t/w\t\t1\t\t80\t80\t0\t0\t\tclient\n\
+                     %2\tfocus-events on\t1\t@2\t1\t1\tsh\t/w\t\t1\t\t80\t80\t0\t0\t\tfocus-events on\n";
+        let (split, clients, focus) = split_snapshot(&format!(
+            "{panes}focus-events off\nclient\tclient\tattached\t/dev/t1\n"
+        ));
+        assert_eq!(split, panes);
+        assert_eq!(clients, "client\tattached\t/dev/t1\n");
+        assert!(!focus);
     }
 
     #[test]

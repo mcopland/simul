@@ -117,7 +117,6 @@ struct Daemon {
     /// The snapshot's windows as published, rebuilt at each reconcile.
     windows: Vec<WindowInfo>,
     recovered: bool,
-    focus_events: bool,
     tx: mpsc::Sender<Cmd>,
     updates: broadcast::Sender<Status>,
     /// The status last sent to subscribers; one a sidebar would draw the same isn't sent.
@@ -171,7 +170,6 @@ pub async fn run(opts: Options) -> Result<()> {
         snapshot: Snapshot::default(),
         windows: Vec::new(),
         recovered: false,
-        focus_events: false,
         tx,
         updates,
         published: None,
@@ -338,10 +336,7 @@ impl Daemon {
                 // As for List: a requester that hung up needs no reply.
                 let _ = reply.send((self.status(), self.updates.subscribe()));
             }
-            Cmd::Refresh => {
-                self.focus_events = self.query_focus_events().await;
-                self.schedule_reconcile();
-            }
+            Cmd::Refresh => self.schedule_reconcile(),
             Cmd::TmuxNotification { name } => {
                 if control_mode::triggers_reconcile(&name) {
                     self.schedule_reconcile();
@@ -562,7 +557,7 @@ impl Daemon {
     }
 
     async fn reconcile(&mut self) {
-        let mut snap = match self.opts.tmux.snapshot(self.focus_events).await {
+        let mut snap = match self.opts.tmux.snapshot().await {
             Ok(s) => s,
             Err(e) => {
                 log!("reconcile failed: {e:#}");
@@ -616,7 +611,7 @@ impl Daemon {
 
     /// Takes a snapshot for `apply_runs` alone, without the rest of a reconcile.
     async fn poll_runs(&mut self) {
-        match self.opts.tmux.snapshot(self.focus_events).await {
+        match self.opts.tmux.snapshot().await {
             Ok(snap) => {
                 self.snapshot = snap;
                 self.apply_runs(now_ms());

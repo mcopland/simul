@@ -3,7 +3,7 @@
 
 use super::{Daemon, HOOK_INDEX, LAYOUT_HOOK};
 use crate::log;
-use crate::tmux::{shell_quote, tmux_double_quote};
+use crate::tmux::{chain, shell_quote, tmux_double_quote};
 
 /// The hooks set for the daemon's whole life, and the `simul internal` subcommand each runs.
 /// `LAYOUT_HOOK` comes and goes with the sidebars.
@@ -14,25 +14,9 @@ const HOOKS: [(&str, &str); 3] = [
 ];
 
 impl Daemon {
-    pub(super) async fn query_focus_events(&self) -> bool {
-        match self
-            .opts
-            .tmux
-            .run_async(&["show-options", "-gv", "focus-events"])
-            .await
-        {
-            Ok(v) => v.trim() == "on",
-            Err(e) => {
-                log!("{e:#}");
-                false
-            }
-        }
-    }
-
     /// tmux sends no control-mode notification for terminal focus, nor `%layout-change` for
     /// windows outside the control client's session, so hooks poke the daemon.
     pub(super) async fn install_tmux_hooks(&mut self) {
-        self.focus_events = self.query_focus_events().await;
         for (hook, sub) in HOOKS {
             let name = format!("{hook}[{HOOK_INDEX}]");
             let run = self.hook_command(sub);
@@ -100,18 +84,6 @@ impl Daemon {
             );
         }
     }
-}
-
-/// Joins tmux commands into one invocation's arguments, separated by `;`.
-pub(super) fn chain<'a>(cmds: impl Iterator<Item = Vec<&'a str>>) -> Vec<&'a str> {
-    let mut args = Vec::new();
-    for cmd in cmds {
-        if !args.is_empty() {
-            args.push(";");
-        }
-        args.extend(cmd);
-    }
-    args
 }
 
 /// The `hook[HOOK_INDEX]` entries in a `show-hooks` listing that run against `socket`.
