@@ -17,8 +17,8 @@ bin=${1:?$usage}
 secs=${2:-120}
 label=${3:-$bin}
 
-[ -x "$bin" ] || {
-	echo "bench-sidebar: not an executable: $bin" >&2
+[ -f "$bin" ] && [ -x "$bin" ] || {
+	echo "bench-sidebar: not an executable file: $bin" >&2
 	exit 1
 }
 # Sidebars are found by the binary's path in ps, as the daemon resolves it: absolute, with
