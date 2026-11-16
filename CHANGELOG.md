@@ -4,6 +4,8 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+## [0.11.5] - 2026-11-15
+
 ### Fixed
 
 - After tmux-resurrect restores a session, each window gets its sidebar back instead of an empty shell pane where the sidebar was. Sidebars now carry the pane title `simul-sidebar`, which resurrect restores, and the daemon restarts a restored pane with that title as a sidebar and turns the sidebar on. A shell that sets its own pane title at startup can still leave the empty pane.
@@ -174,7 +176,8 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 - `simul.tmux` entry point that downloads the prebuilt binary matching `VERSION`.
 - Model and effort for each agent in `simul ls`.
 
-[Unreleased]: https://github.com/mcopland/simul/compare/v0.11.4...HEAD
+[Unreleased]: https://github.com/mcopland/simul/compare/v0.11.5...HEAD
+[0.11.5]: https://github.com/mcopland/simul/compare/v0.11.4...v0.11.5
 [0.11.4]: https://github.com/mcopland/simul/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/mcopland/simul/compare/v0.11.2...v0.11.3
 [0.11.2]: https://github.com/mcopland/simul/compare/v0.11.1...v0.11.2
