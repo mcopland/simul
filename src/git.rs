@@ -1,9 +1,16 @@
+use std::path::Path;
+
 use anyhow::{Context, Result};
 
 use crate::protocol::GitStatus;
 
 /// The repo state in `cwd`, or `None` outside a repo.
 pub async fn status(cwd: &str) -> Result<Option<GitStatus>> {
+    // A pane outside any repo is read every few seconds while the sidebar shows it; a few
+    // stats answer that without a git process. `GIT_DIR` can make any directory a repo.
+    if std::env::var_os("GIT_DIR").is_none() && !in_repo(Path::new(cwd)) {
+        return Ok(None);
+    }
     let out = tokio::process::Command::new("git")
         // Like starship: never take index.lock away from the user's own git commands.
         .args(["--no-optional-locks", "-C", cwd, "status"])
@@ -16,6 +23,12 @@ pub async fn status(cwd: &str) -> Result<Option<GitStatus>> {
         return Ok(None);
     }
     Ok(Some(parse_status(&String::from_utf8_lossy(&out.stdout))))
+}
+
+/// Whether `dir` or a parent holds `.git`: a directory, or the file a worktree or submodule
+/// has instead.
+fn in_repo(dir: &Path) -> bool {
+    dir.ancestors().any(|d| d.join(".git").exists())
 }
 
 /// Parses `git status --porcelain=v2 --branch --show-stash` output.
@@ -63,6 +76,24 @@ fn count(s: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repo_is_found_from_any_directory_inside_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let sub = root.join("a/b");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        assert!(in_repo(&root));
+        assert!(in_repo(&sub));
+        assert!(!in_repo(tmp.path()), "the parent of a repo is outside it");
+        // Worktrees and submodules have a `.git` file pointing at the real one.
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir(&worktree).unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: /elsewhere\n").unwrap();
+        assert!(in_repo(&worktree));
+        assert!(!in_repo(&tmp.path().join("missing")));
+    }
 
     #[test]
     fn parses_a_clean_branch() {
