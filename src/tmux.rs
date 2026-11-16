@@ -51,8 +51,8 @@ pub struct Snapshot {
 pub const SIDEBAR_TITLE: &str = "simul-sidebar";
 
 pub const PANES_FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_id}\t#{pane_active}\t#{window_active}\t#{pane_current_command}\t#{pane_current_path}\t#{@simul-sidebar}\t#{window_panes}\t#{@simul-collapsed}\t#{pane_width}\t#{window_width}\t#{window_zoomed_flag}\t#{==:#{pane_title},simul-sidebar}\t#{?pane_start_command,#{pane_start_command},#{?default-command,#{default-command},#{default-shell}}}\t#{window_name}";
-/// Starts with `client` and a tab, which no `PANES_FORMAT` line or option line can, so client
-/// lines can be told apart in `SNAPSHOT`'s output.
+/// Client lines follow the `focus-events` line in `Tmux::snapshot`'s output; the prefix
+/// checks that each one is a client line.
 pub const CLIENTS_FORMAT: &str = "client\t#{client_session}\t#{client_flags}\t#{client_tty}";
 const CLIENT_PREFIX: &str = "client\t";
 const FOCUS_EVENTS_PREFIX: &str = "focus-events ";
@@ -108,14 +108,11 @@ impl Tmux {
 
     /// Panes, clients, and `focus-events`, from one tmux process.
     pub async fn snapshot(&self) -> Result<Snapshot> {
-        let args = chain(
-            [
-                vec!["list-panes", "-a", "-F", PANES_FORMAT],
-                vec!["show-options", "-g", "focus-events"],
-                vec!["list-clients", "-F", CLIENTS_FORMAT],
-            ]
-            .into_iter(),
-        );
+        let args = chain([
+            vec!["list-panes", "-a", "-F", PANES_FORMAT],
+            vec!["show-options", "-g", "focus-events"],
+            vec!["list-clients", "-F", CLIENTS_FORMAT],
+        ]);
         let out = self.run_async(&args).await?;
         let (panes, clients, focus_events) = split_snapshot(&out);
         Ok(parse_snapshot(&panes, &clients, focus_events))
@@ -123,7 +120,7 @@ impl Tmux {
 }
 
 /// Joins tmux commands into one invocation's arguments, separated by `;`.
-pub fn chain<'a>(cmds: impl Iterator<Item = Vec<&'a str>>) -> Vec<&'a str> {
+pub fn chain<'a>(cmds: impl IntoIterator<Item = Vec<&'a str>>) -> Vec<&'a str> {
     let mut args = Vec::new();
     for cmd in cmds {
         if !args.is_empty() {
@@ -135,20 +132,30 @@ pub fn chain<'a>(cmds: impl Iterator<Item = Vec<&'a str>>) -> Vec<&'a str> {
 }
 
 /// Splits `Tmux::snapshot`'s output into `list-panes` lines, `list-clients` lines without
-/// their prefix, and whether `focus-events` is on. Pane lines start with the pane id's `%`.
+/// their prefix, and whether `focus-events` is on. Panes come before the option line and
+/// clients after it; going by position, a pane field holding a newline, such as a path,
+/// can't pass for a client.
 pub fn split_snapshot(out: &str) -> (String, String, bool) {
+    let lines: Vec<&str> = out.lines().collect();
+    let option = lines
+        .iter()
+        .rposition(|l| l.starts_with(FOCUS_EVENTS_PREFIX));
+    let (pane_lines, rest) = lines.split_at(option.unwrap_or(lines.len()));
     let mut panes = String::new();
+    for line in pane_lines {
+        panes.push_str(line);
+        panes.push('\n');
+    }
     let mut clients = String::new();
     let mut focus_events = false;
-    for line in out.lines() {
-        if line.starts_with('%') {
-            panes.push_str(line);
-            panes.push('\n');
-        } else if let Some(client) = line.strip_prefix(CLIENT_PREFIX) {
+    if let Some((option, client_lines)) = rest.split_first() {
+        focus_events = option[FOCUS_EVENTS_PREFIX.len()..].trim() == "on";
+        for client in client_lines
+            .iter()
+            .filter_map(|l| l.strip_prefix(CLIENT_PREFIX))
+        {
             clients.push_str(client);
             clients.push('\n');
-        } else if let Some(value) = line.strip_prefix(FOCUS_EVENTS_PREFIX) {
-            focus_events = value.trim() == "on";
         }
     }
     (panes, clients, focus_events)
@@ -521,6 +528,16 @@ mod tests {
         assert_eq!(split, panes);
         assert_eq!(clients, "client\tattached\t/dev/t1\n");
         assert!(!focus);
+    }
+
+    #[test]
+    fn a_pane_field_cannot_pass_for_a_client() {
+        // A path holding a newline splits its pane line in two.
+        let panes = "%1\tmain\t1\t@1\t1\t1\tsh\t/w/x\nclient\tmain\tattached,focused\t/dev/t9\t\t1\t\t80\t80\t0\t0\t\tw\n";
+        let (_, clients, _) = split_snapshot(&chained("on", ""));
+        assert_eq!(clients, "");
+        let (_, clients, _) = split_snapshot(&format!("{panes}focus-events on\n"));
+        assert_eq!(clients, "", "the pane's second half is no client");
     }
 
     #[test]

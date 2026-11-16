@@ -349,14 +349,11 @@ fn refocus(tmux: &Tmux, own_pane: &str) -> Result<()> {
 /// `target` is a pane or a window; for a window, its active pane is selected. One tmux
 /// process, which stops at the first command that fails, as separate calls would.
 fn jump(tmux: &Tmux, target: &str) -> Result<()> {
-    tmux.run(&chain(
-        [
-            vec!["switch-client", "-t", target],
-            vec!["select-window", "-t", target],
-            vec!["select-pane", "-t", target],
-        ]
-        .into_iter(),
-    ))?;
+    tmux.run(&chain([
+        vec!["switch-client", "-t", target],
+        vec!["select-window", "-t", target],
+        vec!["select-pane", "-t", target],
+    ]))?;
     Ok(())
 }
 

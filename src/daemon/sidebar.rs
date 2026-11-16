@@ -184,7 +184,7 @@ impl Daemon {
             }
             // One tmux call, which stops at a failed command, so a sidebar never runs untagged
             // and gets restarted by every later reconcile.
-            if let Err(e) = self.opts.tmux.run_async(&chain(cmds.into_iter())).await {
+            if let Err(e) = self.opts.tmux.run_async(&chain(cmds)).await {
                 log!("failed to restart restored sidebar {id}: {e:#}");
                 continue;
             }
