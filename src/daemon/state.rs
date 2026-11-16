@@ -207,6 +207,11 @@ impl Store {
         out
     }
 
+    /// Whether some pane runs `agent`.
+    pub fn tracks(&self, agent: Agent) -> bool {
+        self.panes.values().any(|t| t.rec.agent == agent)
+    }
+
     /// Every tracked pane's working directory, where one is known.
     pub fn cwds(&self) -> impl Iterator<Item = &str> {
         self.panes.values().filter_map(|t| t.rec.cwd.as_deref())
@@ -361,6 +366,19 @@ mod tests {
         s.apply("%1", Agent::Claude, &start, 1, false);
         s.apply("%2", Agent::Claude, &ev(AgentEvent::SessionStart), 1, false);
         assert_eq!(s.cwds().collect::<Vec<_>>(), ["/w"]);
+    }
+
+    #[test]
+    fn tracks_says_which_agents_have_a_pane() {
+        let mut s = Store::default();
+        assert!(!s.tracks(Agent::Claude));
+        s.apply("%1", Agent::Kiro, &ev(AgentEvent::SessionStart), 1, false);
+        assert!(s.tracks(Agent::Kiro));
+        assert!(!s.tracks(Agent::Claude));
+        s.apply("%2", Agent::Claude, &ev(AgentEvent::SessionStart), 1, false);
+        assert!(s.tracks(Agent::Claude));
+        s.apply("%2", Agent::Claude, &ev(AgentEvent::SessionEnd), 2, false);
+        assert!(!s.tracks(Agent::Claude), "its pane ended");
     }
 
     #[test]

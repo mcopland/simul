@@ -4,7 +4,7 @@
 use anyhow::Result;
 
 use super::Daemon;
-use crate::protocol::now_ms;
+use crate::protocol::{Agent, now_ms};
 use crate::{claude_sessions, kiro_sessions, log};
 
 use std::path::PathBuf;
@@ -45,7 +45,13 @@ impl Daemon {
     /// Applies Claude's and Kiro's own session status; it covers Esc, denials, interrupts, and
     /// Kiro's approvals, which fire no hook.
     pub(super) async fn read_live(&mut self) {
-        let claude_dir = self.live.claude_dir.clone();
+        // Live status only applies to tracked panes, so without a Claude pane nothing in
+        // Claude's directory can matter. `kiro_sessions::read` skips itself without Kiro panes.
+        let claude_dir = self
+            .live
+            .claude_dir
+            .clone()
+            .filter(|_| self.store.tracks(Agent::Claude));
         let kiro_dir = self.live.kiro_dir.clone();
         if claude_dir.is_none() && kiro_dir.is_none() {
             return;
