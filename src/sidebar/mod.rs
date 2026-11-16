@@ -15,7 +15,7 @@ use ratatui::widgets::Paragraph;
 use crate::client;
 use crate::paths::{self, env_var};
 use crate::protocol::{Ack, Request, RunState, State, Status, now_ms};
-use crate::tmux::Tmux;
+use crate::tmux::{Tmux, chain};
 use model::{Action, App, Line, Mark, Mode, Tone};
 
 /// How often a sidebar asks tmux for its window when the daemon's status doesn't say, as
@@ -346,11 +346,17 @@ fn refocus(tmux: &Tmux, own_pane: &str) -> Result<()> {
     Ok(())
 }
 
-/// `target` is a pane or a window; for a window, its active pane is selected.
+/// `target` is a pane or a window; for a window, its active pane is selected. One tmux
+/// process, which stops at the first command that fails, as separate calls would.
 fn jump(tmux: &Tmux, target: &str) -> Result<()> {
-    tmux.run(&["switch-client", "-t", target])?;
-    tmux.run(&["select-window", "-t", target])?;
-    tmux.run(&["select-pane", "-t", target])?;
+    tmux.run(&chain(
+        [
+            vec!["switch-client", "-t", target],
+            vec!["select-window", "-t", target],
+            vec!["select-pane", "-t", target],
+        ]
+        .into_iter(),
+    ))?;
     Ok(())
 }
 

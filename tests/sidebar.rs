@@ -587,6 +587,36 @@ fn the_sidebar_hands_focus_back_after_a_click() {
 }
 
 #[test]
+fn clicking_a_pane_row_jumps_to_that_pane() {
+    let mut h = Harness::new();
+    let far = h.new_pane("sleep 600");
+    let near = h.tmux(&[
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &far,
+        "sleep 601",
+    ]);
+    h.tmux(&["rename-window", "-t", &far, "far"]);
+    h.tmux(&["select-pane", "-t", &near]);
+    h.tmux(&["select-window", "-t", "t:0"]);
+    h.start_daemon();
+    toggle(&h);
+    eventually("a sidebar in each window", || sidebars(&h).len() == 2);
+    let field = |pane: &str, format: &str| h.tmux(&["display-message", "-p", "-t", pane, format]);
+    let side = sidebar_in(&h, "t");
+    // Pane rows follow their window's row in tmux's order, which puts `far` first.
+    let row = row_of(&h, &side, " 1:far") + 1;
+    click(&h, &side, row);
+    eventually("far's window current and far active", || {
+        field(&far, "#{window_active}#{pane_active}") == "11"
+    });
+}
+
+#[test]
 fn focus_returns_to_an_earlier_pane_when_the_last_one_is_gone() {
     let mut h = Harness::new();
     h.start_daemon();
