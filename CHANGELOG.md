@@ -4,6 +4,8 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+## [0.11.6] - 2026-11-16
+
 ### Changed
 
 - Sidebars no longer wake on each tool call an agent makes. The daemon sends a status only when a sidebar would draw it differently, and a tool call changes nothing a sidebar draws.
@@ -183,7 +185,8 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 - `simul.tmux` entry point that downloads the prebuilt binary matching `VERSION`.
 - Model and effort for each agent in `simul ls`.
 
-[Unreleased]: https://github.com/mcopland/simul/compare/v0.11.5...HEAD
+[Unreleased]: https://github.com/mcopland/simul/compare/v0.11.6...HEAD
+[0.11.6]: https://github.com/mcopland/simul/compare/v0.11.5...v0.11.6
 [0.11.5]: https://github.com/mcopland/simul/compare/v0.11.4...v0.11.5
 [0.11.4]: https://github.com/mcopland/simul/compare/v0.11.3...v0.11.4
 [0.11.3]: https://github.com/mcopland/simul/compare/v0.11.2...v0.11.3
