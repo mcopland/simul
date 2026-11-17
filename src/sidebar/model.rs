@@ -135,7 +135,8 @@ pub fn mark_symbol(mark: Mark) -> char {
 fn mark_rank(mark: Mark) -> u8 {
     match mark {
         Mark::Agent(s) => rank(s),
-        Mark::Run(RunState::Finished | RunState::Succeeded | RunState::Failed) => 7,
+        // A failed command counts as `Mark::Agent(State::Failed)` (see `run_mark`).
+        Mark::Run(RunState::Finished | RunState::Succeeded) => 7,
         Mark::Run(_) => 8,
     }
 }

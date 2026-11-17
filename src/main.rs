@@ -64,7 +64,8 @@ enum Command {
         #[arg(long, hide = true)]
         restarted_for: Option<String>,
     },
-    /// Called by tmux hooks.
+    /// Called by the tmux hooks of daemons before 1.0, which may still be set while a new
+    /// daemon takes over; current hooks message the daemon through tmux instead.
     #[command(hide = true)]
     Internal {
         #[command(subcommand)]
