@@ -4,6 +4,8 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-16
+
 ### Added
 
 - Plain panes show how a command ended: `✓` for success and `✗` for failure, where the shell reports its commands with OSC 133 shell integration. Such a command shows when it starts and ends, at once, even if it ran for less than a second. The README explains how to turn on Ghostty's zsh integration in tmux panes. Panes without it still show `■`.
@@ -194,7 +196,8 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 - `simul.tmux` entry point that downloads the prebuilt binary matching `VERSION`.
 - Model and effort for each agent in `simul ls`.
 
-[Unreleased]: https://github.com/mcopland/simul/compare/v0.11.6...HEAD
+[Unreleased]: https://github.com/mcopland/simul/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/mcopland/simul/compare/v0.11.6...v1.0.0
 [0.11.6]: https://github.com/mcopland/simul/compare/v0.11.5...v0.11.6
 [0.11.5]: https://github.com/mcopland/simul/compare/v0.11.4...v0.11.5
 [0.11.4]: https://github.com/mcopland/simul/compare/v0.11.3...v0.11.4
