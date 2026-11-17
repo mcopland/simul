@@ -61,6 +61,8 @@ pub enum Poke {
     Refresh,
     /// A client or a layout was resized.
     Resized,
+    /// A shell marked a command's start or end with OSC 133.
+    Command,
 }
 
 impl Poke {
@@ -68,6 +70,7 @@ impl Poke {
         match self {
             Poke::Refresh => "refresh",
             Poke::Resized => "resized",
+            Poke::Command => "command",
         }
     }
 }
@@ -81,7 +84,7 @@ pub fn poke(name: &str, args: &[String]) -> Option<Poke> {
         return None;
     }
     match args {
-        [prefix, what] if prefix == MESSAGE_PREFIX => [Poke::Refresh, Poke::Resized]
+        [prefix, what] if prefix == MESSAGE_PREFIX => [Poke::Refresh, Poke::Resized, Poke::Command]
             .into_iter()
             .find(|p| p.word() == what),
         _ => None,
@@ -178,6 +181,7 @@ async fn attach_once(tmux: &Tmux, tx: &mpsc::Sender<Cmd>) -> Result<()> {
                 let cmd = match poke(&name, &args) {
                     Some(Poke::Refresh) => Cmd::Refresh,
                     Some(Poke::Resized) => Cmd::Resized,
+                    Some(Poke::Command) => Cmd::ShellCommand,
                     None => Cmd::TmuxNotification { name },
                 };
                 if tx.send(cmd).await.is_err() {
@@ -244,6 +248,10 @@ mod tests {
         assert_eq!(
             poke("%message", &words("simul resized")),
             Some(Poke::Resized)
+        );
+        assert_eq!(
+            poke("%message", &words("simul command")),
+            Some(Poke::Command)
         );
         assert_eq!(poke("%message", &words("hello there")), None);
         assert_eq!(poke("%message", &words("simul other")), None);

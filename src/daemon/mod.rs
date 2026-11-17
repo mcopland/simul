@@ -53,6 +53,8 @@ pub enum Cmd {
     Refresh,
     /// The control client attached under this name; hooks reach the daemon through it.
     ControlClient(String),
+    /// A shell marked a command's start or end with OSC 133.
+    ShellCommand,
     Toggle(oneshot::Sender<bool>),
     Resized,
     Collapse {
@@ -119,8 +121,9 @@ struct Daemon {
     /// The snapshot's windows as published, rebuilt at each reconcile.
     windows: Vec<WindowInfo>,
     recovered: bool,
-    /// The control client's name, which hooks message; `None` until it attaches.
-    control_client: Option<String>,
+    /// Every name the control client attached under, the current one last; hooks message
+    /// the current one. Empty until it first attaches.
+    control_clients: Vec<String>,
     tx: mpsc::Sender<Cmd>,
     updates: broadcast::Sender<Status>,
     /// The status last sent to subscribers; one a sidebar would draw the same isn't sent.
@@ -174,7 +177,7 @@ pub async fn run(opts: Options) -> Result<()> {
         snapshot: Snapshot::default(),
         windows: Vec::new(),
         recovered: false,
-        control_client: None,
+        control_clients: Vec::new(),
         tx,
         updates,
         published: None,
@@ -341,8 +344,15 @@ impl Daemon {
                 let _ = reply.send((self.status(), self.updates.subscribe()));
             }
             Cmd::Refresh => self.schedule_reconcile(),
+            // Runs show only in sidebars. While they are hidden, the next process check still
+            // finds a finish by its end mark, so a command needs no snapshot of its own.
+            Cmd::ShellCommand => {
+                if self.sidebar.on {
+                    self.schedule_reconcile();
+                }
+            }
             Cmd::ControlClient(name) => {
-                self.control_client = Some(name);
+                self.control_clients.push(name);
                 self.install_tmux_hooks().await;
                 if self.sidebar.on {
                     self.set_layout_hook(true).await;

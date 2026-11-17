@@ -13,8 +13,8 @@ const HOOKS: [(&str, Poke); 5] = [
     ("pane-focus-in", Poke::Refresh),
     ("pane-focus-out", Poke::Refresh),
     ("client-resized", Poke::Resized),
-    ("pane-command-started", Poke::Refresh),
-    ("pane-command-finished", Poke::Refresh),
+    ("pane-command-started", Poke::Command),
+    ("pane-command-finished", Poke::Command),
 ];
 
 impl Daemon {
@@ -43,6 +43,9 @@ impl Daemon {
     /// tmux server may have written the same entries since; those stay. Two tmux calls, so a
     /// slow tmux leaves all or none of them.
     pub(super) async fn remove_tmux_hooks(&self) {
+        if self.control_clients.is_empty() {
+            return;
+        }
         let hooks = HOOKS.iter().map(|(hook, _)| *hook).chain([LAYOUT_HOOK]);
         let show = chain(hooks.map(|hook| vec!["show-hooks", "-g", hook]));
         let listing = match self.opts.tmux.run_async(&show).await {
@@ -52,10 +55,7 @@ impl Daemon {
                 return;
             }
         };
-        let Some(client) = &self.control_client else {
-            return;
-        };
-        let ours = ours_in(&listing, client);
+        let ours = ours_in(&listing, &self.control_clients);
         if ours.is_empty() {
             return;
         }
@@ -70,7 +70,7 @@ impl Daemon {
 
     /// A hook body that pokes this daemon; `None` before its control client has attached.
     pub(super) fn hook_command(&self, poke: Poke) -> Option<String> {
-        let client = self.control_client.as_deref()?;
+        let client = self.control_clients.last()?;
         Some(hook_body(client, poke.word()))
     }
 
@@ -100,14 +100,19 @@ impl Daemon {
     }
 }
 
-/// The `hook[HOOK_INDEX]` entries in a `show-hooks` listing that message `client`.
-fn ours_in(listing: &str, client: &str) -> Vec<String> {
+/// The `hook[HOOK_INDEX]` entries in a `show-hooks` listing that message one of `clients`.
+fn ours_in(listing: &str, clients: &[String]) -> Vec<String> {
     let index = format!("[{HOOK_INDEX}]");
-    let marker = format!("display-message -c {client} ");
+    let markers: Vec<String> = clients
+        .iter()
+        .map(|c| format!("display-message -c {c} "))
+        .collect();
     listing
         .lines()
         .filter_map(|line| line.split_once(' '))
-        .filter(|(name, body)| name.ends_with(&index) && body.starts_with(&marker))
+        .filter(|(name, body)| {
+            name.ends_with(&index) && markers.iter().any(|m| body.starts_with(m))
+        })
         .map(|(name, _)| name.to_owned())
         .collect()
 }
@@ -139,8 +144,17 @@ mod tests {
                        window-layout-changed[7463] display-message -c client-42 \"simul resized\"\n\
                        pane-focus-out[7463] run-shell -b \"SIMUL_SOCKET=/s simul internal refresh\"\n";
         assert_eq!(
-            ours_in(listing, "client-42"),
+            ours_in(listing, &["client-42".into()]),
             ["pane-focus-in[7463]", "window-layout-changed[7463]"]
+        );
+        // A reattach renames the client; a hook that kept the old name is still ours.
+        assert_eq!(
+            ours_in(listing, &["client-420".into(), "client-42".into()]),
+            [
+                "pane-focus-in[7463]",
+                "client-resized[7463]",
+                "window-layout-changed[7463]"
+            ]
         );
     }
 }

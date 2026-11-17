@@ -183,10 +183,12 @@ fn plain_pane_processes_are_running_then_finished_until_viewed() {
 
 #[test]
 fn a_shells_osc_133_marks_say_how_a_command_ended() {
-    // The sidebar is hidden, so processes are checked every 10 seconds; only the
-    // pane-command hooks can bring these changes in sooner.
     let mut h = Harness::new();
     h.start_daemon();
+    // Runs show in sidebars, and while those are shown the pane-command hooks bring each
+    // start and end in at once.
+    let out = h.simul().arg("toggle").output().unwrap();
+    assert!(out.status.success(), "toggle: {out:?}");
     h.wait_run(&h.first_pane(), None);
     let pane = h.new_pane("sh");
     h.wait_run(&pane, None);
@@ -410,18 +412,24 @@ fn sigterm_removes_the_daemons_tmux_hooks_and_socket() {
     let mut h = Harness::new();
     h.start_daemon();
     let simul_hooks = |h: &Harness| -> Vec<String> {
-        ["pane-focus-in", "pane-focus-out", "client-resized"]
-            .iter()
-            .flat_map(|hook| {
-                h.tmux(&["show-hooks", "-g", hook])
-                    .lines()
-                    .filter(|l| l.contains("display-message -c "))
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
-            })
-            .collect()
+        [
+            "pane-focus-in",
+            "pane-focus-out",
+            "client-resized",
+            "pane-command-started",
+            "pane-command-finished",
+        ]
+        .iter()
+        .flat_map(|hook| {
+            h.tmux(&["show-hooks", "-g", hook])
+                .lines()
+                .filter(|l| l.contains("display-message -c "))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect()
     };
-    eventually("the daemon's tmux hooks", || simul_hooks(&h).len() == 3);
+    eventually("the daemon's tmux hooks", || simul_hooks(&h).len() == 5);
     // Another daemon on this tmux server (a dev build with its own control client) wrote
     // last here.
     let theirs = "display-message -c client-1 'simul resized'";
