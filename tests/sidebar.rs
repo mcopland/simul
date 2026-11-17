@@ -134,7 +134,7 @@ fn resize_reasserts_width() {
 fn layout_hook(h: &Harness) -> String {
     h.tmux(&["show-hooks", "-g", "window-layout-changed"])
         .lines()
-        .filter(|l| l.contains("internal resized"))
+        .filter(|l| l.contains("\"simul resized\""))
         .collect()
 }
 
@@ -156,7 +156,7 @@ fn internal_resized_reasserts_every_width() {
     toggle(&h);
     eventually("a sidebar in each session", || sidebars(&h).len() == 2);
     // Without the hook, a drag outside the control client's session is only noticed through
-    // `internal resized` (as tmux's client-resized hook sends).
+    // `internal resized`, as hooks a 0.11 daemon set still send during an update.
     h.tmux(&["set-hook", "-gu", "window-layout-changed[7463]"]);
     assert_eq!(layout_hook(&h), "");
     let side = sidebars(&h);
@@ -176,7 +176,13 @@ fn layout_hook_is_set_only_while_sidebars_are_shown() {
     h.start_daemon();
     assert_eq!(layout_hook(&h), "");
     toggle(&h);
-    assert_ne!(layout_hook(&h), "");
+    // The hook names the daemon's control client, which may attach just after the toggle.
+    eventually("the layout hook", || !layout_hook(&h).is_empty());
+    assert!(
+        !layout_hook(&h).contains("run-shell"),
+        "a hook starts no process: {}",
+        layout_hook(&h)
+    );
     toggle(&h);
     assert_eq!(layout_hook(&h), "");
 }

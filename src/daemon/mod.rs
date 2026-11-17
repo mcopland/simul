@@ -51,6 +51,8 @@ pub enum Cmd {
     List(oneshot::Sender<Status>),
     Subscribe(oneshot::Sender<(Status, broadcast::Receiver<Status>)>),
     Refresh,
+    /// The control client attached under this name; hooks reach the daemon through it.
+    ControlClient(String),
     Toggle(oneshot::Sender<bool>),
     Resized,
     Collapse {
@@ -117,6 +119,8 @@ struct Daemon {
     /// The snapshot's windows as published, rebuilt at each reconcile.
     windows: Vec<WindowInfo>,
     recovered: bool,
+    /// The control client's name, which hooks message; `None` until it attaches.
+    control_client: Option<String>,
     tx: mpsc::Sender<Cmd>,
     updates: broadcast::Sender<Status>,
     /// The status last sent to subscribers; one a sidebar would draw the same isn't sent.
@@ -170,6 +174,7 @@ pub async fn run(opts: Options) -> Result<()> {
         snapshot: Snapshot::default(),
         windows: Vec::new(),
         recovered: false,
+        control_client: None,
         tx,
         updates,
         published: None,
@@ -184,7 +189,6 @@ pub async fn run(opts: Options) -> Result<()> {
         ),
         updater: Updater::new(plugin, env!("CARGO_PKG_VERSION")),
     };
-    d.install_tmux_hooks().await;
     d.reconcile().await;
     if let Some(version) = d.opts.restarted_for.clone()
         && d.updater.restarted_for(&version)
@@ -337,6 +341,15 @@ impl Daemon {
                 let _ = reply.send((self.status(), self.updates.subscribe()));
             }
             Cmd::Refresh => self.schedule_reconcile(),
+            Cmd::ControlClient(name) => {
+                self.control_client = Some(name);
+                self.install_tmux_hooks().await;
+                if self.sidebar.on {
+                    self.set_layout_hook(true).await;
+                }
+                // Hooks were missing until now, so focus may have moved unseen.
+                self.schedule_reconcile();
+            }
             Cmd::TmuxNotification { name } => {
                 if control_mode::triggers_reconcile(&name) {
                     self.schedule_reconcile();

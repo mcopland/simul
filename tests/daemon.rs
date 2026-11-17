@@ -392,15 +392,16 @@ fn sigterm_removes_the_daemons_tmux_hooks_and_socket() {
             .flat_map(|hook| {
                 h.tmux(&["show-hooks", "-g", hook])
                     .lines()
-                    .filter(|l| l.contains("internal "))
+                    .filter(|l| l.contains("display-message -c "))
                     .map(str::to_owned)
                     .collect::<Vec<_>>()
             })
             .collect()
     };
     eventually("the daemon's tmux hooks", || simul_hooks(&h).len() == 3);
-    // Another daemon on this tmux server (a dev build with its own socket) wrote last here.
-    let theirs = "run-shell -b \"SIMUL_SOCKET=/tmp/other.sock simul internal resized\"";
+    // Another daemon on this tmux server (a dev build with its own control client) wrote
+    // last here.
+    let theirs = "display-message -c client-1 'simul resized'";
     h.tmux(&["set-hook", "-g", "client-resized[7463]", theirs]);
     let status = h.term_daemon();
     assert!(status.success(), "daemon exit after SIGTERM: {status:?}");
@@ -411,7 +412,7 @@ fn sigterm_removes_the_daemons_tmux_hooks_and_socket() {
         1,
         "only the other daemon's hook stays: {left:?}"
     );
-    assert!(left[0].contains("/tmp/other.sock"), "{left:?}");
+    assert!(left[0].contains("client-1 "), "{left:?}");
     assert!(
         h.daemon_log().contains("daemon exiting: terminated"),
         "log: {}",

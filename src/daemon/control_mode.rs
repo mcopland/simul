@@ -53,6 +53,51 @@ impl Parser {
     }
 }
 
+/// What simul's tmux hooks ask of the daemon, sent as `display-message -c <this client>`
+/// (see `tmux_hooks::hook_body`) and read here from `%message simul <what>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Poke {
+    /// Focus may have moved.
+    Refresh,
+    /// A client or a layout was resized.
+    Resized,
+}
+
+impl Poke {
+    pub fn word(self) -> &'static str {
+        match self {
+            Poke::Refresh => "refresh",
+            Poke::Resized => "resized",
+        }
+    }
+}
+
+/// The word that starts each of simul's hook messages.
+pub const MESSAGE_PREFIX: &str = "simul";
+
+/// The poke a notification carries, if it is one of simul's hook messages.
+pub fn poke(name: &str, args: &[String]) -> Option<Poke> {
+    if name != "%message" {
+        return None;
+    }
+    match args {
+        [prefix, what] if prefix == MESSAGE_PREFIX => [Poke::Refresh, Poke::Resized]
+            .into_iter()
+            .find(|p| p.word() == what),
+        _ => None,
+    }
+}
+
+/// The name of the client whose process is `pid` in `list-clients -F CLIENT_PIDS` output.
+fn client_named(listing: &str, pid: u32) -> Option<String> {
+    listing.lines().find_map(|line| {
+        let (p, name) = line.split_once('\t')?;
+        (p.parse() == Ok(pid)).then(|| name.to_owned())
+    })
+}
+
+const CLIENT_PIDS: &str = "#{client_pid}\t#{client_name}";
+
 /// Notifications after which pane, window, or focus state may have changed.
 pub fn triggers_reconcile(name: &str) -> bool {
     matches!(
@@ -111,6 +156,12 @@ async fn attach_once(tmux: &Tmux, tx: &mpsc::Sender<Cmd>) -> Result<()> {
         .context("failed to start tmux control mode")?;
     // Control mode exits when its stdin closes, so hold it open for the client's lifetime.
     let _stdin = child.stdin.take();
+    let pid = child.id().context("tmux control mode exited at once")?;
+    // Hooks reach the daemon through this client by name, and a new attach has a new name.
+    let name = find_client(tmux, pid).await?;
+    if tx.send(Cmd::ControlClient(name)).await.is_err() {
+        return Ok(());
+    }
     let stdout = child
         .stdout
         .take()
@@ -123,8 +174,13 @@ async fn attach_once(tmux: &Tmux, tx: &mpsc::Sender<Cmd>) -> Result<()> {
         .context("failed to read tmux control mode output")?
     {
         match parser.feed(&line) {
-            Line::Notification { name, .. } => {
-                if tx.send(Cmd::TmuxNotification { name }).await.is_err() {
+            Line::Notification { name, args } => {
+                let cmd = match poke(&name, &args) {
+                    Some(Poke::Refresh) => Cmd::Refresh,
+                    Some(Poke::Resized) => Cmd::Resized,
+                    None => Cmd::TmuxNotification { name },
+                };
+                if tx.send(cmd).await.is_err() {
                     return Ok(());
                 }
             }
@@ -133,6 +189,19 @@ async fn attach_once(tmux: &Tmux, tx: &mpsc::Sender<Cmd>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The name tmux gives the control client running as `pid`, once it has registered.
+async fn find_client(tmux: &Tmux, pid: u32) -> Result<String> {
+    const TRIES: u32 = 50;
+    for _ in 0..TRIES {
+        let listing = tmux.run_async(&["list-clients", "-F", CLIENT_PIDS]).await?;
+        if let Some(name) = client_named(&listing, pid) {
+            return Ok(name);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    anyhow::bail!("tmux never listed control mode client {pid} in list-clients")
 }
 
 #[cfg(test)]
@@ -163,6 +232,29 @@ mod tests {
         assert_eq!(p.feed("%exit"), Line::Exit);
         assert_eq!(p.feed("%exit server exited"), Line::Exit);
         assert_eq!(p.feed("stray"), Line::Reply);
+    }
+
+    #[test]
+    fn simuls_messages_poke_the_daemon() {
+        let words = |s: &str| s.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(
+            poke("%message", &words("simul refresh")),
+            Some(Poke::Refresh)
+        );
+        assert_eq!(
+            poke("%message", &words("simul resized")),
+            Some(Poke::Resized)
+        );
+        assert_eq!(poke("%message", &words("hello there")), None);
+        assert_eq!(poke("%message", &words("simul other")), None);
+        assert_eq!(poke("%window-add", &words("simul refresh")), None);
+    }
+
+    #[test]
+    fn the_control_client_is_found_by_its_pid() {
+        let listing = "41\tclient-41\n4242\tclient-4242\n";
+        assert_eq!(client_named(listing, 4242).as_deref(), Some("client-4242"));
+        assert_eq!(client_named(listing, 7), None);
     }
 
     #[test]

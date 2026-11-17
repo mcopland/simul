@@ -7,6 +7,7 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 ### Changed
 
 - simul requires tmux 3.8 or newer. The plugin shows a message and does nothing on an older tmux, and `simul doctor` fails its tmux check.
+- A pane switch, a client resize, or a layout change no longer starts a process. simul's tmux hooks send the daemon a message through its control client, where each started `sh` and `simul internal` before.
 
 ## [0.11.6] - 2026-11-16
 
