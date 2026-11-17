@@ -49,9 +49,20 @@ pub struct Runs {
     /// When each plain pane was first seen, in ms; `None` before the first update. Panes there
     /// at the first update map to `None`: settled, so they are judged at once.
     first_seen: Option<HashMap<String, Option<u64>>>,
-    /// When each pane's shell last reported a command ended, as of the last update, so a
-    /// command that ran wholly between two updates is still caught.
-    last_end: HashMap<String, Option<u64>>,
+    /// Each pane's last finished command as its shell reported it, as of the last update, so
+    /// a command that ran wholly between two updates is still caught.
+    last_finish: HashMap<String, Option<Finish>>,
+}
+
+/// A finished command by its start, end, and status. Times are whole seconds, so two
+/// commands within one second differ only in their status, or not at all.
+type Finish = (u64, u64, Option<i32>);
+
+fn finish_of(cmd: ShellCommand) -> Option<Finish> {
+    match cmd.ended {
+        Some(ended) if !cmd.running => Some((cmd.started, ended, cmd.status)),
+        _ => None,
+    }
 }
 
 /// How long a new pane goes unjudged. Its first instants can show tmux's own fork before it
@@ -85,10 +96,10 @@ impl Runs {
     ) {
         let mut next = HashMap::new();
         let mut first_seen = HashMap::new();
-        let mut last_end = HashMap::new();
+        let mut last_finish = HashMap::new();
         for p in snap.panes.iter().filter(|p| !p.is_sidebar && !is_agent(p)) {
-            let ended_before = self.last_end.get(&p.id).copied();
-            last_end.insert(p.id.clone(), p.shell_command.and_then(|c| c.ended));
+            let finish_before = self.last_finish.get(&p.id).copied();
+            last_finish.insert(p.id.clone(), p.shell_command.and_then(finish_of));
             let born = match &self.first_seen {
                 Some(seen) => seen.get(&p.id).copied().unwrap_or(Some(now)),
                 None => None,
@@ -98,25 +109,21 @@ impl Runs {
                 continue;
             }
             let viewed = snap.viewed.contains(&p.id);
-            // Only a shell that has closed a command marks its own commands; a lone start
-            // can come from a program that printed one and never ended it.
-            if let Some(cmd) = p.shell_command.filter(|c| c.ended.is_some()) {
+            let shell = pane_shell(&p.launched);
+            let prompt = at_prompt(&p.current_command, shell);
+            // The report decides only where the foreground process agrees with it. tmux keeps
+            // a start mark that no end followed, as after `exec bash` or from a program that
+            // printed one, and a remote shell's marks pass through ssh.
+            if let Some(cmd) = p.shell_command.filter(|c| c.running != prompt) {
                 let prev = self.by_pane.get(&p.id).copied();
-                if let Some(run) = reported_run(
-                    cmd,
-                    prev,
-                    ended_before,
-                    viewed,
-                    &p.current_command,
-                    interactive,
-                ) {
+                let class = (!prompt).then(|| classify(&p.current_command, interactive));
+                if let Some(run) = reported_run(cmd, prev, finish_before, viewed, class) {
                     next.insert(p.id.clone(), run);
                 }
                 continue;
             }
             let prev = self.by_pane.get(&p.id).map(|r| r.state);
-            let shell = pane_shell(&p.launched);
-            let state = if at_prompt(&p.current_command, shell) {
+            let state = if prompt {
                 match prev {
                     Some(RunState::Running | RunState::Interactive) if !viewed => {
                         RunState::Finished
@@ -124,10 +131,8 @@ impl Runs {
                     Some(RunState::Finished) if !viewed => RunState::Finished,
                     _ => continue,
                 }
-            } else if interactive.contains(&p.current_command) {
-                RunState::Interactive
             } else {
-                RunState::Running
+                classify(&p.current_command, interactive)
             };
             let since_ms = match self.by_pane.get(&p.id) {
                 Some(r) if r.state == state => r.since_ms,
@@ -137,27 +142,31 @@ impl Runs {
         }
         self.by_pane = next;
         self.first_seen = Some(first_seen);
-        self.last_end = last_end;
+        self.last_finish = last_finish;
     }
 }
 
-/// A pane's run from what its shell reported. `prev` is its run at the last update, and
-/// `ended_before` when its last command had ended then: `None` on the first look, when an
-/// end already there is history, not news.
+/// `Interactive` for a program you work in, else `Running`.
+fn classify(command: &str, interactive: &[String]) -> RunState {
+    if interactive.iter().any(|c| c == command) {
+        RunState::Interactive
+    } else {
+        RunState::Running
+    }
+}
+
+/// A pane's run from what its shell reported, where the foreground process agrees. `class`
+/// is the running command's state, `None` at the prompt. `prev` is its run at the last
+/// update, and `finish_before` its last finish then: `None` on the first look, when a finish
+/// already there is history, not news.
 fn reported_run(
     cmd: ShellCommand,
     prev: Option<Run>,
-    ended_before: Option<Option<u64>>,
+    finish_before: Option<Option<Finish>>,
     viewed: bool,
-    current_command: &str,
-    interactive: &[String],
+    class: Option<RunState>,
 ) -> Option<Run> {
-    if cmd.running {
-        let state = if interactive.iter().any(|c| c == current_command) {
-            RunState::Interactive
-        } else {
-            RunState::Running
-        };
+    if let Some(state) = class {
         return Some(Run {
             state,
             since_ms: cmd.started * 1000,
@@ -166,10 +175,12 @@ fn reported_run(
     if viewed {
         return None;
     }
-    let ended_now = matches!(ended_before, Some(before) if cmd.ended > before);
+    let finish = finish_of(cmd);
+    let finished_now =
+        matches!(finish_before, Some(before) if finish.is_some() && finish != before);
     let was_running =
         prev.is_some_and(|r| matches!(r.state, RunState::Running | RunState::Interactive));
-    if ended_now || was_running {
+    if finished_now || was_running {
         let state = match cmd.status {
             Some(0) => RunState::Succeeded,
             Some(_) => RunState::Failed,
@@ -418,12 +429,49 @@ mod tests {
     }
 
     #[test]
-    fn a_reported_command_runs_even_under_the_shells_own_name() {
-        // A bash script in a bash pane: the shell-name guess would read it as the prompt.
+    fn a_reported_command_runs_from_its_reported_start() {
         let mut r = Runs::default();
-        let s = launched(snap(&[("%1", "bash")], &[]), "bash");
+        let s = launched(snap(&[("%1", "cargo")], &[]), "zsh");
         step(&mut r, &reported(s, "%1", running(100)), 5_000_000);
         assert_eq!(r.get("%1").copied(), run(RunState::Running, 100_000));
+    }
+
+    #[test]
+    fn a_report_the_process_contradicts_is_not_trusted() {
+        // `exec bash`, or a nested shell's start mark left open: tmux still says running,
+        // but the pane's shell is at its prompt. A bash script in a bash pane looks the
+        // same, so it reads as idle while it runs, as without integration.
+        let mut r = Runs::default();
+        let s = launched(snap(&[("%1", "zsh")], &[]), "zsh");
+        step(&mut r, &reported(s, "%1", running(100)), 5_000_000);
+        assert_eq!(state(&r, "%1"), None);
+        // ssh in the foreground while the remote shell's marks say a command ended: the
+        // session is still open.
+        let mut r = Runs::default();
+        let s = launched(snap(&[("%1", "less")], &[]), "zsh");
+        step(
+            &mut r,
+            &reported(s.clone(), "%1", ended(40, 50, Some(0))),
+            5_000_000,
+        );
+        step(
+            &mut r,
+            &reported(s, "%1", ended(59, 60, Some(0))),
+            5_001_000,
+        );
+        assert_eq!(state(&r, "%1"), Some(RunState::Interactive));
+    }
+
+    #[test]
+    fn a_command_ending_in_the_same_second_as_the_last_is_caught() {
+        let mut r = Runs::default();
+        let at = |cmd| reported(snap(&[("%1", "zsh")], &[]), "%1", cmd);
+        step(&mut r, &at(running(50)), 5_000_000);
+        step(&mut r, &at(ended(50, 50, Some(0))), 5_001_000);
+        assert_eq!(state(&r, "%1"), Some(RunState::Succeeded));
+        // `false` ran and ended within that second.
+        step(&mut r, &at(ended(50, 50, Some(1))), 5_002_000);
+        assert_eq!(state(&r, "%1"), Some(RunState::Failed));
     }
 
     #[test]
