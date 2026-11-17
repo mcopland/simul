@@ -98,7 +98,9 @@ impl Runs {
                 continue;
             }
             let viewed = snap.viewed.contains(&p.id);
-            if let Some(cmd) = p.shell_command {
+            // Only a shell that has closed a command marks its own commands; a lone start
+            // can come from a program that printed one and never ended it.
+            if let Some(cmd) = p.shell_command.filter(|c| c.ended.is_some()) {
                 let prev = self.by_pane.get(&p.id).copied();
                 if let Some(run) = reported_run(
                     cmd,
@@ -392,12 +394,13 @@ mod tests {
         s
     }
 
+    /// A command running since `started`, in a shell that closed an earlier one.
     fn running(started: u64) -> ShellCommand {
         ShellCommand {
             running: true,
-            status: None,
+            status: Some(0),
             started,
-            ended: None,
+            ended: Some(started - 10),
         }
     }
 
@@ -421,6 +424,22 @@ mod tests {
         let s = launched(snap(&[("%1", "bash")], &[]), "bash");
         step(&mut r, &reported(s, "%1", running(100)), 5_000_000);
         assert_eq!(r.get("%1").copied(), run(RunState::Running, 100_000));
+    }
+
+    #[test]
+    fn a_start_never_closed_is_not_trusted() {
+        // A program, not the shell, printed a start mark and no end: the shell at its prompt
+        // must not read as running forever.
+        let mut r = Runs::default();
+        let lone = ShellCommand {
+            running: true,
+            status: None,
+            started: 100,
+            ended: None,
+        };
+        let s = launched(snap(&[("%1", "zsh")], &[]), "zsh");
+        step(&mut r, &reported(s, "%1", lone), 5_000_000);
+        assert_eq!(state(&r, "%1"), None);
     }
 
     #[test]
