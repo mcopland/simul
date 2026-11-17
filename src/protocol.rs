@@ -325,8 +325,13 @@ pub enum RunState {
     Running,
     /// An editor, pager, remote shell, or monitor: a program you work in, not one you wait on.
     Interactive,
-    /// The process ended while you weren't looking; lasts until you view the pane.
+    /// The process ended while you weren't looking; lasts until you view the pane. Its exit
+    /// status is unknown: the shell sent none (see `Succeeded`).
     Finished,
+    /// As `Finished`, for a command its shell reported exiting 0 through OSC 133.
+    Succeeded,
+    /// As `Finished`, for a command its shell reported exiting nonzero through OSC 133.
+    Failed,
     /// Any state a newer daemon reports that this build doesn't know.
     #[serde(other)]
     Unknown,
@@ -390,6 +395,12 @@ mod tests {
         let p: PaneSummary =
             serde_json::from_value(json!({"id": "%1", "command": "zsh", "active": true})).unwrap();
         assert_eq!(p.run, None);
+    }
+
+    #[test]
+    fn a_commands_outcome_is_on_the_wire() {
+        round_trips::<Run>(r#"{"state":"succeeded","since_ms":5}"#);
+        round_trips::<Run>(r#"{"state":"failed","since_ms":5}"#);
     }
 
     #[test]

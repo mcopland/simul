@@ -372,7 +372,8 @@ fn state_color(state: State) -> Color {
 fn run_color(run: RunState) -> Color {
     match run {
         RunState::Running => Color::Yellow,
-        RunState::Finished => Color::Green,
+        RunState::Finished | RunState::Succeeded => Color::Green,
+        RunState::Failed => state_color(State::Failed),
         RunState::Interactive => Color::Blue,
         RunState::Unknown => Color::DarkGray,
     }
@@ -917,6 +918,27 @@ mod tests {
         assert_eq!(editor[(3, 2)].symbol(), "\u{25b7}");
         assert_eq!(editor[(3, 2)].fg, Color::Blue);
         assert_eq!(row_text(&editor, 2).trim_end(), "   \u{25b7} /", "no age");
+    }
+
+    #[test]
+    fn a_commands_outcome_has_its_shape_and_color() {
+        let ok = draw_run(Some(Run {
+            state: RunState::Succeeded,
+            since_ms: 0,
+        }));
+        assert_eq!(ok[(3, 2)].symbol(), "\u{2713}");
+        assert_eq!(ok[(3, 2)].fg, Color::Green);
+        let failed = draw_run(Some(Run {
+            state: RunState::Failed,
+            since_ms: 0,
+        }));
+        assert_eq!(failed[(3, 2)].symbol(), "\u{2717}");
+        assert_eq!(failed[(3, 2)].fg, Color::Magenta);
+        assert_ne!(
+            row_text(&failed, 2).trim_end(),
+            "   \u{2717} /",
+            "with its age"
+        );
     }
 
     #[test]

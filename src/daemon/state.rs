@@ -564,6 +564,7 @@ mod tests {
             window_zoomed: false,
             restored_sidebar: false,
             window_name: "api".into(),
+            shell_command: None,
         }
     }
 

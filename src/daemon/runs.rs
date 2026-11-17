@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::protocol::{Run, RunState};
-use crate::tmux::{PaneInfo, Snapshot};
+use crate::tmux::{PaneInfo, ShellCommand, Snapshot};
 
 /// What `pane_current_command` reads while a shell waits at its prompt. A login shell shows
 /// with a leading `-`.
@@ -49,6 +49,9 @@ pub struct Runs {
     /// When each plain pane was first seen, in ms; `None` before the first update. Panes there
     /// at the first update map to `None`: settled, so they are judged at once.
     first_seen: Option<HashMap<String, Option<u64>>>,
+    /// When each pane's shell last reported a command ended, as of the last update, so a
+    /// command that ran wholly between two updates is still caught.
+    last_end: HashMap<String, Option<u64>>,
 }
 
 /// How long a new pane goes unjudged. Its first instants can show tmux's own fork before it
@@ -71,8 +74,8 @@ impl Runs {
     }
 
     /// Reads each plain pane's foreground command from `snap`, skipping sidebars and panes
-    /// `is_agent` claims. A process that ends while its pane isn't viewed stays `Finished`
-    /// until it is.
+    /// `is_agent` claims. A process that ends while its pane isn't viewed stays finished until
+    /// it is. Where the shell reports its commands with OSC 133, that report decides.
     pub fn update(
         &mut self,
         snap: &Snapshot,
@@ -82,7 +85,10 @@ impl Runs {
     ) {
         let mut next = HashMap::new();
         let mut first_seen = HashMap::new();
+        let mut last_end = HashMap::new();
         for p in snap.panes.iter().filter(|p| !p.is_sidebar && !is_agent(p)) {
+            let ended_before = self.last_end.get(&p.id).copied();
+            last_end.insert(p.id.clone(), p.shell_command.and_then(|c| c.ended));
             let born = match &self.first_seen {
                 Some(seen) => seen.get(&p.id).copied().unwrap_or(Some(now)),
                 None => None,
@@ -92,6 +98,20 @@ impl Runs {
                 continue;
             }
             let viewed = snap.viewed.contains(&p.id);
+            if let Some(cmd) = p.shell_command {
+                let prev = self.by_pane.get(&p.id).copied();
+                if let Some(run) = reported_run(
+                    cmd,
+                    prev,
+                    ended_before,
+                    viewed,
+                    &p.current_command,
+                    interactive,
+                ) {
+                    next.insert(p.id.clone(), run);
+                }
+                continue;
+            }
             let prev = self.by_pane.get(&p.id).map(|r| r.state);
             let shell = pane_shell(&p.launched);
             let state = if at_prompt(&p.current_command, shell) {
@@ -115,7 +135,54 @@ impl Runs {
         }
         self.by_pane = next;
         self.first_seen = Some(first_seen);
+        self.last_end = last_end;
     }
+}
+
+/// A pane's run from what its shell reported. `prev` is its run at the last update, and
+/// `ended_before` when its last command had ended then: `None` on the first look, when an
+/// end already there is history, not news.
+fn reported_run(
+    cmd: ShellCommand,
+    prev: Option<Run>,
+    ended_before: Option<Option<u64>>,
+    viewed: bool,
+    current_command: &str,
+    interactive: &[String],
+) -> Option<Run> {
+    if cmd.running {
+        let state = if interactive.iter().any(|c| c == current_command) {
+            RunState::Interactive
+        } else {
+            RunState::Running
+        };
+        return Some(Run {
+            state,
+            since_ms: cmd.started * 1000,
+        });
+    }
+    if viewed {
+        return None;
+    }
+    let ended_now = matches!(ended_before, Some(before) if cmd.ended > before);
+    let was_running =
+        prev.is_some_and(|r| matches!(r.state, RunState::Running | RunState::Interactive));
+    if ended_now || was_running {
+        let state = match cmd.status {
+            Some(0) => RunState::Succeeded,
+            Some(_) => RunState::Failed,
+            None => RunState::Finished,
+        };
+        let since_ms = cmd.ended.unwrap_or(cmd.started) * 1000;
+        return Some(Run { state, since_ms });
+    }
+    // An unseen finish stays until the pane is viewed.
+    prev.filter(|r| {
+        matches!(
+            r.state,
+            RunState::Finished | RunState::Succeeded | RunState::Failed
+        )
+    })
 }
 
 /// How early a check may run. A check is marked when its snapshot returns, partway into the
@@ -132,6 +199,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+    use crate::tmux::ShellCommand;
 
     fn pane(id: &str, cmd: &str) -> PaneInfo {
         PaneInfo {
@@ -314,6 +382,113 @@ mod tests {
         assert_eq!(pane_shell("sh"), None, "sh hides behind another name");
         assert_eq!(pane_shell("/bin/sh -c make"), None);
         assert_eq!(pane_shell(""), None);
+    }
+
+    /// `snap` with pane `id` reporting `cmd` through OSC 133.
+    fn reported(mut s: Snapshot, id: &str, cmd: ShellCommand) -> Snapshot {
+        for p in s.panes.iter_mut().filter(|p| p.id == id) {
+            p.shell_command = Some(cmd);
+        }
+        s
+    }
+
+    fn running(started: u64) -> ShellCommand {
+        ShellCommand {
+            running: true,
+            status: None,
+            started,
+            ended: None,
+        }
+    }
+
+    fn ended(started: u64, ended: u64, status: Option<i32>) -> ShellCommand {
+        ShellCommand {
+            running: false,
+            status,
+            started,
+            ended: Some(ended),
+        }
+    }
+
+    fn run(state: RunState, since_ms: u64) -> Option<Run> {
+        Some(Run { state, since_ms })
+    }
+
+    #[test]
+    fn a_reported_command_runs_even_under_the_shells_own_name() {
+        // A bash script in a bash pane: the shell-name guess would read it as the prompt.
+        let mut r = Runs::default();
+        let s = launched(snap(&[("%1", "bash")], &[]), "bash");
+        step(&mut r, &reported(s, "%1", running(100)), 5_000_000);
+        assert_eq!(r.get("%1").copied(), run(RunState::Running, 100_000));
+    }
+
+    #[test]
+    fn a_reported_interactive_program_is_interactive() {
+        let mut r = Runs::default();
+        step(
+            &mut r,
+            &reported(snap(&[("%1", "hx")], &[]), "%1", running(100)),
+            5_000_000,
+        );
+        assert_eq!(state(&r, "%1"), Some(RunState::Interactive));
+    }
+
+    #[test]
+    fn the_exit_status_decides_how_an_unseen_command_finished() {
+        let mut r = Runs::default();
+        let s = snap(&[("%1", "zsh"), ("%2", "zsh"), ("%3", "zsh")], &[]);
+        let s = reported(
+            reported(reported(s, "%1", running(100)), "%2", running(100)),
+            "%3",
+            running(100),
+        );
+        step(&mut r, &s, 5_000_000);
+        let s = snap(&[("%1", "zsh"), ("%2", "zsh"), ("%3", "zsh")], &[]);
+        let s = reported(s, "%1", ended(100, 105, Some(0)));
+        let s = reported(s, "%2", ended(100, 106, Some(2)));
+        let s = reported(s, "%3", ended(100, 107, None));
+        step(&mut r, &s, 5_001_000);
+        assert_eq!(r.get("%1").copied(), run(RunState::Succeeded, 105_000));
+        assert_eq!(r.get("%2").copied(), run(RunState::Failed, 106_000));
+        assert_eq!(
+            r.get("%3").copied(),
+            run(RunState::Finished, 107_000),
+            "no status sent"
+        );
+        // It stays until the pane is viewed.
+        step(&mut r, &s, 5_002_000);
+        assert_eq!(r.get("%2").copied(), run(RunState::Failed, 106_000));
+        let viewed = snap(&[("%1", "zsh"), ("%2", "zsh"), ("%3", "zsh")], &["%2"]);
+        let viewed = reported(viewed, "%2", ended(100, 106, Some(2)));
+        step(&mut r, &viewed, 5_003_000);
+        assert_eq!(state(&r, "%2"), None);
+    }
+
+    #[test]
+    fn a_command_between_two_looks_is_caught_but_history_is_not() {
+        let mut r = Runs::default();
+        let at = |cmd| reported(snap(&[("%1", "zsh")], &[]), "%1", cmd);
+        step(&mut r, &at(ended(40, 50, Some(1))), 5_000_000);
+        assert_eq!(state(&r, "%1"), None, "it ended before the first look");
+        step(&mut r, &at(ended(40, 50, Some(1))), 5_001_000);
+        assert_eq!(state(&r, "%1"), None, "nothing new");
+        step(&mut r, &at(ended(59, 60, Some(1))), 5_002_000);
+        assert_eq!(r.get("%1").copied(), run(RunState::Failed, 60_000));
+    }
+
+    #[test]
+    fn a_reported_command_that_ends_while_viewed_leaves_nothing() {
+        let mut r = Runs::default();
+        let s = reported(snap(&[("%1", "zsh")], &["%1"]), "%1", running(100));
+        step(&mut r, &s, 5_000_000);
+        let s = reported(
+            snap(&[("%1", "zsh")], &["%1"]),
+            "%1",
+            ended(100, 101, Some(1)),
+        );
+        step(&mut r, &s, 5_001_000);
+        assert_eq!(state(&r, "%1"), None);
     }
 
     /// `snap` with every pane launched by `launched`.

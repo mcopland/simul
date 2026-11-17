@@ -7,11 +7,14 @@ use crate::log;
 use crate::tmux::chain;
 
 /// The hooks set while the daemon's control client is attached, and what each asks.
-/// `LAYOUT_HOOK` comes and goes with the sidebars.
-const HOOKS: [(&str, Poke); 3] = [
+/// `LAYOUT_HOOK` comes and goes with the sidebars. A shell's OSC 133 marks fire the
+/// pane-command hooks, so a command's start and end show at once, not at the next check.
+const HOOKS: [(&str, Poke); 5] = [
     ("pane-focus-in", Poke::Refresh),
     ("pane-focus-out", Poke::Refresh),
     ("client-resized", Poke::Resized),
+    ("pane-command-started", Poke::Refresh),
+    ("pane-command-finished", Poke::Refresh),
 ];
 
 impl Daemon {

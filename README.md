@@ -140,15 +140,27 @@ The sidebar repeats tmux's session name and window list, so while it is shown si
 
 `asking` and `failed` stay until your next prompt, even after you look at the pane.
 
-A pane without an agent gets a symbol while its foreground process isn't a shell at its prompt. Running and finished panes also show the time in that state.
+A pane without an agent gets a symbol while a command runs in it, and after one ends while you aren't looking. Running and finished panes also show the time in that state.
 
-| Symbol | Meaning                                                           |
-| ------ | ----------------------------------------------------------------- |
-| `▶`    | A command is running, such as a build, a script, or a server      |
-| `■`    | It finished while you weren't looking, and you haven't looked yet |
-| `▷`    | An interactive program is open, such as an editor, pager, or ssh  |
+| Symbol | Meaning                                                                  |
+| ------ | ------------------------------------------------------------------------ |
+| `▶`    | A command is running, such as a build, a script, or a server             |
+| `✓`    | It succeeded while you weren't looking, and you haven't looked yet       |
+| `✗`    | It failed while you weren't looking, and you haven't looked yet          |
+| `■`    | It ended while you weren't looking, with an exit status simul can't see |
+| `▷`    | An interactive program is open, such as an editor, pager, or ssh         |
 
-`■` clears when you look at the pane, like `done`; a command that ends while you watch it leaves nothing. simul checks once a second while the sidebar is shown, and every 10 seconds while it is hidden (`hidden_check_secs`), to keep its idle cost low; a command that starts and ends between two checks may not show, and a time can be off by up to the interval. A new pane gets no symbol for its first second, while tmux starts its program. It can't see exit codes, so `■` means ended, not succeeded. A script counts as running when its interpreter differs from the pane's shell, so `./build.sh` (a bash script) shows in a zsh pane, but a bash script in a bash pane reads as idle, as does any shell-named interpreter in a pane started as `sh`. For the same reason, a shell started from another shell, such as `bash` typed at a `zsh` prompt, counts as running. If your shell's startup file `exec`s another shell, set tmux's `default-shell` (or `default-command`) to that shell, or its panes always show `▶`.
+A finish symbol clears when you look at the pane, like `done`. A command that ends while you watch it leaves nothing. A new pane gets no symbol for its first second, while tmux starts its program.
+
+simul learns exit statuses from shell integration: the OSC 133 marks a shell prints around each command. With them, a command shows `✓` or `✗` when it ends, at once, with exact times. Any shell integration that sends an exit status in its OSC 133 marks works. Ghostty's zsh integration does, but only in shells Ghostty starts itself. To get it in tmux panes too, add these lines to `~/.zshrc`:
+
+```zsh
+if [[ -n $GHOSTTY_RESOURCES_DIR ]]; then
+  source "$GHOSTTY_RESOURCES_DIR"/shell-integration/zsh/ghostty-integration
+fi
+```
+
+Without shell integration, simul watches each pane's foreground process, and a finished command shows `■`. It checks once a second while the sidebar is shown, and every 10 seconds while it is hidden (`hidden_check_secs`), to keep its idle cost low. A command that starts and ends between two checks may not show, and a time can be off by up to the interval. A script counts as running when its interpreter differs from the pane's shell, so `./build.sh` (a bash script) shows in a zsh pane, but a bash script in a bash pane reads as idle, as does any shell-named interpreter in a pane started as `sh`. For the same reason, a shell started from another shell, such as `bash` typed at a `zsh` prompt, counts as running. If your shell's startup file `exec`s another shell, set tmux's `default-shell` (or `default-command`) to that shell, or its panes always show `▶`. Shell integration has none of these limits.
 
 Git status markers follow the branch in this order:
 

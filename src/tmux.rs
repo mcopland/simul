@@ -32,6 +32,33 @@ pub struct PaneInfo {
     /// tmux-resurrect brings it back, which keeps pane titles but not pane options.
     pub restored_sidebar: bool,
     pub window_name: String,
+    /// What the pane's shell reported of its commands with OSC 133; `None` until it reports
+    /// one, as a shell without that integration never does.
+    pub shell_command: Option<ShellCommand>,
+}
+
+/// A pane's current or last command, as its shell marked it with OSC 133.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ShellCommand {
+    pub running: bool,
+    /// The last finished command's exit status, if the shell sent one.
+    pub status: Option<i32>,
+    /// Unix seconds the current or last command started.
+    pub started: u64,
+    /// Unix seconds the last command ended; `None` until one has.
+    pub ended: Option<u64>,
+}
+
+impl ShellCommand {
+    /// From `pane_command_running`, `_status`, `_start_time`, and `_end_time`.
+    fn parse(running: &str, status: &str, started: &str, ended: &str) -> Option<ShellCommand> {
+        Some(ShellCommand {
+            running: running == "1",
+            status: status.parse().ok(),
+            started: started.parse().ok()?,
+            ended: ended.parse().ok(),
+        })
+    }
 }
 
 /// A point-in-time view of the tmux server used to reconcile tracked panes.
@@ -50,7 +77,7 @@ pub struct Snapshot {
 /// `PANES_FORMAT` repeats it.
 pub const SIDEBAR_TITLE: &str = "simul-sidebar";
 
-pub const PANES_FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_id}\t#{pane_active}\t#{window_active}\t#{pane_current_command}\t#{pane_current_path}\t#{@simul-sidebar}\t#{window_panes}\t#{@simul-collapsed}\t#{pane_width}\t#{window_width}\t#{window_zoomed_flag}\t#{==:#{pane_title},simul-sidebar}\t#{?pane_start_command,#{pane_start_command},#{?default-command,#{default-command},#{default-shell}}}\t#{window_name}";
+pub const PANES_FORMAT: &str = "#{pane_id}\t#{session_name}\t#{window_index}\t#{window_id}\t#{pane_active}\t#{window_active}\t#{pane_current_command}\t#{pane_current_path}\t#{@simul-sidebar}\t#{window_panes}\t#{@simul-collapsed}\t#{pane_width}\t#{window_width}\t#{window_zoomed_flag}\t#{==:#{pane_title},simul-sidebar}\t#{?pane_start_command,#{pane_start_command},#{?default-command,#{default-command},#{default-shell}}}\t#{pane_command_running}\t#{pane_command_status}\t#{pane_command_start_time}\t#{pane_command_end_time}\t#{window_name}";
 /// Client lines follow the `focus-events` line in `Tmux::snapshot`'s output; the prefix
 /// checks that each one is a client line.
 pub const CLIENTS_FORMAT: &str = "client\t#{client_session}\t#{client_flags}\t#{client_tty}";
@@ -191,7 +218,7 @@ pub fn parse_snapshot(panes: &str, clients: &str, focus_events: bool) -> Snapsho
     let mut seen = HashSet::new();
     for line in panes.lines() {
         // The window name comes last so a tab inside it stays part of the name.
-        let f: Vec<&str> = line.splitn(17, '\t').collect();
+        let f: Vec<&str> = line.splitn(21, '\t').collect();
         let [
             id,
             session,
@@ -209,6 +236,10 @@ pub fn parse_snapshot(panes: &str, clients: &str, focus_events: bool) -> Snapsho
             zoomed,
             titled,
             launched,
+            command_running,
+            command_status,
+            command_started,
+            command_ended,
             window_name,
         ] = f[..]
         else {
@@ -252,6 +283,12 @@ pub fn parse_snapshot(panes: &str, clients: &str, focus_events: bool) -> Snapsho
             window_zoomed: zoomed == "1",
             restored_sidebar: titled == "1" && sidebar != "1",
             window_name: window_name.to_owned(),
+            shell_command: ShellCommand::parse(
+                command_running,
+                command_status,
+                command_started,
+                command_ended,
+            ),
         });
     }
     snap
@@ -322,11 +359,11 @@ pub fn tmux_double_quote(s: &str) -> String {
 mod tests {
     use super::*;
 
-    const PANES: &str = "%1\tmain\t1\t@1\t1\t1\t2.1.307\t/w/a\t\t2\t\t120\t200\t0\t0\t\tapi\n\
-%2\tmain\t1\t@1\t0\t1\tzsh\t/w/a\t\t2\t\t79\t200\t0\t1\t\tapi\n\
-%3\tmain\t2\t@2\t1\t0\tclaude\t/w/b\t\t1\t\t200\t200\t0\t0\t\tweb\n\
-%4\twork\t1\t@3\t1\t1\tclaude\t/w/c\t\t2\t1\t150\t200\t1\t0\t\tmy\ttabbed name\n\
-%5\twork\t1\t@3\t0\t1\tsimul\t/w/c\t1\t2\t1\t49\t200\t1\t1\t\"exec simul sidebar\"\tmy\ttabbed name\n";
+    const PANES: &str = "%1\tmain\t1\t@1\t1\t1\t2.1.307\t/w/a\t\t2\t\t120\t200\t0\t0\t\t0\t\t\t\tapi\n\
+%2\tmain\t1\t@1\t0\t1\tzsh\t/w/a\t\t2\t\t79\t200\t0\t1\t\t0\t\t\t\tapi\n\
+%3\tmain\t2\t@2\t1\t0\tclaude\t/w/b\t\t1\t\t200\t200\t0\t0\t\t0\t\t\t\tweb\n\
+%4\twork\t1\t@3\t1\t1\tclaude\t/w/c\t\t2\t1\t150\t200\t1\t0\t\t0\t\t\t\tmy\ttabbed name\n\
+%5\twork\t1\t@3\t0\t1\tsimul\t/w/c\t1\t2\t1\t49\t200\t1\t1\t\"exec simul sidebar\"\t0\t\t\t\tmy\ttabbed name\n";
 
     #[test]
     fn parses_panes() {
@@ -351,6 +388,7 @@ mod tests {
                 window_zoomed: false,
                 restored_sidebar: false,
                 window_name: "api".into(),
+                shell_command: None,
             }
         );
         assert!(snap.panes[1].restored_sidebar, "titled, untagged");
@@ -365,6 +403,38 @@ mod tests {
         assert!(snap.panes[3].session_collapsed, "a session option");
         assert!(!snap.panes[1].active);
         assert_eq!(snap.panes[3].window_name, "my\ttabbed name");
+    }
+
+    #[test]
+    fn reads_what_the_shell_reported_with_osc_133() {
+        let line = |cmd: &str| {
+            format!("%1\tmain\t1\t@1\t1\t1\tzsh\t/w\t\t1\t\t80\t80\t0\t0\t\t{cmd}\tw\n")
+        };
+        let read = |cmd: &str| parse_snapshot(&line(cmd), "", true).panes[0].shell_command;
+        assert_eq!(read("0\t\t\t"), None, "no command reported yet");
+        assert_eq!(
+            read("1\t\t1700000000\t"),
+            Some(ShellCommand {
+                running: true,
+                status: None,
+                started: 1_700_000_000,
+                ended: None,
+            })
+        );
+        assert_eq!(
+            read("0\t2\t1700000000\t1700000005"),
+            Some(ShellCommand {
+                running: false,
+                status: Some(2),
+                started: 1_700_000_000,
+                ended: Some(1_700_000_005),
+            })
+        );
+        assert_eq!(
+            read("0\t\t1700000000\t1700000005").and_then(|c| c.status),
+            None,
+            "a shell may end a command without a status"
+        );
     }
 
     #[test]
@@ -428,13 +498,13 @@ mod tests {
 
     #[test]
     fn linked_window_is_shown_through_any_session() {
-        let panes = "%1\ta\t1\t@1\t1\t0\tclaude\t/w\t\t1\t\t80\t80\t0\t0\t\tx\n%1\tb\t3\t@1\t1\t1\tclaude\t/w\t\t1\t\t80\t80\t0\t0\t\tx\n%2\ta\t2\t@2\t1\t1\tsh\t/w\t\t1\t\t80\t80\t0\t0\t\ty\n";
+        let panes = "%1\ta\t1\t@1\t1\t0\tclaude\t/w\t\t1\t\t80\t80\t0\t0\t\t0\t\t\t\tx\n%1\tb\t3\t@1\t1\t1\tclaude\t/w\t\t1\t\t80\t80\t0\t0\t\t0\t\t\t\tx\n%2\ta\t2\t@2\t1\t1\tsh\t/w\t\t1\t\t80\t80\t0\t0\t\t0\t\t\t\ty\n";
         assert_eq!(shown(panes, "b\tattached\t/dev/ttys1\n"), set(&["@1"]));
     }
 
     #[test]
     fn linked_windows_are_listed_once() {
-        let panes = "%1\ta\t1\t@1\t1\t0\tclaude\t/w\t\t1\t\t80\t80\t0\t0\t\tx\n%1\tb\t3\t@1\t1\t1\tclaude\t/w\t\t1\t\t80\t80\t0\t0\t\tx\n";
+        let panes = "%1\ta\t1\t@1\t1\t0\tclaude\t/w\t\t1\t\t80\t80\t0\t0\t\t0\t\t\t\tx\n%1\tb\t3\t@1\t1\t1\tclaude\t/w\t\t1\t\t80\t80\t0\t0\t\t0\t\t\t\tx\n";
         let snap = parse_snapshot(panes, "b\tattached,focused\t/dev/ttys1\n", true);
         assert_eq!(snap.panes.len(), 1);
         assert_eq!(snap.viewed, HashSet::from(["%1".to_string()]));
@@ -520,8 +590,8 @@ mod tests {
 
     #[test]
     fn a_window_named_like_a_prefix_stays_a_pane() {
-        let panes = "%1\tclient\t1\t@1\t1\t1\tsh\t/w\t\t1\t\t80\t80\t0\t0\t\tclient\n\
-                     %2\tfocus-events on\t1\t@2\t1\t1\tsh\t/w\t\t1\t\t80\t80\t0\t0\t\tfocus-events on\n";
+        let panes = "%1\tclient\t1\t@1\t1\t1\tsh\t/w\t\t1\t\t80\t80\t0\t0\t\t0\t\t\t\tclient\n\
+                     %2\tfocus-events on\t1\t@2\t1\t1\tsh\t/w\t\t1\t\t80\t80\t0\t0\t\t0\t\t\t\tfocus-events on\n";
         let (split, clients, focus) = split_snapshot(&format!(
             "{panes}focus-events off\nclient\tclient\tattached\t/dev/t1\n"
         ));

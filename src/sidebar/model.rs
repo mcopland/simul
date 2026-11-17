@@ -114,6 +114,9 @@ pub fn run_symbol(run: RunState) -> char {
     match run {
         RunState::Running => '\u{25b6}',
         RunState::Finished => '\u{25a0}',
+        RunState::Succeeded => '\u{2713}',
+        // A failed command reads like a failed agent turn.
+        RunState::Failed => symbol(State::Failed),
         RunState::Interactive => '\u{25b7}',
         // `pane_run` drops these, so none is drawn.
         RunState::Unknown => ' ',
@@ -132,7 +135,7 @@ pub fn mark_symbol(mark: Mark) -> char {
 fn mark_rank(mark: Mark) -> u8 {
     match mark {
         Mark::Agent(s) => rank(s),
-        Mark::Run(RunState::Finished) => 7,
+        Mark::Run(RunState::Finished | RunState::Succeeded | RunState::Failed) => 7,
         Mark::Run(_) => 8,
     }
 }
@@ -140,8 +143,21 @@ fn mark_rank(mark: Mark) -> u8 {
 /// The pane's run when it is one you wait on: running, or finished unseen. These show their
 /// age and count in folded headers.
 fn counted_run(p: &PaneSummary) -> Option<Run> {
-    p.run
-        .filter(|r| matches!(r.state, RunState::Running | RunState::Finished))
+    p.run.filter(|r| {
+        matches!(
+            r.state,
+            RunState::Running | RunState::Finished | RunState::Succeeded | RunState::Failed
+        )
+    })
+}
+
+/// What a folded header counts `run` as. A failed command shares a failed agent turn's
+/// shape, so the two share one count.
+fn run_mark(run: RunState) -> Mark {
+    match run {
+        RunState::Failed => Mark::Agent(State::Failed),
+        _ => Mark::Run(run),
+    }
 }
 
 /// The pane's run, if this build knows how to draw it.
@@ -449,7 +465,7 @@ fn tree_lines(status: &Status, home: &str) -> Vec<Line> {
             let mark = match e {
                 Entry::Agent(r, _) => Mark::Agent(r.state),
                 Entry::Pane(p) => match counted_run(p) {
-                    Some(run) => Mark::Run(run.state),
+                    Some(run) => run_mark(run.state),
                     None => continue,
                 },
             };
@@ -1193,12 +1209,31 @@ mod tests {
                 '\u{2298}', '\u{003f}', '\u{25cf}', '\u{2717}', '\u{25d0}', '\u{25cb}', '\u{2205}'
             ]
         );
-        let runs = [RunState::Running, RunState::Finished, RunState::Interactive].map(run_symbol);
-        assert_eq!(runs, ['\u{25b6}', '\u{25a0}', '\u{25b7}']);
+        let runs = [
+            RunState::Running,
+            RunState::Finished,
+            RunState::Interactive,
+            RunState::Succeeded,
+            RunState::Failed,
+        ]
+        .map(run_symbol);
+        assert_eq!(
+            runs,
+            ['\u{25b6}', '\u{25a0}', '\u{25b7}', '\u{2713}', '\u{2717}']
+        );
+        assert_eq!(
+            run_symbol(RunState::Failed),
+            symbol(State::Failed),
+            "a failed command reads like a failed agent turn"
+        );
         let mut every: Vec<char> = all.into_iter().chain(runs).collect();
         every.sort_unstable();
         every.dedup();
-        assert_eq!(every.len(), 10, "processes never share an agent's shape");
+        assert_eq!(
+            every.len(),
+            11,
+            "processes never share an agent's shape, failure aside"
+        );
     }
 
     #[test]
@@ -1254,6 +1289,38 @@ mod tests {
                 ]
             ),
             "agents first, then finished before running; interactive isn't counted"
+        );
+    }
+
+    #[test]
+    fn a_failed_command_counts_with_failed_agents() {
+        let mut s = status_with_runs();
+        for p in s.windows.iter_mut().flat_map(|w| &mut w.panes) {
+            let state = match p.id.as_str() {
+                "%10" => RunState::Failed,
+                "%11" => RunState::Succeeded,
+                _ => continue,
+            };
+            p.run = Some(Run { state, since_ms: 1 });
+        }
+        for r in &mut s.panes {
+            if r.state == State::Done {
+                r.state = State::Failed;
+            }
+        }
+        let out = all(&collapse(s, &["me"]));
+        assert_eq!(
+            out[0],
+            folded_marks(
+                "me",
+                &[
+                    (Mark::Agent(State::Failed), 2),
+                    (Mark::Agent(State::Working), 1),
+                    (Mark::Agent(State::Idle), 1),
+                    (Mark::Run(RunState::Succeeded), 1),
+                ]
+            ),
+            "one count for every failure"
         );
     }
 

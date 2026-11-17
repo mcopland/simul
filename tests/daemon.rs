@@ -182,6 +182,29 @@ fn plain_pane_processes_are_running_then_finished_until_viewed() {
 }
 
 #[test]
+fn a_shells_osc_133_marks_say_how_a_command_ended() {
+    // The sidebar is hidden, so processes are checked every 10 seconds; only the
+    // pane-command hooks can bring these changes in sooner.
+    let mut h = Harness::new();
+    h.start_daemon();
+    h.wait_run(&h.first_pane(), None);
+    let pane = h.new_pane("sh");
+    h.wait_run(&pane, None);
+    // What a shell with OSC 133 integration prints around a command, after the new pane
+    // has settled.
+    let command = |status: u8| {
+        format!("sleep 1.5; printf '\\033]133;C\\007'; sleep 1; printf '\\033]133;D;{status}\\007'")
+    };
+    h.tmux(&["send-keys", "-t", &pane, &command(1), "Enter"]);
+    h.wait_run(&pane, Some("running"));
+    // The harness has no client, so nothing is viewed and the outcome stays.
+    h.wait_run(&pane, Some("failed"));
+    h.tmux(&["send-keys", "-t", &pane, &command(0), "Enter"]);
+    h.wait_run(&pane, Some("running"));
+    h.wait_run(&pane, Some("succeeded"));
+}
+
+#[test]
 fn recovery_scan_classifies_running_agents() {
     let mut h = Harness::new();
     let blocked = h.fake_claude_pane("approval");

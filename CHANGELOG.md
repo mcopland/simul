@@ -4,6 +4,10 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+### Added
+
+- Plain panes show how a command ended: `✓` for success and `✗` for failure, where the shell reports its commands with OSC 133 shell integration. Such a command shows when it starts and ends, at once, even if it ran for less than a second. The README explains how to turn on Ghostty's zsh integration in tmux panes. Panes without it still show `■`.
+
 ### Changed
 
 - simul requires tmux 3.8 or newer. The plugin shows a message and does nothing on an older tmux, and `simul doctor` fails its tmux check.
