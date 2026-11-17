@@ -6,7 +6,7 @@ Status: early development. See `fixtures/CALIBRATION.md` for verified agent beha
 
 ## Requirements
 
-- tmux 3.3 or newer, with `set -g focus-events on` (without it, simul cannot tell whether you are looking at a pane)
+- tmux 3.8 or newer, with `set -g focus-events on` (without it, simul cannot tell whether you are looking at a pane)
 - `set -g mouse on` in tmux, since the sidebar is driven by clicks
 - macOS, Linux, or WSL
 - `curl`, `tar`, and `sha256sum` or `shasum`, to download and verify the prebuilt binary (macOS and Linux on x86_64 or arm64; WSL uses the Linux build)

@@ -34,7 +34,7 @@ impl Plugin {
                 "#!/bin/sh\n\
                  echo \"$*\" >> '{}'\n\
                  case \"$1\" in\n\
-                 -V) echo 'tmux 3.5a' ;;\n\
+                 -V) cat '{opts}/tmux-version' 2>/dev/null || echo 'tmux 3.8' ;;\n\
                  display-message) [ \"$2\" = -p ] && echo /fake/socket ;;\n\
                  show-option) cat '{opts}'/\"$3\" 2>/dev/null ;;\n\
                  set-option) printf '%s\\n' \"$4\" > '{opts}'/\"$3\" ;;\n\
@@ -327,6 +327,22 @@ fn reports_unwritable_plugin_dir_with_context() {
         last.starts_with("simul install:") && last.contains("bin"),
         "last stderr line should say what failed: {err}"
     );
+}
+
+#[test]
+fn plugin_refuses_tmux_older_than_3_8() {
+    let p = Plugin::new();
+    p.publish("aarch64-apple-darwin", VERSION, None);
+    p.set_option("tmux-version", "tmux 3.7c");
+
+    let log = p.load_plugin();
+
+    assert_eq!(
+        messages(&log),
+        ["display-message simul: needs tmux 3.8 or newer (found tmux 3.7c)"],
+        "{log}"
+    );
+    assert!(!p.bin().exists(), "nothing installed on an old tmux");
 }
 
 #[test]

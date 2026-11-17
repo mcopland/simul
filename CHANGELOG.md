@@ -4,6 +4,10 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+### Changed
+
+- simul requires tmux 3.8 or newer. The plugin shows a message and does nothing on an older tmux, and `simul doctor` fails its tmux check.
+
 ## [0.11.6] - 2026-11-16
 
 ### Changed

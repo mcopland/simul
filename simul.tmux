@@ -21,7 +21,7 @@ sq() {
 	printf "'%s'" "${1//\'/$q}"
 }
 
-# Accepts "tmux 3.3a", "tmux next-3.4"; unversioned builds ("tmux master") pass.
+# Accepts "tmux 3.8", "tmux 3.8a", "tmux next-3.9"; unversioned builds ("tmux master") pass.
 tmux_version_ok() {
 	local version major minor
 	version=$(tmux -V | awk '{print $2}' | sed 's/^[^0-9]*//')
@@ -29,12 +29,12 @@ tmux_version_ok() {
 	major=${version%%.*}
 	minor=${version#*.}
 	minor=${minor%%[!0-9]*}
-	[ "$major" -gt 3 ] || { [ "$major" -eq 3 ] && [ "${minor:-0}" -ge 3 ]; }
+	[ "$major" -gt 3 ] || { [ "$major" -eq 3 ] && [ "${minor:-0}" -ge 8 ]; }
 }
 
 main() {
 	if ! tmux_version_ok; then
-		tmux display-message "simul: needs tmux 3.3 or newer (found $(tmux -V))"
+		tmux display-message "simul: needs tmux 3.8 or newer (found $(tmux -V))"
 		return 0
 	fi
 	local bin socket override install_err=""

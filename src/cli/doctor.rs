@@ -11,7 +11,7 @@ use crate::paths::{self, env_var};
 use crate::protocol::{Ack, Identity, Request, Status};
 use crate::tmux::{self, Tmux};
 
-pub const MIN_TMUX: (u32, u32) = (3, 3);
+pub const MIN_TMUX: (u32, u32) = (3, 8);
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Check {
@@ -461,8 +461,10 @@ mod tests {
     #[test]
     fn version_gate() {
         assert!(check_version("tmux 3.8\n").ok);
-        assert!(check_version("tmux 3.3a").ok);
-        assert!(!check_version("tmux 3.2a").ok);
+        assert!(check_version("tmux next-3.9").ok);
+        assert!(check_version("tmux 4.0").ok);
+        assert!(!check_version("tmux 3.7c").ok);
+        assert!(!check_version("tmux 3.3a").ok);
         assert!(check_version("tmux master").ok);
     }
 
