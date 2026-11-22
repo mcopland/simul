@@ -2,17 +2,32 @@
 # Measures what shown sidebars cost on an isolated tmux server: 3 sessions with 13 windows,
 # one attached client that switches windows every 10 seconds, and one Claude pane that sends
 # a tool hook every 0.25 seconds. Sessions s1 and s2 sit in a git repo, s3 outside one.
-# Usage: bench-sidebar.sh <simul-bin> [secs] [label]
+# Usage: bench-sidebar.sh [-i] <simul-bin> [secs] [label]
+# -i measures idle: the Claude pane starts its session and then sends no more hooks, and the
+# client stays on one window.
 # Prints one tab-separated row: label, sidebars, sidebar/daemon/tmux/total CPU seconds over
 # the run, the CPU seconds of the daemon's child processes (tmux queries, git), and the
 # sidebars' summed memory in MB: physical footprint where macOS's `footprint` exists, else
 # RSS, which counts the shared binary once per sidebar. The children column covers the
 # daemon's whole life, from its start to SIGTERM, as it logs it at exit; the rest cover the
-# run alone. Hook processes and the shims tmux starts are not counted.
+# run alone. Two more columns give the CPU seconds of the tool hook processes, over the
+# hook loop's whole life, and how many hooks that loop sent. The shims tmux starts are not
+# counted.
 
 set -euo pipefail
 
-usage="usage: bench-sidebar.sh <simul-bin> [secs] [label]"
+usage="usage: bench-sidebar.sh [-i] <simul-bin> [secs] [label]"
+idle=false
+while getopts "i" opt; do
+	case "$opt" in
+	i) idle=true ;;
+	*)
+		echo "$usage" >&2
+		exit 1
+		;;
+	esac
+done
+shift $((OPTIND - 1))
 bin=${1:?$usage}
 secs=${2:-120}
 label=${3:-$bin}
@@ -138,14 +153,30 @@ hook() {
 		echo "bench-sidebar: hook $1 failed" >&2
 }
 hook SessionStart
-hook UserPromptSubmit
-while [ ! -e "$dir/stop-hooks" ]; do
-	hook PreToolUse
-	sleep 0.25
-	hook PostToolUse
-	sleep 0.25
-done &
-hooks_pid=$!
+if ! $idle; then
+	hook UserPromptSubmit
+	(
+		calls=0
+		while [ ! -e "$dir/stop-hooks" ]; do
+			hook PreToolUse
+			sleep 0.25
+			hook PostToolUse
+			sleep 0.25
+			calls=$((calls + 2))
+		done
+		# The second line of `times` is the CPU of this subshell's children: the hooks, plus
+		# the sleeps, which cost next to nothing. Not piped: a pipeline would run `times` in a
+		# fresh subshell with no children.
+		times >"$dir/times"
+		awk -v n="$calls" '
+			NR == 2 {
+				t = 0
+				for (i = 1; i <= 2; i++) { split($i, f, /[ms]/); t += f[1] * 60 + f[2] }
+				printf "%.2f\t%d\n", t, n
+			}' "$dir/times" >"$dir/hook-cpu"
+	) &
+	hooks_pid=$!
+fi
 sleep 5
 
 server_pid=$(t display-message -p '#{pid}')
@@ -179,7 +210,7 @@ while [ "$elapsed" -lt "$secs" ]; do
 	sleep "$step"
 	elapsed=$((elapsed + step))
 	i=$((i + 1))
-	t select-window -t "s1:$((i % 4))"
+	$idle || t select-window -t "s1:$((i % 4))"
 done
 
 end_sidebars=$(sidebar_pids)
@@ -207,6 +238,8 @@ mem() {
 mem_mb=$(mem "$end_sidebars")
 
 stop_hooks
+hook_cpu="0.00	0"
+[ -f "$dir/hook-cpu" ] && hook_cpu=$(cat "$dir/hook-cpu")
 # The daemon logs its own and its children's CPU as it exits.
 kill "$daemon_pid"
 wait "$daemon_pid" || true
@@ -217,8 +250,8 @@ children=$(awk '/daemon cpu: own / { v = $NF } END { sub(/s$/, "", v); print v }
 	exit 1
 }
 
-awk -v l="$label" -v c="$count" -v s0="$sidebar0" -v s1="$sidebar1" -v d0="$daemon0" \
+awk -v l="$label" -v c="$count" -v h="$hook_cpu" -v s0="$sidebar0" -v s1="$sidebar1" -v d0="$daemon0" \
 	-v d1="$daemon1" -v t0="$server0" -v t1="$server1" -v k="$children" -v r="$mem_mb" 'BEGIN {
 	s = s1 - s0; d = d1 - d0; t = t1 - t0
-	printf "%s\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%s\n", l, c, s, d, t, s + d + t, k, r
+	printf "%s\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%s\t%s\n", l, c, s, d, t, s + d + t, k, r, h
 }'
