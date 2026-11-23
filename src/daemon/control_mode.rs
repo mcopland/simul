@@ -1,10 +1,12 @@
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Child;
 use tokio::sync::mpsc;
 
 use super::Cmd;
@@ -172,9 +174,9 @@ pub fn triggers_reconcile(name: &str) -> bool {
 ///
 /// The control client attaches to one session, and tmux detaches it when that session is
 /// destroyed, so EOF alone does not mean the server is gone.
-pub async fn run(tmux: Tmux, tx: mpsc::Sender<Cmd>) {
+pub async fn run(tmux: Tmux, tx: mpsc::Sender<Cmd>, slot: ControlChild) {
     loop {
-        if let Err(e) = attach_once(&tmux, &tx).await {
+        if let Err(e) = attach_once(&tmux, &tx, &slot).await {
             log!("control mode: {e:#}");
         }
         if tx.is_closed() || tmux.run_async(&["list-sessions"]).await.is_err() {
@@ -201,7 +203,7 @@ fn attach_args(socket: &Path) -> Vec<OsString> {
     args
 }
 
-async fn attach_once(tmux: &Tmux, tx: &mpsc::Sender<Cmd>) -> Result<()> {
+async fn attach_once(tmux: &Tmux, tx: &mpsc::Sender<Cmd>, slot: &ControlChild) -> Result<()> {
     let mut child = tokio::process::Command::new("tmux")
         .args(attach_args(tmux.socket()))
         .stdin(Stdio::piped())
@@ -220,15 +222,17 @@ async fn attach_once(tmux: &Tmux, tx: &mpsc::Sender<Cmd>) -> Result<()> {
         .await
         .context("failed to subscribe tmux control mode to pane changes")?;
     let pid = child.id().context("tmux control mode exited at once")?;
-    // Hooks reach the daemon through this client by name, and a new attach has a new name.
-    let name = find_client(tmux, pid).await?;
-    if tx.send(Cmd::ControlClient { name, pid }).await.is_err() {
-        return Ok(());
-    }
     let stdout = child
         .stdout
         .take()
         .context("tmux control mode has no stdout")?;
+    hold(slot, child);
+    let _held = Held(slot);
+    // Hooks reach the daemon through this client by name, and a new attach has a new name.
+    let name = find_client(tmux, pid).await?;
+    if tx.send(Cmd::ControlClient(name)).await.is_err() {
+        return Ok(());
+    }
     let mut lines = BufReader::new(stdout).lines();
     let mut parser = Parser::default();
     while let Some(line) = lines
@@ -267,40 +271,54 @@ async fn attach_once(tmux: &Tmux, tx: &mpsc::Sender<Cmd>) -> Result<()> {
     Ok(())
 }
 
-/// Kills and reaps the control client `pid` before the daemon `exec`s itself: the new image
-/// knows nothing of the old one's children, so the client would stay a zombie for good.
-/// Only acts on a child of this process that has not been reaped, so a pid the system has
-/// since reused for someone else's process is left alone.
-pub fn reap(pid: u32) -> std::io::Result<()> {
+/// The running control client, shared by the task that reads it and the daemon, which must
+/// reap it before it `exec`s itself.
+pub type ControlChild = Arc<Mutex<Option<Child>>>;
+
+fn lock(slot: &ControlChild) -> MutexGuard<'_, Option<Child>> {
+    // The guarded value is a plain `Option`, whole whatever a panicking holder did.
+    slot.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Puts `child` in `slot` as the running control client.
+fn hold(slot: &ControlChild, child: Child) {
+    *lock(slot) = Some(child);
+}
+
+/// Empties `slot` when the client it holds is done with, so that dropping it lets tokio kill
+/// and reap it as usual.
+struct Held<'a>(&'a ControlChild);
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        drop(lock(self.0).take());
+    }
+}
+
+/// Kills and reaps the control client before the daemon `exec`s itself: the new image knows
+/// nothing of the old one's children, so the client would stay a zombie for good. Taking it
+/// from `slot` means nothing else can signal its pid once it is reaped and free for reuse.
+pub fn reap(slot: &ControlChild) -> std::io::Result<()> {
+    let Some(mut child) = lock(slot).take() else {
+        return Ok(());
+    };
+    // `None` once tokio has reaped it; dropping it then signals nothing.
+    let Some(pid) = child.id() else {
+        return Ok(());
+    };
+    child.start_kill()?;
     let pid = libc::pid_t::try_from(pid)
         .map_err(|_| std::io::Error::other(format!("control client pid {pid} out of range")))?;
     let mut status = 0;
-    // SAFETY: waitpid with WNOHANG only reads this process's own children and writes the
-    // exit status into `status`, a valid local.
-    match unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } {
-        // Still running: ours, and not yet reaped.
-        0 => {}
-        // It had exited and is now reaped.
-        p if p == pid => return Ok(()),
-        _ => {
-            let e = std::io::Error::last_os_error();
-            // Not a child of ours, or reaped already (tokio does when it sees the exit).
-            return if e.raw_os_error() == Some(libc::ECHILD) {
-                Ok(())
-            } else {
-                Err(e)
-            };
-        }
-    }
-    // SAFETY: `pid` is a live, unreaped child of this process (checked above, and nothing else
-    // on the daemon's one thread can reap it meanwhile), so the signal reaches that child.
-    if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: as above; SIGKILL guarantees the child exits, so this blocking wait returns.
+    // SAFETY: `pid` is this process's child, which tokio has not reaped (`id` was `Some`), and
+    // nothing else on the daemon's one thread can reap it meanwhile. It was just sent
+    // SIGKILL, so this blocking wait returns; it writes only into `status`, a valid local.
     if unsafe { libc::waitpid(pid, &mut status, 0) } != pid {
         return Err(std::io::Error::last_os_error());
     }
+    // Dropped, `child` would signal the reaped pid, which may already be someone else's. The
+    // daemon is about to `exec`; if that fails, this leaks one small struct per attempt.
+    std::mem::forget(child);
     Ok(())
 }
 
@@ -397,25 +415,27 @@ mod tests {
         assert!(!triggers_reconcile("%output"));
     }
 
-    #[test]
-    fn reap_kills_and_collects_a_running_child() {
-        let child = std::process::Command::new("sleep")
+    #[tokio::test]
+    async fn reap_kills_and_collects_the_running_client() {
+        let child = tokio::process::Command::new("sleep")
             .arg("60")
+            .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let pid = child.id();
-        reap(pid).unwrap();
-        // Gone, and already reaped: a second reap finds no child.
-        assert!(!crate::claude_sessions::pid_alive(pid as i32));
-        reap(pid).unwrap();
-        // `child` is not waited on again; dropping it does not reap.
-        drop(child);
+        let pid = child.id().unwrap();
+        let slot = ControlChild::default();
+        hold(&slot, child);
+        reap(&slot).unwrap();
+        assert!(
+            !crate::claude_sessions::pid_alive(pid as i32),
+            "killed and reaped"
+        );
+        assert!(slot.lock().unwrap().is_none(), "taken from the slot");
     }
 
     #[test]
-    fn reap_leaves_processes_that_are_not_its_children() {
-        // pid 1 is launchd or init: never a child, so ECHILD, and no signal is sent.
-        reap(1).unwrap();
+    fn reap_without_a_client_does_nothing() {
+        reap(&ControlChild::default()).unwrap();
     }
 
     #[test]

@@ -345,10 +345,8 @@ impl Daemon {
             Next::Restart(version) => {
                 log!("restarting into {version} as {}", self.opts.exe.display());
                 // The new image attaches a client of its own; a failed exec reattaches too.
-                if let Some(pid) = self.control_pid.take()
-                    && let Err(e) = super::control_mode::reap(pid)
-                {
-                    log!("failed to reap control client {pid} before restarting: {e}");
+                if let Err(e) = super::control_mode::reap(&self.control_child) {
+                    log!("failed to reap the control client before restarting: {e}");
                 }
                 let e = exec(&self.opts.exe, &version);
                 log!("{e:#}");

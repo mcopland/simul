@@ -52,10 +52,7 @@ pub enum Cmd {
     Subscribe(oneshot::Sender<(Status, broadcast::Receiver<Status>)>),
     Refresh,
     /// The control client attached under this name; hooks reach the daemon through it.
-    ControlClient {
-        name: String,
-        pid: u32,
-    },
+    ControlClient(String),
     /// A shell marked a command's start or end with OSC 133.
     ShellCommand,
     /// tmux reported a change to a pane's command or directory, a zoom, or a client.
@@ -132,7 +129,7 @@ struct Daemon {
     /// the current one. Empty until it first attaches.
     control_clients: Vec<String>,
     /// The current control client's process, reaped before an in-place restart.
-    control_pid: Option<u32>,
+    control_child: control_mode::ControlChild,
     /// The control client has no pane subscription, so each tick looks at panes itself.
     poll_panes: bool,
     tx: mpsc::Sender<Cmd>,
@@ -162,7 +159,12 @@ pub async fn run(opts: Options) -> Result<()> {
     );
     let (tx, mut rx) = mpsc::channel(256);
     let accept = tokio::spawn(server::accept(listener, tx.clone()));
-    tokio::spawn(control_mode::run(opts.tmux.clone(), tx.clone()));
+    let control_child = control_mode::ControlChild::default();
+    tokio::spawn(control_mode::run(
+        opts.tmux.clone(),
+        tx.clone(),
+        control_child.clone(),
+    ));
     tokio::spawn(ticker(tx.clone()));
     handle_signals(&tx);
     let plugin = update::plugin_dir(&opts.exe);
@@ -189,7 +191,7 @@ pub async fn run(opts: Options) -> Result<()> {
         windows: Vec::new(),
         recovered: false,
         control_clients: Vec::new(),
-        control_pid: None,
+        control_child,
         poll_panes: false,
         tx,
         updates,
@@ -361,9 +363,8 @@ impl Daemon {
             // hidden check, and that check still finds a finish by its end mark.
             Cmd::ShellCommand | Cmd::PanesChanged => self.on_panes_changed(),
             Cmd::SubscriptionFailed => self.poll_panes = true,
-            Cmd::ControlClient { name, pid } => {
+            Cmd::ControlClient(name) => {
                 self.control_clients.push(name);
-                self.control_pid = Some(pid);
                 // A new client subscribes afresh; it says so if that fails too.
                 self.poll_panes = false;
                 self.install_tmux_hooks().await;
