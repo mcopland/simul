@@ -402,6 +402,9 @@ impl Daemon {
             Cmd::Git { cwd, status } => {
                 let branch = status.as_ref().and_then(|s| s.branch.clone());
                 let changed = self.git.finish(cwd.clone(), status, Instant::now());
+                if self.git.take_again(&cwd) {
+                    self.fetch_git(cwd.clone());
+                }
                 if self.store.set_branch(&cwd, branch) || changed {
                     self.publish();
                 }

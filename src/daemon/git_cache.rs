@@ -18,6 +18,9 @@ pub struct GitCache {
     statuses: HashMap<String, (Instant, Option<GitStatus>)>,
     /// Directories being read.
     inflight: HashSet<String>,
+    /// Directories asked for while being read: the read in flight may predate the change
+    /// that asked, so they are read once more when it lands.
+    again: HashSet<String>,
 }
 
 impl GitCache {
@@ -61,9 +64,22 @@ impl GitCache {
             .is_none_or(|(at, _)| now.saturating_duration_since(*at) >= GIT_MIN_GAP)
     }
 
-    /// Marks `cwd` as being read; false if it is empty or already being read.
+    /// Marks `cwd` as being read; false if it is empty or already being read, in which case
+    /// another read is owed once this one finishes (see `take_again`).
     pub fn start(&mut self, cwd: &str) -> bool {
-        !cwd.is_empty() && self.inflight.insert(cwd.to_owned())
+        if cwd.is_empty() {
+            return false;
+        }
+        let started = self.inflight.insert(cwd.to_owned());
+        if !started {
+            self.again.insert(cwd.to_owned());
+        }
+        started
+    }
+
+    /// Whether a read of `cwd` was asked for while one was in flight; true once.
+    pub fn take_again(&mut self, cwd: &str) -> bool {
+        self.again.remove(cwd)
     }
 
     /// Records a finished read; true if the status differs from the last one known.
@@ -195,6 +211,20 @@ mod tests {
         assert!(!c.start("/a"), "already being read");
         c.finish("/a".into(), None, Instant::now());
         assert!(c.start("/a"), "read again once finished");
+    }
+
+    #[test]
+    fn a_read_asked_for_mid_read_runs_after_it() {
+        let mut c = GitCache::default();
+        let t0 = Instant::now();
+        assert!(c.start("/a"));
+        assert!(!c.start("/a"), "already being read");
+        c.finish("/a".into(), on("main"), t0);
+        assert!(c.take_again("/a"), "the refused read is owed");
+        assert!(!c.take_again("/a"), "owed once");
+        assert!(c.start("/b"));
+        c.finish("/b".into(), on("main"), t0);
+        assert!(!c.take_again("/b"), "nothing was refused");
     }
 
     #[test]
