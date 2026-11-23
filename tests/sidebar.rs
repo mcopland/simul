@@ -436,6 +436,33 @@ fn hidden_sidebars_read_no_git_status_for_plain_panes() {
 }
 
 #[test]
+fn renumbered_windows_show_their_new_index() {
+    let mut h = Harness::new();
+    let dir = h.dir.path().to_str().unwrap().to_owned();
+    h.tmux(&[
+        "new-window",
+        "-d",
+        "-t",
+        "t:5",
+        "-n",
+        "far",
+        "-c",
+        &dir,
+        "sh",
+    ]);
+    h.start_daemon();
+    toggle(&h);
+    let (pane, _, _) = sidebars(&h).remove(0);
+    let screen = || h.tmux(&["capture-pane", "-p", "-t", &pane]);
+    eventually("window listed at 5", || screen().contains(" 5:far"));
+    // Let the toggle's own reconciles finish.
+    std::thread::sleep(Duration::from_secs(2));
+    // Renumbering keeps the windows' order and sends no tmux notification.
+    h.tmux(&["move-window", "-r", "-t", "t"]);
+    eventually("window listed at 1", || screen().contains(" 1:far"));
+}
+
+#[test]
 fn lists_windows_without_agents() {
     let mut h = Harness::new();
     let cwd = h.dir.path().to_str().unwrap().to_owned();

@@ -98,11 +98,12 @@ pub const SUBSCRIPTION: &str = "simul-panes";
 
 /// What tmux checks once a second for simul, reporting each change with
 /// `%subscription-changed`: what no notification covers. That is each pane's foreground
-/// command and directory, zoom in windows of sessions this client isn't attached to, and
-/// which clients show which session with what focus. The `S:` loop reaches every session,
-/// though the subscription is the attached session's.
+/// command and directory, window indexes (renumbering sends nothing), zoom in windows of
+/// sessions this client isn't attached to, and which clients show which session with what
+/// focus. The `S:` loop reaches every session, though the subscription is the attached
+/// session's.
 pub const PANES_SUBSCRIPTION: &str = "#{L:#{client_name}=#{client_session}=#{client_flags};}|\
-#{S:#{W:#{window_id}=#{window_zoomed_flag}:#{P:#{pane_id}=#{pane_current_command}=#{pane_current_path};}}}";
+#{S:#{W:#{window_id}=#{window_index}=#{window_zoomed_flag}:#{P:#{pane_id}=#{pane_current_command}=#{pane_current_path};}}}";
 
 /// The control-mode command that subscribes this client to `PANES_SUBSCRIPTION`.
 pub fn subscribe_command() -> String {
@@ -411,6 +412,7 @@ mod tests {
             "#{pane_current_command}",
             "#{pane_current_path}",
             "#{window_zoomed_flag}",
+            "#{window_index}",
             "#{client_flags}",
         ] {
             assert!(PANES_SUBSCRIPTION.contains(field), "{field}");
