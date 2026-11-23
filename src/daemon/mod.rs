@@ -60,6 +60,8 @@ pub enum Cmd {
     ShellCommand,
     /// tmux reported a change to a pane's command or directory, a zoom, or a client.
     PanesChanged,
+    /// tmux refused the subscription behind `PanesChanged`, so panes are polled instead.
+    SubscriptionFailed,
     Toggle(oneshot::Sender<bool>),
     Resized,
     Collapse {
@@ -131,6 +133,8 @@ struct Daemon {
     control_clients: Vec<String>,
     /// The current control client's process, reaped before an in-place restart.
     control_pid: Option<u32>,
+    /// The control client has no pane subscription, so each tick looks at panes itself.
+    poll_panes: bool,
     tx: mpsc::Sender<Cmd>,
     updates: broadcast::Sender<Status>,
     /// The status last sent to subscribers; one a sidebar would draw the same isn't sent.
@@ -186,6 +190,7 @@ pub async fn run(opts: Options) -> Result<()> {
         recovered: false,
         control_clients: Vec::new(),
         control_pid: None,
+        poll_panes: false,
         tx,
         updates,
         published: None,
@@ -355,9 +360,12 @@ impl Daemon {
             // Runs show only in sidebars. While they are hidden, a change waits for the next
             // hidden check, and that check still finds a finish by its end mark.
             Cmd::ShellCommand | Cmd::PanesChanged => self.on_panes_changed(),
+            Cmd::SubscriptionFailed => self.poll_panes = true,
             Cmd::ControlClient { name, pid } => {
                 self.control_clients.push(name);
                 self.control_pid = Some(pid);
+                // A new client subscribes afresh; it says so if that fails too.
+                self.poll_panes = false;
                 self.install_tmux_hooks().await;
                 if self.sidebar.on {
                     self.set_layout_hook(true).await;
@@ -377,7 +385,7 @@ impl Daemon {
             Cmd::Tick => {
                 self.read_live().await;
                 self.scrape().await;
-                if self.runs.settle_at().is_some_and(|at| now_ms() >= at) {
+                if self.poll_panes || self.runs.settle_at().is_some_and(|at| now_ms() >= at) {
                     self.on_panes_changed();
                 }
                 // While the sidebar is shown, tmux's subscription reports the pane changes it

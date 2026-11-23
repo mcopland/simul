@@ -20,6 +20,8 @@ pub enum Line {
         name: String,
         args: Vec<String>,
     },
+    /// tmux refused a command this client sent, with the error's output lines.
+    Rejected(Vec<String>),
     Exit,
 }
 
@@ -28,19 +30,39 @@ pub enum Line {
 #[derive(Debug, Default)]
 pub struct Parser {
     in_reply: bool,
+    /// The output of the reply being read, when it answers this client's own command.
+    ours: Option<Vec<String>>,
+}
+
+/// Whether a `%begin`/`%end`/`%error` line's flags say the command came from this client.
+fn from_this_client(line: &str) -> bool {
+    line.split(' ').nth(3) == Some("1")
 }
 
 impl Parser {
     pub fn feed(&mut self, line: &str) -> Line {
         if line.starts_with("%begin") {
             self.in_reply = true;
+            self.ours = from_this_client(line).then(Vec::new);
             return Line::Reply;
         }
         if line.starts_with("%end") || line.starts_with("%error") {
             self.in_reply = false;
+            let ours = self.ours.take();
+            return match ours {
+                Some(output) if line.starts_with("%error") && from_this_client(line) => {
+                    Line::Rejected(output)
+                }
+                _ => Line::Reply,
+            };
+        }
+        if self.in_reply {
+            if let Some(output) = &mut self.ours {
+                output.push(line.to_owned());
+            }
             return Line::Reply;
         }
-        if self.in_reply || !line.starts_with('%') {
+        if !line.starts_with('%') {
             return Line::Reply;
         }
         let mut words = line.split(' ');
@@ -227,6 +249,17 @@ async fn attach_once(tmux: &Tmux, tx: &mpsc::Sender<Cmd>) -> Result<()> {
                     return Ok(());
                 }
             }
+            Line::Rejected(output) => {
+                // The only command this client sends is the subscription.
+                log!(
+                    "tmux rejected simul's pane subscription ({}); checking panes every \
+                     second instead",
+                    output.join("; ")
+                );
+                if tx.send(Cmd::SubscriptionFailed).await.is_err() {
+                    return Ok(());
+                }
+            }
             Line::Exit => break,
             Line::Reply => {}
         }
@@ -383,6 +416,23 @@ mod tests {
     fn reap_leaves_processes_that_are_not_its_children() {
         // pid 1 is launchd or init: never a child, so ECHILD, and no signal is sent.
         reap(1).unwrap();
+    }
+
+    #[test]
+    fn a_rejected_command_of_ours_reports_its_error() {
+        let mut p = Parser::default();
+        assert_eq!(p.feed("%begin 1 7 1"), Line::Reply);
+        assert_eq!(p.feed("unknown format: #{L:"), Line::Reply);
+        assert_eq!(
+            p.feed("%error 1 7 1"),
+            Line::Rejected(vec!["unknown format: #{L:".into()])
+        );
+        // Another client's command, as the flags say, is not ours to report.
+        assert_eq!(p.feed("%begin 2 8 0"), Line::Reply);
+        assert_eq!(p.feed("no such session"), Line::Reply);
+        assert_eq!(p.feed("%error 2 8 0"), Line::Reply);
+        assert_eq!(p.feed("%begin 3 9 1"), Line::Reply);
+        assert_eq!(p.feed("%end 3 9 1"), Line::Reply);
     }
 
     #[test]
