@@ -35,6 +35,12 @@ impl Gate {
         self.last.insert(key, now);
         true
     }
+
+    /// Forgets panes `live` rejects. tmux never reuses a pane id, so a closed pane's entries
+    /// would only pile up.
+    pub fn retain_panes(&mut self, live: impl Fn(&str) -> bool) {
+        self.last.retain(|(pane, _), _| live(pane));
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -318,5 +324,18 @@ mod tests {
         assert!(g.admit(&t("%1", State::Done), false, 9_999, 10_000));
         assert!(g.admit(&t("%2", State::Blocked), false, 9_999, 10_000));
         assert!(g.admit(&t("%1", State::Blocked), false, 10_000, 10_000));
+    }
+
+    #[test]
+    fn closed_panes_are_forgotten() {
+        let mut g = Gate::default();
+        assert!(g.admit(&t("%1", State::Blocked), false, 0, 10_000));
+        assert!(g.admit(&t("%2", State::Blocked), false, 0, 10_000));
+        g.retain_panes(|pane| pane == "%1");
+        assert!(!g.admit(&t("%1", State::Blocked), false, 1, 10_000), "kept");
+        assert!(
+            g.admit(&t("%2", State::Blocked), false, 1, 10_000),
+            "forgotten"
+        );
     }
 }

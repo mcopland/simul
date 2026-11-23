@@ -620,6 +620,8 @@ impl Daemon {
         // for a plain pane, or a window that has one for a window that needs one.
         let turned_on = self.adopt_restored_sidebars(&mut snap).await && !self.sidebar.on;
         let transitions = self.store.reconcile(&snap, now);
+        self.notify_gate
+            .retain_panes(|pane| snap.panes.iter().any(|p| p.id == pane));
         self.windows = tmux::windows(&snap);
         self.sidebar.collapsed = snap
             .panes
