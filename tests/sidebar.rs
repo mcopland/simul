@@ -313,7 +313,8 @@ fn a_shown_sidebar_starts_no_tmux_snapshots_while_idle() {
 
 #[test]
 fn pane_rows_show_git_status_or_a_short_path() {
-    let mut h = Harness::new();
+    // Edits from outside tmux show only at the fallback read, which this config makes quick.
+    let mut h = Harness::with_config("blocked_threshold_ms = 100\n[panes]\ngit_refresh_secs = 1\n");
     let repo = h.dir.path().join("repo");
     std::fs::create_dir_all(repo.join("sub")).unwrap();
     // Without `-c`, tmux starts the pane in this test process's directory, not the session's.
@@ -342,7 +343,7 @@ fn pane_rows_show_git_status_or_a_short_path() {
         row().is_some_and(|r| r.ends_with("/r/sub"))
     });
     git_repo(&repo, "trunk");
-    // The status is re-read every 5 s.
+    // The status is re-read every `git_refresh_secs`.
     let slow = Duration::from_secs(10);
     assert!(
         poll(slow, || row().as_deref() == Some("trunk")),
@@ -352,6 +353,42 @@ fn pane_rows_show_git_status_or_a_short_path() {
     std::fs::write(repo.join("new.txt"), "x").unwrap();
     assert!(
         poll(slow, || row().as_deref() == Some("trunk ?")),
+        "{:?}",
+        row()
+    );
+}
+
+#[test]
+fn a_command_ending_in_a_pane_rereads_its_git_status() {
+    let mut h = Harness::new();
+    let repo = h.dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git_repo(&repo, "trunk");
+    let dir = repo.to_str().unwrap().to_owned();
+    let plain = h.tmux(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "t:",
+        "-c",
+        &dir,
+        "sh",
+    ]);
+    h.tmux(&["rename-window", "-t", &plain, "plain"]);
+    h.start_daemon();
+    toggle(&h);
+    let (pane, _, _) = sidebars(&h).remove(0);
+    let row = || line_under(&h.tmux(&["capture-pane", "-p", "-t", &pane]), " 1:plain");
+    eventually("status shown", || row().as_deref() == Some("trunk"));
+    // Runs long enough for tmux to see it, then ends well before the 60 s fallback.
+    h.tmux(&["send-keys", "-t", &plain, "touch new.txt; sleep 2", "Enter"]);
+    assert!(
+        // Unviewed, the row also marks the finished command.
+        poll(Duration::from_secs(8), || row()
+            .is_some_and(|r| r.contains("trunk ?"))),
         "{:?}",
         row()
     );

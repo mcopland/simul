@@ -101,13 +101,14 @@ impl Runs {
     /// Reads each plain pane's foreground command from `snap`, skipping sidebars and panes
     /// `is_agent` claims. A process that ends while its pane isn't viewed stays finished until
     /// it is. Where the shell reports its commands with OSC 133, that report decides.
+    /// Returns the panes where a command ended since the last update.
     pub fn update(
         &mut self,
         snap: &Snapshot,
         is_agent: impl Fn(&PaneInfo) -> bool,
         interactive: &[String],
         now: u64,
-    ) {
+    ) -> Vec<String> {
         let mut next = HashMap::new();
         let mut first_seen = HashMap::new();
         let mut last_finish = HashMap::new();
@@ -154,9 +155,29 @@ impl Runs {
             };
             next.insert(p.id.clone(), Run { state, since_ms });
         }
+        let busy = |r: Option<&Run>| {
+            r.is_some_and(|r| matches!(r.state, RunState::Running | RunState::Interactive))
+        };
+        let mut ended: Vec<String> = self
+            .by_pane
+            .iter()
+            .filter(|(id, r)| {
+                busy(Some(r)) && last_finish.contains_key(*id) && !busy(next.get(*id))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        // A command shorter than a check shows only as a new finish mark.
+        for (id, finish) in &last_finish {
+            let before = self.last_finish.get(id);
+            if finish.is_some() && before.is_some_and(|b| b != finish) && !ended.contains(id) {
+                ended.push(id.clone());
+            }
+        }
+        ended.sort();
         self.by_pane = next;
         self.first_seen = Some(first_seen);
         self.last_finish = last_finish;
+        ended
     }
 }
 
@@ -242,6 +263,44 @@ mod tests {
             viewed: viewed.iter().map(|&v| v.to_owned()).collect::<HashSet<_>>(),
             ..Snapshot::default()
         }
+    }
+
+    #[test]
+    fn update_reports_commands_that_ended() {
+        let mut runs = Runs::default();
+        let busy = |cmd: &str| snap(&[("%1", "sh"), ("%2", cmd)], &["%1", "%2"]);
+        assert!(
+            runs.update(&busy("sh"), |_| false, &interactive(), 0)
+                .is_empty()
+        );
+        let ended = runs.update(&busy("make"), |_| false, &interactive(), 5_000);
+        assert!(ended.is_empty(), "started, not ended: {ended:?}");
+        let ended = runs.update(&busy("sh"), |_| false, &interactive(), 10_000);
+        assert_eq!(ended, ["%2"]);
+        let ended = runs.update(&busy("sh"), |_| false, &interactive(), 15_000);
+        assert!(ended.is_empty(), "reported once: {ended:?}");
+    }
+
+    #[test]
+    fn update_reports_a_shell_reported_finish() {
+        let mut runs = Runs::default();
+        let at = |cmd: ShellCommand| {
+            let mut s = snap(&[("%1", "sh")], &["%1"]);
+            s.panes[0].shell_command = Some(cmd);
+            s
+        };
+        let done = |ended| ShellCommand {
+            running: false,
+            started: 1,
+            ended: Some(ended),
+            status: Some(0),
+        };
+        assert!(
+            runs.update(&at(done(2)), |_| false, &interactive(), 0)
+                .is_empty()
+        );
+        let ended = runs.update(&at(done(3)), |_| false, &interactive(), 5_000);
+        assert_eq!(ended, ["%1"], "a command ran wholly between two updates");
     }
 
     #[test]

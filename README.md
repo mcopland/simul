@@ -116,7 +116,7 @@ The sidebar takes a quarter of its window's width and returns to it after you dr
 
 An agent pane is one line: a state symbol, where it is, and time in the current state (the agent name stands in when where it is is unknown); any other pane shows only where it is.
 
-Where a pane is reads like a starship prompt: in a git repo, the branch (or `HEAD`) followed by status markers, rechecked every 5 seconds while the sidebar is shown; elsewhere, its directory with each parent cut to one letter, from home when under it (`~/dev/simul/examples` is `/d/s/examples`, and home is `~`).
+Where a pane is reads like a starship prompt: in a git repo, the branch (or `HEAD`) followed by status markers, rechecked when a command ends in that pane, when an agent there uses a tool (at most every 5 seconds) or ends its turn, and otherwise every minute while the sidebar is shown (`git_refresh_secs`), so edits from outside tmux can take that long to show; elsewhere, its directory with each parent cut to one letter, from home when under it (`~/dev/simul/examples` is `/d/s/examples`, and home is `~`).
 
 That is the `all` view; the footer switches to the `status` view, which lists only agents, without session or window headers, ordered `blocked`, `asking`, `failed`, `done`, `working`, `idle`, then `unknown`, and within a state, the one in it longest first. Under each agent it shows the session and window.
 
@@ -216,6 +216,7 @@ approval_patterns = []  # extra text that marks Kiro's approval prompt on screen
 
 [panes]
 hidden_check_secs = 10  # the most often panes' processes are read after a change while the sidebar is hidden
+git_refresh_secs = 60   # how often a shown pane's git status is reread when nothing in tmux changed it
 # commands shown as ▷, not ▶; a list here replaces the default
 interactive = ["vi", "vim", "nvim", "hx", "helix", "emacs", "nano", "micro", "kak", "less", "more", "man", "ssh", "mosh", "htop", "btop", "top", "watch", "lazygit", "tig"]
 ```

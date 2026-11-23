@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 
 use crate::protocol::GitStatus;
 
-/// How long a pane directory's git status stays fresh while the sidebar shows it.
-const GIT_REFRESH: Duration = Duration::from_secs(5);
+/// The least time between two reads of a directory that an event, rather than the fallback,
+/// asks for; an agent's tool calls can come many times a second.
+const GIT_MIN_GAP: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Default)]
 pub struct GitCache {
@@ -30,13 +31,14 @@ impl GitCache {
     }
 
     /// Forgets directories no agent or shown pane is in, and returns the ones to read: agents'
-    /// directories never read, and shown panes' directories missing or older than
-    /// `GIT_REFRESH`. A directory can appear twice; `start` drops the repeat.
+    /// directories never read, and shown panes' directories missing or older than `every`.
+    /// A directory can appear twice; `start` drops the repeat.
     pub fn stale(
         &mut self,
         agents: &HashSet<String>,
         panes: &HashSet<String>,
         now: Instant,
+        every: Duration,
     ) -> Vec<String> {
         self.statuses
             .retain(|cwd, _| agents.contains(cwd) || panes.contains(cwd));
@@ -46,10 +48,17 @@ impl GitCache {
             .chain(panes.iter().filter(|cwd| {
                 self.statuses
                     .get(*cwd)
-                    .is_none_or(|(at, _)| now.saturating_duration_since(*at) >= GIT_REFRESH)
+                    .is_none_or(|(at, _)| now.saturating_duration_since(*at) >= every)
             }))
             .cloned()
             .collect()
+    }
+
+    /// Whether an event may read `cwd` again: it was never read, or `GIT_MIN_GAP` ago.
+    pub fn nudge(&self, cwd: &str, now: Instant) -> bool {
+        self.statuses
+            .get(cwd)
+            .is_none_or(|(at, _)| now.saturating_duration_since(*at) >= GIT_MIN_GAP)
     }
 
     /// Marks `cwd` as being read; false if it is empty or already being read.
@@ -71,7 +80,8 @@ impl GitCache {
 
 impl Daemon {
     /// Looks up agents' directories once, since panes found by the startup scan send no hook
-    /// until used, and while the sidebar shows them, every pane's directory as it goes stale.
+    /// until used, and while the sidebar shows them, every pane's directory once it is
+    /// `git_refresh_secs` old. Events read a directory sooner; see `fetch_git`'s callers.
     pub(super) fn refresh_git(&mut self) {
         let agents: HashSet<String> = self.store.cwds().map(str::to_owned).collect();
         let panes: HashSet<String> = if self.sidebar.on {
@@ -83,7 +93,8 @@ impl Daemon {
         } else {
             HashSet::new()
         };
-        for cwd in self.git.stale(&agents, &panes, Instant::now()) {
+        let every = Duration::from_secs(self.opts.config.panes.git_refresh_secs);
+        for cwd in self.git.stale(&agents, &panes, Instant::now(), every) {
             self.fetch_git(cwd);
         }
     }
@@ -125,7 +136,7 @@ mod tests {
     #[test]
     fn unread_directories_are_stale() {
         let mut c = GitCache::default();
-        let mut stale = c.stale(&set(&["/a"]), &set(&["/b"]), Instant::now());
+        let mut stale = c.stale(&set(&["/a"]), &set(&["/b"]), Instant::now(), Duration::ZERO);
         stale.sort();
         assert_eq!(stale, ["/a", "/b"]);
     }
@@ -136,9 +147,34 @@ mod tests {
         let t0 = Instant::now();
         c.finish("/a".into(), on("main"), t0);
         c.finish("/b".into(), on("main"), t0);
-        let later = t0 + GIT_REFRESH;
-        assert!(c.stale(&set(&["/a"]), &set(&["/b"]), t0).is_empty());
-        assert_eq!(c.stale(&set(&["/a"]), &set(&["/b"]), later), ["/b"]);
+        let every = Duration::from_secs(60);
+        let later = t0 + every;
+        assert!(c.stale(&set(&["/a"]), &set(&["/b"]), t0, every).is_empty());
+        assert_eq!(c.stale(&set(&["/a"]), &set(&["/b"]), later, every), ["/b"]);
+    }
+
+    #[test]
+    fn shown_directories_wait_out_the_fallback() {
+        let mut c = GitCache::default();
+        let t0 = Instant::now();
+        c.finish("/b".into(), on("main"), t0);
+        let every = Duration::from_secs(60);
+        let shown = set(&["/b"]);
+        assert!(
+            c.stale(&set(&[]), &shown, t0 + Duration::from_secs(6), every)
+                .is_empty()
+        );
+        assert_eq!(c.stale(&set(&[]), &shown, t0 + every, every), ["/b"]);
+    }
+
+    #[test]
+    fn nudges_are_rate_limited() {
+        let mut c = GitCache::default();
+        let t0 = Instant::now();
+        assert!(c.nudge("/a", t0), "never read");
+        c.finish("/a".into(), on("main"), t0);
+        assert!(!c.nudge("/a", t0 + Duration::from_secs(4)));
+        assert!(c.nudge("/a", t0 + GIT_MIN_GAP));
     }
 
     #[test]
@@ -146,7 +182,7 @@ mod tests {
         let mut c = GitCache::default();
         let t0 = Instant::now();
         c.finish("/gone".into(), on("main"), t0);
-        c.stale(&set(&[]), &set(&[]), t0);
+        c.stale(&set(&[]), &set(&[]), t0, Duration::ZERO);
         assert!(!c.knows("/gone"));
         assert_eq!(c.get("/gone"), None);
     }

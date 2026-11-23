@@ -52,6 +52,10 @@ pub struct PanesConfig {
     /// is hidden; while shown, each change is read at once. Each read costs CPU, so the default
     /// trades a command that runs and ends unseen between reads for idle cost.
     pub hidden_check_secs: u64,
+    /// How often a shown pane's git status is read again when nothing simul sees could have
+    /// changed it, such as an edit from outside tmux. Agent turns and commands that end in a
+    /// pane read it at once.
+    pub git_refresh_secs: u64,
 }
 
 impl Default for PanesConfig {
@@ -63,6 +67,7 @@ impl Default for PanesConfig {
         PanesConfig {
             interactive: names.into_iter().map(str::to_owned).collect(),
             hidden_check_secs: 10,
+            git_refresh_secs: 60,
         }
     }
 }
@@ -180,6 +185,16 @@ mod tests {
         for name in ["hx", "nvim", "less", "ssh"] {
             assert!(cfg.panes.interactive.iter().any(|n| n == name), "{name}");
         }
+    }
+
+    #[test]
+    fn git_refresh_defaults_to_a_minute() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[panes]\nhidden_check_secs = 3\n").unwrap();
+        assert_eq!(load_from(&path).unwrap().panes.git_refresh_secs, 60);
+        std::fs::write(&path, "[panes]\ngit_refresh_secs = 2\n").unwrap();
+        assert_eq!(load_from(&path).unwrap().panes.git_refresh_secs, 2);
     }
 
     #[test]

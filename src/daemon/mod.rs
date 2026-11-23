@@ -494,8 +494,10 @@ impl Daemon {
         let viewed = self.snapshot.viewed.contains(&pane);
         let transition = self.store.apply(&pane, agent, &parsed, now_ms(), viewed);
         if let Some(cwd) = self.store.get(&pane).and_then(|r| r.cwd.clone()) {
+            // A tool call may have edited the repo; they come fast, so those are rate-limited.
             let refresh = matches!(parsed.event, AgentEvent::SessionStart | AgentEvent::Stop)
-                || !self.git.knows(&cwd);
+                || !self.git.knows(&cwd)
+                || (parsed.event == AgentEvent::PostTool && self.git.nudge(&cwd, Instant::now()));
             if refresh {
                 self.fetch_git(cwd);
             }
@@ -665,12 +667,24 @@ impl Daemon {
     fn apply_runs(&mut self, now: u64) {
         self.runs.mark_checked(Instant::now());
         let store = &self.store;
-        self.runs.update(
+        let ended = self.runs.update(
             &self.snapshot,
             |p| store.get(&p.id).is_some() || Agent::for_process(&p.current_command).is_some(),
             &self.opts.config.panes.interactive,
             now,
         );
+        // A command that ended, such as `git commit` or an editor, may have changed the repo.
+        // Not rate-limited: commands end at the user's pace.
+        let dirs: Vec<String> = self
+            .snapshot
+            .panes
+            .iter()
+            .filter(|p| ended.contains(&p.id))
+            .map(|p| p.path.clone())
+            .collect();
+        for cwd in dirs {
+            self.fetch_git(cwd);
+        }
     }
 
     async fn scrape(&mut self) {
