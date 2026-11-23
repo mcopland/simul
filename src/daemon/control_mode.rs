@@ -171,7 +171,7 @@ async fn attach_once(tmux: &Tmux, tx: &mpsc::Sender<Cmd>) -> Result<()> {
     let pid = child.id().context("tmux control mode exited at once")?;
     // Hooks reach the daemon through this client by name, and a new attach has a new name.
     let name = find_client(tmux, pid).await?;
-    if tx.send(Cmd::ControlClient(name)).await.is_err() {
+    if tx.send(Cmd::ControlClient { name, pid }).await.is_err() {
         return Ok(());
     }
     let stdout = child
@@ -200,6 +200,43 @@ async fn attach_once(tmux: &Tmux, tx: &mpsc::Sender<Cmd>) -> Result<()> {
             Line::Exit => break,
             Line::Reply => {}
         }
+    }
+    Ok(())
+}
+
+/// Kills and reaps the control client `pid` before the daemon `exec`s itself: the new image
+/// knows nothing of the old one's children, so the client would stay a zombie for good.
+/// Only acts on a child of this process that has not been reaped, so a pid the system has
+/// since reused for someone else's process is left alone.
+pub fn reap(pid: u32) -> std::io::Result<()> {
+    let pid = libc::pid_t::try_from(pid)
+        .map_err(|_| std::io::Error::other(format!("control client pid {pid} out of range")))?;
+    let mut status = 0;
+    // SAFETY: waitpid with WNOHANG only reads this process's own children and writes the
+    // exit status into `status`, a valid local.
+    match unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } {
+        // Still running: ours, and not yet reaped.
+        0 => {}
+        // It had exited and is now reaped.
+        p if p == pid => return Ok(()),
+        _ => {
+            let e = std::io::Error::last_os_error();
+            // Not a child of ours, or reaped already (tokio does when it sees the exit).
+            return if e.raw_os_error() == Some(libc::ECHILD) {
+                Ok(())
+            } else {
+                Err(e)
+            };
+        }
+    }
+    // SAFETY: `pid` is a live, unreaped child of this process (checked above, and nothing else
+    // on the daemon's one thread can reap it meanwhile), so the signal reaches that child.
+    if unsafe { libc::kill(pid, libc::SIGKILL) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: as above; SIGKILL guarantees the child exits, so this blocking wait returns.
+    if unsafe { libc::waitpid(pid, &mut status, 0) } != pid {
+        return Err(std::io::Error::last_os_error());
     }
     Ok(())
 }
@@ -295,6 +332,27 @@ mod tests {
             assert!(triggers_reconcile(name), "{name}");
         }
         assert!(!triggers_reconcile("%output"));
+    }
+
+    #[test]
+    fn reap_kills_and_collects_a_running_child() {
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        reap(pid).unwrap();
+        // Gone, and already reaped: a second reap finds no child.
+        assert!(!crate::claude_sessions::pid_alive(pid as i32));
+        reap(pid).unwrap();
+        // `child` is not waited on again; dropping it does not reap.
+        drop(child);
+    }
+
+    #[test]
+    fn reap_leaves_processes_that_are_not_its_children() {
+        // pid 1 is launchd or init: never a child, so ECHILD, and no signal is sent.
+        reap(1).unwrap();
     }
 
     #[test]

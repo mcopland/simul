@@ -52,7 +52,10 @@ pub enum Cmd {
     Subscribe(oneshot::Sender<(Status, broadcast::Receiver<Status>)>),
     Refresh,
     /// The control client attached under this name; hooks reach the daemon through it.
-    ControlClient(String),
+    ControlClient {
+        name: String,
+        pid: u32,
+    },
     /// A shell marked a command's start or end with OSC 133.
     ShellCommand,
     Toggle(oneshot::Sender<bool>),
@@ -124,6 +127,8 @@ struct Daemon {
     /// Every name the control client attached under, the current one last; hooks message
     /// the current one. Empty until it first attaches.
     control_clients: Vec<String>,
+    /// The current control client's process, reaped before an in-place restart.
+    control_pid: Option<u32>,
     tx: mpsc::Sender<Cmd>,
     updates: broadcast::Sender<Status>,
     /// The status last sent to subscribers; one a sidebar would draw the same isn't sent.
@@ -178,6 +183,7 @@ pub async fn run(opts: Options) -> Result<()> {
         windows: Vec::new(),
         recovered: false,
         control_clients: Vec::new(),
+        control_pid: None,
         tx,
         updates,
         published: None,
@@ -351,8 +357,9 @@ impl Daemon {
                     self.schedule_reconcile();
                 }
             }
-            Cmd::ControlClient(name) => {
+            Cmd::ControlClient { name, pid } => {
                 self.control_clients.push(name);
+                self.control_pid = Some(pid);
                 self.install_tmux_hooks().await;
                 if self.sidebar.on {
                     self.set_layout_hook(true).await;

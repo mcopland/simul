@@ -344,6 +344,12 @@ impl Daemon {
             Next::Install(version) => self.start_install(plugin, version),
             Next::Restart(version) => {
                 log!("restarting into {version} as {}", self.opts.exe.display());
+                // The new image attaches a client of its own; a failed exec reattaches too.
+                if let Some(pid) = self.control_pid.take()
+                    && let Err(e) = super::control_mode::reap(pid)
+                {
+                    log!("failed to reap control client {pid} before restarting: {e}");
+                }
                 let e = exec(&self.opts.exe, &version);
                 log!("{e:#}");
                 let next = self.updater.restart_failed();

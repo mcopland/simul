@@ -171,6 +171,11 @@ impl Harness {
     }
 
     /// The daemon's log, beside its socket.
+    /// The pid of the newest daemon this test started; an in-place restart keeps it.
+    pub fn daemon_pid(&self) -> u32 {
+        self.daemons.last().expect("no daemon started").id()
+    }
+
     pub fn daemon_log(&self) -> String {
         std::fs::read_to_string(self.simul_sock.with_extension("log")).unwrap_or_default()
     }

@@ -3,6 +3,7 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use common::{BIN, Harness, eventually};
 
@@ -161,6 +162,23 @@ fn a_new_plugin_version_installs_the_release_and_restarts() {
         1,
         "the new daemon doesn't install again: {log}"
     );
+    // The control client of the image before the restart exits with it; someone must reap it.
+    let zombies = || {
+        let out = Command::new("ps")
+            .args(["-axo", "ppid=,stat="])
+            .output()
+            .unwrap();
+        let pid = h.daemon_pid().to_string();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| {
+                let mut f = l.split_whitespace();
+                f.next() == Some(pid.as_str()) && f.next().is_some_and(|s| s.starts_with('Z'))
+            })
+            .count()
+    };
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(zombies(), 0, "the restarted daemon has unreaped children");
 }
 
 #[test]
