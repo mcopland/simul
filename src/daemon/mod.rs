@@ -354,13 +354,7 @@ impl Daemon {
             Cmd::Refresh => self.schedule_reconcile(),
             // Runs show only in sidebars. While they are hidden, a change waits for the next
             // hidden check, and that check still finds a finish by its end mark.
-            Cmd::ShellCommand | Cmd::PanesChanged => {
-                if self.sidebar.on {
-                    self.schedule_reconcile();
-                } else {
-                    self.runs.note_change();
-                }
-            }
+            Cmd::ShellCommand | Cmd::PanesChanged => self.on_panes_changed(),
             Cmd::ControlClient { name, pid } => {
                 self.control_clients.push(name);
                 self.control_pid = Some(pid);
@@ -383,6 +377,9 @@ impl Daemon {
             Cmd::Tick => {
                 self.read_live().await;
                 self.scrape().await;
+                if self.runs.settle_at().is_some_and(|at| now_ms() >= at) {
+                    self.on_panes_changed();
+                }
                 // While the sidebar is shown, tmux's subscription reports the pane changes it
                 // shows. While hidden, only processes are checked, after a change and at most
                 // every `hidden_check_secs`, so one that ends meanwhile is still marked when
@@ -581,6 +578,16 @@ impl Daemon {
             // A closed channel means shutdown.
             let _ = tx.send(Cmd::Turn { pane, turn }).await;
         });
+    }
+
+    /// Reads pane changes at once while the sidebar shows them; otherwise leaves them to the
+    /// next hidden check.
+    fn on_panes_changed(&mut self) {
+        if self.sidebar.on {
+            self.schedule_reconcile();
+        } else {
+            self.runs.note_change();
+        }
     }
 
     fn schedule_reconcile(&mut self) {

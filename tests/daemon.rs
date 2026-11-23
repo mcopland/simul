@@ -194,6 +194,18 @@ fn plain_pane_processes_are_running_then_finished_until_viewed() {
 }
 
 #[test]
+fn a_pane_started_with_a_long_command_shows_it_running() {
+    let mut h = Harness::new();
+    h.start_daemon();
+    let out = h.simul().arg("toggle").output().unwrap();
+    assert!(out.status.success(), "toggle: {out:?}");
+    h.wait_run(&h.first_pane(), None);
+    // Its command never changes, so nothing tmux reports after the pane settles says so.
+    let pane = h.new_pane("sleep 600");
+    h.wait_run(&pane, Some("running"));
+}
+
+#[test]
 fn a_shells_osc_133_marks_say_how_a_command_ended() {
     let mut h = Harness::new();
     h.start_daemon();

@@ -48,6 +48,9 @@ pub struct Runs {
     checked: Option<Instant>,
     /// Whether tmux reported a pane change since then.
     changed: bool,
+    /// When the earliest pane the last update skipped as new settles, in ms. tmux reports
+    /// nothing more about a pane whose first command keeps running, so it needs a look then.
+    settle_at: Option<u64>,
     /// When each plain pane was first seen, in ms; `None` before the first update. Panes there
     /// at the first update map to `None`: settled, so they are judged at once.
     first_seen: Option<HashMap<String, Option<u64>>>,
@@ -84,6 +87,11 @@ impl Runs {
         self.changed && self.due(now, every)
     }
 
+    /// When a pane skipped as new settles and should be looked at again, in ms.
+    pub fn settle_at(&self) -> Option<u64> {
+        self.settle_at
+    }
+
     /// Records that tmux reported a pane change that a check has yet to read.
     pub fn note_change(&mut self) {
         self.changed = true;
@@ -112,6 +120,7 @@ impl Runs {
         let mut next = HashMap::new();
         let mut first_seen = HashMap::new();
         let mut last_finish = HashMap::new();
+        let mut settle_at: Option<u64> = None;
         for p in snap.panes.iter().filter(|p| !p.is_sidebar && !is_agent(p)) {
             let finish_before = self.last_finish.get(&p.id).copied();
             last_finish.insert(p.id.clone(), p.shell_command.and_then(finish_of));
@@ -120,7 +129,9 @@ impl Runs {
                 None => None,
             };
             first_seen.insert(p.id.clone(), born);
-            if born.is_some_and(|b| now.saturating_sub(b) < SETTLE_MS) {
+            if let Some(b) = born.filter(|b| now.saturating_sub(*b) < SETTLE_MS) {
+                let at = b + SETTLE_MS;
+                settle_at = Some(settle_at.map_or(at, |s| s.min(at)));
                 continue;
             }
             let viewed = snap.viewed.contains(&p.id);
@@ -177,6 +188,7 @@ impl Runs {
         self.by_pane = next;
         self.first_seen = Some(first_seen);
         self.last_finish = last_finish;
+        self.settle_at = settle_at;
         ended
     }
 }
@@ -301,6 +313,22 @@ mod tests {
         );
         let ended = runs.update(&at(done(3)), |_| false, &interactive(), 5_000);
         assert_eq!(ended, ["%1"], "a command ran wholly between two updates");
+    }
+
+    #[test]
+    fn a_settling_pane_asks_for_another_look() {
+        let mut runs = Runs::default();
+        let one = snap(&[("%1", "sh")], &[]);
+        let two = snap(&[("%1", "sh"), ("%2", "make")], &[]);
+        runs.update(&one, |_| false, &interactive(), 0);
+        assert_eq!(runs.settle_at(), None);
+        runs.update(&two, |_| false, &interactive(), 400);
+        assert_eq!(runs.settle_at(), Some(400 + SETTLE_MS));
+        runs.update(&two, |_| false, &interactive(), 900);
+        assert_eq!(runs.settle_at(), Some(400 + SETTLE_MS), "still settling");
+        runs.update(&two, |_| false, &interactive(), 400 + SETTLE_MS);
+        assert_eq!(runs.settle_at(), None);
+        assert_eq!(runs.get("%2").map(|r| r.state), Some(RunState::Running));
     }
 
     #[test]
