@@ -171,6 +171,34 @@ impl Harness {
     }
 
     /// The daemon's log, beside its socket.
+    /// A `simul` command whose `tmux` logs each call's arguments, one line each, to the
+    /// returned file and then `exec`s the real tmux, so the process keeps its pid.
+    pub fn simul_counting_tmux(&self) -> (Command, PathBuf) {
+        let real = Command::new("sh")
+            .args(["-c", "command -v tmux"])
+            .output()
+            .unwrap();
+        let real = String::from_utf8_lossy(&real.stdout).trim().to_owned();
+        assert!(!real.is_empty(), "no tmux on PATH");
+        let bin = self.dir.path().join("counting-bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let log = self.dir.path().join("tmux-calls");
+        let script = bin.join("tmux");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >>'{}'\nexec '{real}' \"$@\"\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        let mut cmd = self.simul();
+        cmd.env("PATH", format!("{}:{path}", bin.display()));
+        (cmd, log)
+    }
+
     /// The pid of the newest daemon this test started; an in-place restart keeps it.
     pub fn daemon_pid(&self) -> u32 {
         self.daemons.last().expect("no daemon started").id()

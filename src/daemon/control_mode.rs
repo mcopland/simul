@@ -4,7 +4,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use super::Cmd;
@@ -93,6 +93,27 @@ pub fn poke(name: &str, args: &[String]) -> Option<Poke> {
     }
 }
 
+/// The name of simul's tmux subscription.
+pub const SUBSCRIPTION: &str = "simul-panes";
+
+/// What tmux checks once a second for simul, reporting each change with
+/// `%subscription-changed`: what no notification covers. That is each pane's foreground
+/// command and directory, zoom in windows of sessions this client isn't attached to, and
+/// which clients show which session with what focus. The `S:` loop reaches every session,
+/// though the subscription is the attached session's.
+pub const PANES_SUBSCRIPTION: &str = "#{L:#{client_name}=#{client_session}=#{client_flags};}|\
+#{S:#{W:#{window_id}=#{window_zoomed_flag}:#{P:#{pane_id}=#{pane_current_command}=#{pane_current_path};}}}";
+
+/// The control-mode command that subscribes this client to `PANES_SUBSCRIPTION`.
+pub fn subscribe_command() -> String {
+    format!("refresh-client -B '{SUBSCRIPTION}::{PANES_SUBSCRIPTION}'\n")
+}
+
+/// Whether a notification is tmux reporting a change to simul's subscription.
+pub fn panes_changed(name: &str, args: &[String]) -> bool {
+    name == "%subscription-changed" && args.first().is_some_and(|s| s == SUBSCRIPTION)
+}
+
 /// The name of the client whose process is `pid` in `list-clients -F CLIENT_PIDS` output.
 fn client_named(listing: &str, pid: u32) -> Option<String> {
     listing.lines().find_map(|line| {
@@ -167,7 +188,14 @@ async fn attach_once(tmux: &Tmux, tx: &mpsc::Sender<Cmd>) -> Result<()> {
         .spawn()
         .context("failed to start tmux control mode")?;
     // Control mode exits when its stdin closes, so hold it open for the client's lifetime.
-    let _stdin = child.stdin.take();
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("tmux control mode has no stdin")?;
+    stdin
+        .write_all(subscribe_command().as_bytes())
+        .await
+        .context("failed to subscribe tmux control mode to pane changes")?;
     let pid = child.id().context("tmux control mode exited at once")?;
     // Hooks reach the daemon through this client by name, and a new attach has a new name.
     let name = find_client(tmux, pid).await?;
@@ -191,6 +219,7 @@ async fn attach_once(tmux: &Tmux, tx: &mpsc::Sender<Cmd>) -> Result<()> {
                     Some(Poke::Refresh) => Cmd::Refresh,
                     Some(Poke::Resized) => Cmd::Resized,
                     Some(Poke::Command) => Cmd::ShellCommand,
+                    None if panes_changed(&name, &args) => Cmd::PanesChanged,
                     None => Cmd::TmuxNotification { name },
                 };
                 if tx.send(cmd).await.is_err() {
@@ -353,6 +382,39 @@ mod tests {
     fn reap_leaves_processes_that_are_not_its_children() {
         // pid 1 is launchd or init: never a child, so ECHILD, and no signal is sent.
         reap(1).unwrap();
+    }
+
+    #[test]
+    fn only_simuls_subscription_reports_pane_changes() {
+        let mut p = Parser::default();
+        let Line::Notification { name, args } =
+            p.feed("%subscription-changed simul-panes $0 - - - : %0=sh=/tmp;")
+        else {
+            panic!("not a notification");
+        };
+        assert!(panes_changed(&name, &args));
+        assert!(!panes_changed("%subscription-changed", &["other".into()]));
+        assert!(!panes_changed("%window-add", &["simul-panes".into()]));
+    }
+
+    #[test]
+    fn the_subscription_command_names_simuls_subscription() {
+        let cmd = subscribe_command();
+        assert!(
+            cmd.starts_with(&format!("refresh-client -B '{SUBSCRIPTION}::")),
+            "{cmd}"
+        );
+        assert!(cmd.ends_with("'\n"), "{cmd:?}");
+        // Single-quoted for tmux's parser, so the format must hold no quote of its own.
+        assert!(!PANES_SUBSCRIPTION.contains('\''));
+        for field in [
+            "#{pane_current_command}",
+            "#{pane_current_path}",
+            "#{window_zoomed_flag}",
+            "#{client_flags}",
+        ] {
+            assert!(PANES_SUBSCRIPTION.contains(field), "{field}");
+        }
     }
 
     #[test]

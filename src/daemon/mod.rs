@@ -58,6 +58,8 @@ pub enum Cmd {
     },
     /// A shell marked a command's start or end with OSC 133.
     ShellCommand,
+    /// tmux reported a change to a pane's command or directory, a zoom, or a client.
+    PanesChanged,
     Toggle(oneshot::Sender<bool>),
     Resized,
     Collapse {
@@ -350,11 +352,13 @@ impl Daemon {
                 let _ = reply.send((self.status(), self.updates.subscribe()));
             }
             Cmd::Refresh => self.schedule_reconcile(),
-            // Runs show only in sidebars. While they are hidden, the next process check still
-            // finds a finish by its end mark, so a command needs no snapshot of its own.
-            Cmd::ShellCommand => {
+            // Runs show only in sidebars. While they are hidden, a change waits for the next
+            // hidden check, and that check still finds a finish by its end mark.
+            Cmd::ShellCommand | Cmd::PanesChanged => {
                 if self.sidebar.on {
                     self.schedule_reconcile();
+                } else {
+                    self.runs.note_change();
                 }
             }
             Cmd::ControlClient { name, pid } => {
@@ -379,14 +383,15 @@ impl Daemon {
             Cmd::Tick => {
                 self.read_live().await;
                 self.scrape().await;
-                // tmux sends no notification when a pane changes directory or foreground
-                // process, which pane rows show. With the sidebar hidden, only processes are
-                // checked, and less often, so one that ends meanwhile is still marked when it
-                // opens without the cost of a check every second.
+                // While the sidebar is shown, tmux's subscription reports the pane changes it
+                // shows. While hidden, only processes are checked, after a change and at most
+                // every `hidden_check_secs`, so one that ends meanwhile is still marked when
+                // the sidebar opens, without a snapshot for every change.
                 let every = Duration::from_secs(self.opts.config.panes.hidden_check_secs);
                 if self.sidebar.on {
-                    self.schedule_reconcile();
-                } else if self.runs.due(Instant::now(), every) {
+                    // Reconciles no longer come every second; shown folders still go stale.
+                    self.refresh_git();
+                } else if self.runs.hidden_due(Instant::now(), every) {
                     self.poll_runs().await;
                 }
             }

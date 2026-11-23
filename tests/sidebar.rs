@@ -296,6 +296,22 @@ fn windows_in_every_session_get_sidebars() {
 }
 
 #[test]
+fn a_shown_sidebar_starts_no_tmux_snapshots_while_idle() {
+    let mut h = Harness::new();
+    let (cmd, calls) = h.simul_counting_tmux();
+    h.start_daemon_with(cmd, &[]);
+    toggle(&h);
+    eventually("sidebar shown", || !sidebars(&h).is_empty());
+    // Let the toggle's own reconciles finish.
+    std::thread::sleep(Duration::from_secs(2));
+    std::fs::write(&calls, "").unwrap();
+    std::thread::sleep(Duration::from_secs(4));
+    let log = std::fs::read_to_string(&calls).unwrap();
+    let snapshots = log.lines().filter(|l| l.contains("list-panes")).count();
+    assert_eq!(snapshots, 0, "tmux calls while idle:\n{log}");
+}
+
+#[test]
 fn pane_rows_show_git_status_or_a_short_path() {
     let mut h = Harness::new();
     let repo = h.dir.path().join("repo");

@@ -46,6 +46,8 @@ pub struct Runs {
     by_pane: HashMap<String, Run>,
     /// When a snapshot was last read.
     checked: Option<Instant>,
+    /// Whether tmux reported a pane change since then.
+    changed: bool,
     /// When each plain pane was first seen, in ms; `None` before the first update. Panes there
     /// at the first update map to `None`: settled, so they are judged at once.
     first_seen: Option<HashMap<String, Option<u64>>>,
@@ -76,8 +78,20 @@ impl Runs {
         check_due(self.checked, now, every)
     }
 
+    /// Whether a hidden-sidebar check is due: tmux reported a change since the last one, and
+    /// that was `every` ago.
+    pub fn hidden_due(&self, now: Instant, every: Duration) -> bool {
+        self.changed && self.due(now, every)
+    }
+
+    /// Records that tmux reported a pane change that a check has yet to read.
+    pub fn note_change(&mut self) {
+        self.changed = true;
+    }
+
     pub fn mark_checked(&mut self, at: Instant) {
         self.checked = Some(at);
+        self.changed = false;
     }
 
     pub fn get(&self, pane: &str) -> Option<&Run> {
@@ -228,6 +242,27 @@ mod tests {
             viewed: viewed.iter().map(|&v| v.to_owned()).collect::<HashSet<_>>(),
             ..Snapshot::default()
         }
+    }
+
+    #[test]
+    fn hidden_checks_wait_for_a_change() {
+        let t0 = Instant::now();
+        let every = Duration::from_secs(10);
+        let mut runs = Runs::default();
+        assert!(!runs.hidden_due(t0, every), "nothing changed yet");
+        runs.note_change();
+        assert!(runs.hidden_due(t0, every), "a first check runs at once");
+        runs.mark_checked(t0);
+        assert!(
+            !runs.hidden_due(t0 + every, every),
+            "a check clears the change"
+        );
+        runs.note_change();
+        assert!(
+            !runs.hidden_due(t0 + Duration::from_secs(5), every),
+            "not before `every`"
+        );
+        assert!(runs.hidden_due(t0 + every, every));
     }
 
     fn interactive() -> Vec<String> {

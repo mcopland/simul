@@ -48,9 +48,9 @@ pub struct KiroConfig {
 pub struct PanesConfig {
     /// Commands that mark a pane interactive rather than running, matched by name.
     pub interactive: Vec<String>,
-    /// How often panes' processes are checked while the sidebar is hidden; it checks every
-    /// second while shown. Each check costs CPU, so the default trades a command that runs
-    /// and ends unseen between checks for idle cost.
+    /// The most often panes' processes are read after tmux reports a change while the sidebar
+    /// is hidden; while shown, each change is read at once. Each read costs CPU, so the default
+    /// trades a command that runs and ends unseen between reads for idle cost.
     pub hidden_check_secs: u64,
 }
 
