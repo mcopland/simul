@@ -1,3 +1,5 @@
+use std::ffi::OsString;
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -146,11 +148,18 @@ pub async fn run(tmux: Tmux, tx: mpsc::Sender<Cmd>) {
     }
 }
 
+/// `tmux` arguments for the control client. `attach` may start a server, which loads the
+/// user's config and can restore sessions into it; `-N` keeps a daemon that outlived its
+/// server from starting a new one.
+fn attach_args(socket: &Path) -> Vec<OsString> {
+    let mut args = vec![OsString::from("-S"), socket.as_os_str().to_owned()];
+    args.extend(["-N", "-C", "attach", "-f", "no-output,ignore-size"].map(OsString::from));
+    args
+}
+
 async fn attach_once(tmux: &Tmux, tx: &mpsc::Sender<Cmd>) -> Result<()> {
     let mut child = tokio::process::Command::new("tmux")
-        .arg("-S")
-        .arg(tmux.socket())
-        .args(["-C", "attach", "-f", "no-output,ignore-size"])
+        .args(attach_args(tmux.socket()))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -286,5 +295,18 @@ mod tests {
             assert!(triggers_reconcile(name), "{name}");
         }
         assert!(!triggers_reconcile("%output"));
+    }
+
+    #[test]
+    fn attaching_never_starts_a_server() {
+        let args = attach_args(std::path::Path::new("/tmp/t.sock"));
+        let at = |flag: &str| {
+            args.iter()
+                .position(|a| a == flag)
+                .unwrap_or_else(|| panic!("no {flag} in {args:?}"))
+        };
+        let (n, c) = (at("-N"), at("-C"));
+        assert!(n < c, "-N must come before the command: {args:?}");
+        assert_eq!(&args[..2], ["-S", "/tmp/t.sock"]);
     }
 }

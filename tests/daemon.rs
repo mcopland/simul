@@ -124,6 +124,18 @@ fn hook_starts_daemon_on_demand() {
     eventually("daemon exits with tmux", || {
         std::os::unix::net::UnixStream::connect(&h.simul_sock).is_err()
     });
+    let server_back = || {
+        std::process::Command::new("tmux")
+            .arg("-S")
+            .arg(&h.tmux_sock)
+            .arg("list-sessions")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    assert!(
+        !poll(Duration::from_secs(2), server_back),
+        "a tmux server came back after kill-server"
+    );
 }
 
 #[test]
