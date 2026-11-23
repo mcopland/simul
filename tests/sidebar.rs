@@ -298,7 +298,7 @@ fn windows_in_every_session_get_sidebars() {
 #[test]
 fn a_shown_sidebar_starts_no_tmux_snapshots_while_idle() {
     let mut h = Harness::new();
-    let (cmd, calls) = h.simul_counting_tmux();
+    let (cmd, calls) = h.simul_counting("tmux");
     h.start_daemon_with(cmd, &[]);
     toggle(&h);
     eventually("sidebar shown", || !sidebars(&h).is_empty());
@@ -391,6 +391,47 @@ fn a_command_ending_in_a_pane_rereads_its_git_status() {
             .is_some_and(|r| r.contains("trunk ?"))),
         "{:?}",
         row()
+    );
+}
+
+#[test]
+fn hidden_sidebars_read_no_git_status_for_plain_panes() {
+    let mut h =
+        Harness::with_config("blocked_threshold_ms = 100\n[panes]\nhidden_check_secs = 1\n");
+    let repo = h.dir.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git_repo(&repo, "trunk");
+    let (cmd, calls) = h.simul_counting("git");
+    h.start_daemon_with(cmd, &[]);
+    // After the first look, so the new pane is judged as new.
+    h.wait_run(&h.first_pane(), None);
+    let dir = repo.to_str().unwrap().to_owned();
+    let plain = h.tmux(&[
+        "new-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        "t:",
+        "-c",
+        &dir,
+        "sh",
+    ]);
+    h.wait_run(&plain, None);
+    h.tmux(&["send-keys", "-t", &plain, "sleep 2", "Enter"]);
+    h.wait_run(&plain, Some("running"));
+    h.wait_run(&plain, Some("finished"));
+    let read = || {
+        std::fs::read_to_string(&calls)
+            .unwrap_or_default()
+            .contains("status")
+    };
+    // A read would start just after the finish is marked.
+    assert!(
+        !poll(Duration::from_secs(2), read),
+        "git while hidden:\n{}",
+        std::fs::read_to_string(&calls).unwrap_or_default()
     );
 }
 

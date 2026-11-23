@@ -170,20 +170,20 @@ impl Harness {
         assert!(ok, "run of {pane}: want {want:?}, last {last:?}");
     }
 
-    /// The daemon's log, beside its socket.
-    /// A `simul` command whose `tmux` logs each call's arguments, one line each, to the
-    /// returned file and then `exec`s the real tmux, so the process keeps its pid.
-    pub fn simul_counting_tmux(&self) -> (Command, PathBuf) {
+    /// A `simul` command whose `program` (such as tmux or git) logs each call's arguments,
+    /// one line each, to the returned file and then `exec`s the real one, so the process
+    /// keeps its pid.
+    pub fn simul_counting(&self, program: &str) -> (Command, PathBuf) {
         let real = Command::new("sh")
-            .args(["-c", "command -v tmux"])
+            .args(["-c", &format!("command -v {program}")])
             .output()
             .unwrap();
         let real = String::from_utf8_lossy(&real.stdout).trim().to_owned();
-        assert!(!real.is_empty(), "no tmux on PATH");
+        assert!(!real.is_empty(), "no {program} on PATH");
         let bin = self.dir.path().join("counting-bin");
         std::fs::create_dir_all(&bin).unwrap();
-        let log = self.dir.path().join("tmux-calls");
-        let script = bin.join("tmux");
+        let log = self.dir.path().join(format!("{program}-calls"));
+        let script = bin.join(program);
         std::fs::write(
             &script,
             format!(
@@ -204,6 +204,7 @@ impl Harness {
         self.daemons.last().expect("no daemon started").id()
     }
 
+    /// The daemon's log, beside its socket.
     pub fn daemon_log(&self) -> String {
         std::fs::read_to_string(self.simul_sock.with_extension("log")).unwrap_or_default()
     }

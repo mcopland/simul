@@ -684,7 +684,10 @@ impl Daemon {
             now,
         );
         // A command that ended, such as `git commit` or an editor, may have changed the repo.
-        // Not rate-limited: commands end at the user's pace.
+        // Not rate-limited: commands end at the user's pace. Only shown panes show git status.
+        if !self.sidebar.on {
+            return;
+        }
         let dirs: Vec<String> = self
             .snapshot
             .panes
