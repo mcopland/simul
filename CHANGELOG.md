@@ -4,6 +4,22 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+### Added
+
+- `[panes] git_refresh_secs` sets how often the daemon rereads git status when nothing else asks for it. The default is 60 seconds.
+
+### Changed
+
+- The daemon no longer starts a tmux process every second while the sidebar is shown. tmux reports pane changes to the daemon's control client, and the daemon reads tmux only after a change. A hidden sidebar starts no tmux process until something changes.
+- The daemon rereads a folder's git status when an agent session starts or stops, after an agent tool call (at most every 5 seconds), and when a command in a plain pane ends. It no longer runs `git status` every 5 seconds. Idle CPU fell from about 2.1% to 0.5% of a core in the 13-window bench.
+
+### Fixed
+
+- The daemon's control client can no longer start a tmux server. Before, a reattach after the server stopped could start a new server, and tmux-continuum restored into it.
+- An in-place restart after a plugin update no longer leaves a zombie tmux process.
+- Sidebars show a window's new index after `move-window -r` or another renumber.
+- The daemon forgets notification records for closed panes.
+
 ## [1.0.0] - 2026-11-16
 
 ### Added
