@@ -342,19 +342,6 @@ pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// Quotes `s` as a tmux double-quoted string, where `$`, `"`, and `\\` are special.
-pub fn tmux_double_quote(s: &str) -> String {
-    let mut out = String::from("\"");
-    for c in s.chars() {
-        if matches!(c, '"' | '\\' | '$') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out.push('"');
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -626,12 +613,6 @@ mod tests {
         assert_eq!(parse_version("tmux 3.3a"), Some((3, 3)));
         assert_eq!(parse_version("tmux next-3.4"), Some((3, 4)));
         assert_eq!(parse_version("tmux master"), None);
-    }
-
-    #[test]
-    fn quotes_for_tmux() {
-        assert_eq!(tmux_double_quote("a 'b'"), "\"a 'b'\"");
-        assert_eq!(tmux_double_quote(r#"x"$y\"#), r#""x\"\$y\\""#);
     }
 
     #[test]
