@@ -4,6 +4,8 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-23
+
 ### Added
 
 - `[panes] git_refresh_secs` sets how often the daemon rereads git status when nothing else asks for it. The default is 60 seconds.
@@ -212,7 +214,8 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 - `simul.tmux` entry point that downloads the prebuilt binary matching `VERSION`.
 - Model and effort for each agent in `simul ls`.
 
-[Unreleased]: https://github.com/mcopland/simul/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/mcopland/simul/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/mcopland/simul/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/mcopland/simul/compare/v0.11.6...v1.0.0
 [0.11.6]: https://github.com/mcopland/simul/compare/v0.11.5...v0.11.6
 [0.11.5]: https://github.com/mcopland/simul/compare/v0.11.4...v0.11.5
