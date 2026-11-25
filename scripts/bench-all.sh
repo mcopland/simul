@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 # Runs bench-sidebar.sh for each build, interleaved, and prints each column's median.
-# Usage: bench-all.sh [-i] [-n runs] [-s secs] <label=simul-bin>...
-#   -i measures idle (see bench-sidebar.sh)
+# Usage: bench-all.sh [-i] [-n runs] [-s secs] [-w windows] [-a agents] [-r secs] <label=simul-bin>...
+#   -i, -w, -a and -r go to bench-sidebar.sh, which describes them
 #   e.g. bench-all.sh before=/tmp/old/target/release/simul after=target/release/simul
 
 set -euo pipefail
 
-usage="usage: bench-all.sh [-i] [-n runs] [-s secs] <label=simul-bin>..."
+usage="usage: bench-all.sh [-i] [-n runs] [-s secs] [-w windows] [-a agents] [-r secs] <label=simul-bin>..."
 runs=3
 secs=120
-idle=()
-while getopts "in:s:" opt; do
+# Options for bench-sidebar.sh, passed through as given.
+pass=()
+while getopts "in:s:w:a:r:" opt; do
 	case "$opt" in
-	i) idle=(-i) ;;
+	i) pass+=(-i) ;;
+	w | a | r) pass+=("-$opt" "$OPTARG") ;;
 	n) runs=$OPTARG ;;
 	s) secs=$OPTARG ;;
 	*)
@@ -43,7 +45,7 @@ trap 'rm -f "$rows"' EXIT
 for i in $(seq "$runs"); do
 	# Interleaved, so drift in machine load spreads over every build.
 	for build in "$@"; do
-		"$bench" ${idle[@]+"${idle[@]}"} "${build#*=}" "$secs" "${build%%=*}" >>"$rows"
+		"$bench" ${pass[@]+"${pass[@]}"} "${build#*=}" "$secs" "${build%%=*}" >>"$rows"
 	done
 	echo "bench-all: run $i of $runs done" >&2
 done
