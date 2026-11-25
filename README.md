@@ -116,7 +116,7 @@ The sidebar takes a quarter of its window's width and returns to it after you dr
 
 An agent pane is one line: a state symbol, where it is, and time in the current state (the agent name stands in when where it is is unknown); any other pane shows only where it is.
 
-Where a pane is reads like a starship prompt: in a git repo, the branch (or `HEAD`) followed by status markers, rechecked when a command ends in that pane, when an agent there uses a tool (at most every 5 seconds) or ends its turn, and otherwise every minute while the sidebar is shown (`git_refresh_secs`), so edits from outside tmux can take that long to show; elsewhere, its directory with each parent cut to one letter, from home when under it (`~/dev/simul/examples` is `/d/s/examples`, and home is `~`).
+Where a pane is reads like a starship prompt: in a git repo, the branch (or `HEAD`) followed by status markers, rechecked when a command ends in that pane, when an agent there runs a tool that can change files, such as Edit or Bash (at most every 5 seconds), or ends its turn, and otherwise every minute while the sidebar is shown (`git_refresh_secs`), so edits from outside tmux can take that long to show; elsewhere, its directory with each parent cut to one letter, from home when under it (`~/dev/simul/examples` is `/d/s/examples`, and home is `~`).
 
 That is the `all` view; the footer switches to the `status` view, which lists only agents, without session or window headers, ordered `blocked`, `asking`, `failed`, `done`, `working`, `idle`, then `unknown`, and within a state, the one in it longest first. Under each agent it shows the session and window.
 

@@ -292,6 +292,19 @@ fn cpu_line(own: Duration, children: Duration) -> String {
     )
 }
 
+/// Whether a hook event should read its directory's git status. `nudge` is the rate limit for
+/// tool calls, which come fast; it is asked only for a tool that may have changed the repo.
+fn wants_git(agent: Agent, event: &AgentEvent, known: bool, nudge: impl FnOnce() -> bool) -> bool {
+    match event {
+        AgentEvent::SessionStart | AgentEvent::Stop => true,
+        _ if !known => true,
+        AgentEvent::PostTool { tool } => {
+            tool.as_deref().is_none_or(|t| agent.tool_may_write(t)) && nudge()
+        }
+        _ => false,
+    }
+}
+
 async fn ticker(tx: mpsc::Sender<Cmd>) {
     let mut interval = tokio::time::interval(TICK);
     loop {
@@ -503,11 +516,10 @@ impl Daemon {
         let viewed = self.snapshot.viewed.contains(&pane);
         let transition = self.store.apply(&pane, agent, &parsed, now_ms(), viewed);
         if let Some(cwd) = self.store.get(&pane).and_then(|r| r.cwd.clone()) {
-            // A tool call may have edited the repo; they come fast, so those are rate-limited.
-            let refresh = matches!(parsed.event, AgentEvent::SessionStart | AgentEvent::Stop)
-                || !self.git.knows(&cwd)
-                || (parsed.event == AgentEvent::PostTool && self.git.nudge(&cwd, Instant::now()));
-            if refresh {
+            let known = self.git.knows(&cwd);
+            if wants_git(agent, &parsed.event, known, || {
+                self.git.nudge(&cwd, Instant::now())
+            }) {
                 self.fetch_git(cwd);
             }
         }
@@ -730,6 +742,70 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn post(tool: Option<&str>) -> AgentEvent {
+        AgentEvent::PostTool {
+            tool: tool.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn git_is_read_after_a_tool_that_may_write() {
+        let due = || true;
+        assert!(wants_git(Agent::Claude, &post(Some("Edit")), true, due));
+        assert!(wants_git(Agent::Kiro, &post(Some("fs_write")), true, due));
+        assert!(
+            wants_git(Agent::Claude, &post(None), true, due),
+            "an agent that names no tool may have written"
+        );
+    }
+
+    #[test]
+    fn git_is_not_read_after_a_read_only_tool() {
+        assert!(!wants_git(Agent::Claude, &post(Some("Read")), true, || {
+            panic!("a read-only tool must not use up the rate limit")
+        }));
+        assert!(!wants_git(
+            Agent::Kiro,
+            &post(Some("fs_read")),
+            true,
+            || true
+        ));
+    }
+
+    #[test]
+    fn writes_are_rate_limited() {
+        assert!(!wants_git(Agent::Claude, &post(Some("Edit")), true, || {
+            false
+        }));
+    }
+
+    #[test]
+    fn git_is_read_at_turn_edges_and_for_new_directories() {
+        let never = || panic!("only tool events are rate-limited");
+        assert!(wants_git(
+            Agent::Claude,
+            &AgentEvent::SessionStart,
+            true,
+            never
+        ));
+        assert!(wants_git(Agent::Claude, &AgentEvent::Stop, true, never));
+        assert!(wants_git(Agent::Claude, &post(Some("Read")), false, never));
+        assert!(!wants_git(
+            Agent::Claude,
+            &AgentEvent::PromptSubmit,
+            true,
+            never
+        ));
+        assert!(!wants_git(
+            Agent::Claude,
+            &AgentEvent::PreTool {
+                tool: Some("Edit".into())
+            },
+            true,
+            never
+        ));
+    }
 
     #[test]
     fn cpu_line_gives_seconds_to_the_millisecond() {

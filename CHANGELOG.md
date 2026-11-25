@@ -4,6 +4,10 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+### Changed
+
+- The daemon rereads a folder's git status after an agent tool call only when the tool can change files: Claude's Edit, Write, MultiEdit, NotebookEdit, and Bash, and Kiro's fs_write and execute_bash. Reads, searches, and MCP tools no longer start `git status`. Turn ends and the one-minute refresh still catch changes made any other way.
+
 ## [1.1.0] - 2026-11-23
 
 ### Added

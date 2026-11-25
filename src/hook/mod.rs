@@ -31,6 +31,14 @@ impl Agent {
         }
     }
 
+    /// Whether a call of `tool` may have changed files, so the repo's git status may be stale.
+    pub fn tool_may_write(self, tool: &str) -> bool {
+        match self {
+            Agent::Claude => claude::tool_may_write(tool),
+            Agent::Kiro => kiro::tool_may_write(tool),
+        }
+    }
+
     pub fn classify_screen(self, screen: &str, config: &Config) -> Screen {
         match self {
             Agent::Claude => claude::classify_screen(screen),
@@ -47,7 +55,9 @@ pub enum AgentEvent {
     PreTool {
         tool: Option<String>,
     },
-    PostTool,
+    PostTool {
+        tool: Option<String>,
+    },
     PermissionPrompt,
     /// The agent reports it is waiting for input (corrects a stale `working`).
     IdlePrompt,

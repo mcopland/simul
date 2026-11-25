@@ -100,7 +100,7 @@ impl Store {
                 rec.pending_tool.clone_from(tool);
                 Some(State::Working)
             }
-            AgentEvent::PostTool => {
+            AgentEvent::PostTool { .. } => {
                 rec.pending_tool = None;
                 Some(State::Working)
             }
@@ -388,7 +388,7 @@ mod tests {
             (AgentEvent::PromptSubmit, State::Working),
             (AgentEvent::PreTool { tool: None }, State::Working),
             (AgentEvent::PermissionPrompt, State::Blocked),
-            (AgentEvent::PostTool, State::Working),
+            (AgentEvent::PostTool { tool: None }, State::Working),
             (AgentEvent::Stop, State::Done),
             (AgentEvent::StopFailure { error: None }, State::Failed),
             (AgentEvent::Unrecognized, State::Unknown),
@@ -415,7 +415,13 @@ mod tests {
             })
         );
         assert_eq!(
-            s.apply("%1", Agent::Claude, &ev(AgentEvent::PostTool), 9, false),
+            s.apply(
+                "%1",
+                Agent::Claude,
+                &ev(AgentEvent::PostTool { tool: None }),
+                9,
+                false
+            ),
             None
         );
         let rec = s.get("%1").unwrap();
@@ -498,7 +504,13 @@ mod tests {
         });
         s.apply("%1", Agent::Claude, &pre, 1, false);
         assert_eq!(s.get("%1").unwrap().pending_tool.as_deref(), Some("Write"));
-        s.apply("%1", Agent::Claude, &ev(AgentEvent::PostTool), 2, false);
+        s.apply(
+            "%1",
+            Agent::Claude,
+            &ev(AgentEvent::PostTool { tool: None }),
+            2,
+            false,
+        );
         assert_eq!(s.get("%1").unwrap().pending_tool, None);
     }
 
@@ -777,7 +789,13 @@ mod tests {
             1000,
             false,
         );
-        s.apply("%1", Agent::Claude, &ev(AgentEvent::PostTool), 2400, false);
+        s.apply(
+            "%1",
+            Agent::Claude,
+            &ev(AgentEvent::PostTool { tool: None }),
+            2400,
+            false,
+        );
         assert!(s.needs_scrape(2600, 1500).is_empty());
     }
 

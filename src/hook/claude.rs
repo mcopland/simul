@@ -42,7 +42,9 @@ pub fn parse(event: &str, payload: &Value) -> Parsed {
         "PreToolUse" => AgentEvent::PreTool {
             tool: str_field(payload, "tool_name"),
         },
-        "PostToolUse" => AgentEvent::PostTool,
+        "PostToolUse" => AgentEvent::PostTool {
+            tool: str_field(payload, "tool_name"),
+        },
         "PermissionRequest" => AgentEvent::PermissionPrompt,
         "Notification" => notification(payload),
         "Stop" => AgentEvent::Stop,
@@ -65,6 +67,15 @@ pub fn parse(event: &str, payload: &Value) -> Parsed {
             transcript: str_field(payload, "transcript_path"),
         },
     }
+}
+
+/// Built-in tools that edit files or run commands. MCP tools are left out: their names say
+/// nothing about what they touch, and the Stop hook reads git again anyway.
+pub fn tool_may_write(tool: &str) -> bool {
+    matches!(
+        tool,
+        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" | "Bash"
+    )
 }
 
 fn notification(payload: &Value) -> AgentEvent {
@@ -158,7 +169,13 @@ mod tests {
                     tool: Some("Write".into()),
                 },
             ),
-            ("PostToolUse", "PostToolUse", AgentEvent::PostTool),
+            (
+                "PostToolUse",
+                "PostToolUse",
+                AgentEvent::PostTool {
+                    tool: Some("Write".into()),
+                },
+            ),
             (
                 "Notification",
                 "Notification-permission_prompt",
@@ -184,6 +201,24 @@ mod tests {
             assert_eq!(parsed.event, want, "{file}");
             assert_eq!(parsed.meta.cwd.as_deref(), Some("/home/user/src/scratch"));
             assert!(parsed.meta.session_id.is_some(), "{file}");
+        }
+    }
+
+    #[test]
+    fn only_tools_that_can_change_files_may_write() {
+        for tool in ["Edit", "Write", "MultiEdit", "NotebookEdit", "Bash"] {
+            assert!(tool_may_write(tool), "{tool}");
+        }
+        for tool in [
+            "Read",
+            "Grep",
+            "Glob",
+            "WebFetch",
+            "Task",
+            "mcp__x__edit",
+            "bash",
+        ] {
+            assert!(!tool_may_write(tool), "{tool}");
         }
     }
 

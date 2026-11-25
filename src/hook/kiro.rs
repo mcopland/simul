@@ -25,7 +25,9 @@ pub fn parse(event: &str, payload: &Value) -> Parsed {
         "PreToolUse" | "preToolUse" => AgentEvent::PreTool {
             tool: str_field(payload, "tool_name"),
         },
-        "PostToolUse" | "postToolUse" => AgentEvent::PostTool,
+        "PostToolUse" | "postToolUse" => AgentEvent::PostTool {
+            tool: str_field(payload, "tool_name"),
+        },
         "Stop" | "stop" => AgentEvent::Stop,
         "SessionEnd" => AgentEvent::SessionEnd,
         _ => AgentEvent::Unrecognized,
@@ -38,6 +40,11 @@ pub fn parse(event: &str, payload: &Value) -> Parsed {
             ..Meta::default()
         },
     }
+}
+
+/// Built-in tools that write files or run commands.
+pub fn tool_may_write(tool: &str) -> bool {
+    matches!(tool, "fs_write" | "execute_bash")
 }
 
 const SCRAPE_LINES: usize = 15;
@@ -181,7 +188,12 @@ mod tests {
                     tool: Some("fs_write".into()),
                 },
             ),
-            ("PostToolUse", AgentEvent::PostTool),
+            (
+                "PostToolUse",
+                AgentEvent::PostTool {
+                    tool: Some("fs_write".into()),
+                },
+            ),
             ("Stop", AgentEvent::Stop),
             ("SessionEnd", AgentEvent::SessionEnd),
         ];
@@ -214,12 +226,27 @@ mod tests {
                     tool: Some("execute_bash".into()),
                 },
             ),
-            ("postToolUse", AgentEvent::PostTool),
+            (
+                "postToolUse",
+                AgentEvent::PostTool {
+                    tool: Some("execute_bash".into()),
+                },
+            ),
             ("stop", AgentEvent::Stop),
         ];
         for (event, want) in cases {
             let p = json!({"tool_name": "execute_bash"});
             assert_eq!(parse(event, &p).event, want, "{event}");
+        }
+    }
+
+    #[test]
+    fn only_tools_that_can_change_files_may_write() {
+        for tool in ["fs_write", "execute_bash"] {
+            assert!(tool_may_write(tool), "{tool}");
+        }
+        for tool in ["fs_read", "use_aws", "knowledge", "Write"] {
+            assert!(!tool_may_write(tool), "{tool}");
         }
     }
 
