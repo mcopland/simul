@@ -219,7 +219,13 @@ hidden_check_secs = 10  # the most often panes' processes are read after a chang
 git_refresh_secs = 60   # how often a shown pane's git status is reread when nothing in tmux changed it
 # commands shown as ▷, not ▶; a list here replaces the default
 interactive = ["vi", "vim", "nvim", "hx", "helix", "emacs", "nano", "micro", "kak", "less", "more", "man", "ssh", "mosh", "htop", "btop", "top", "watch", "lazygit", "tig"]
+
+[hooks]
+transport = "command"  # "http": Claude's tool hooks post to the daemon instead of starting a process
+http_port = 47463      # the 127.0.0.1 port the daemon serves with transport = "http"
 ```
+
+Claude runs a PreToolUse and a PostToolUse hook for every tool call, and by default each one starts `simul hook`, about 5 ms of CPU. With `transport = "http"`, Claude posts those two events to the daemon on `127.0.0.1:<http_port>` instead, and starts no process. Other events stay commands, so a session start can still start the daemon. After changing `[hooks]`, rerun `simul install-hooks claude`, then restart the daemon (`pkill -f 'simul daemon'`; the next hook starts it). `simul doctor` checks that the installed hooks match `[hooks]` and that the port answers. One daemon serves the port; it passes hooks from panes of another tmux server to that server's daemon. Any local program can post to the port, but all it accepts are hook events, which only change what the sidebar shows.
 
 Kiro has no hook for approval prompts, so simul reads them from Kiro's session log (`$KIRO_HOME/sessions`, else `~/.kiro/sessions`). The same log shows when a turn ends, is interrupted, fails, or asks you a question. When the log can't be read, simul falls back to reading the bottom of a busy Kiro pane. That scrape recognizes the classic `Allow this action? ... [y/n/t]:` prompt. If your Kiro shows a different approval dialog, add a line of text unique to it to `approval_patterns`. Pick text that disappears once you answer: a pattern still in the bottom 15 lines keeps the pane `blocked`.
 

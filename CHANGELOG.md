@@ -4,6 +4,10 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+### Added
+
+- `[hooks] transport = "http"` sends Claude's PreToolUse and PostToolUse hooks to the daemon over HTTP on `127.0.0.1:<http_port>` (default 47463), so a tool call starts no `simul hook` process. Rerun `simul install-hooks claude` after changing it. `simul doctor` checks that the installed hooks match the setting and that the port answers. The default stays `command`.
+
 ### Changed
 
 - The daemon rereads a folder's git status after an agent tool call only when the tool can change files: Claude's Edit, Write, MultiEdit, NotebookEdit, and Bash, and Kiro's fs_write and execute_bash. Reads, searches, and MCP tools no longer start `git status`. Turn ends and the one-minute refresh still catch changes made any other way.

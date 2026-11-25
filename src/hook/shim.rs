@@ -76,7 +76,7 @@ fn deliver(args: &[String], deadline: Instant) -> Result<()> {
 }
 
 /// Connects to the first live daemon socket whose directory is private to this user.
-fn connect_any(sockets: &[PathBuf]) -> Option<UnixStream> {
+pub(crate) fn connect_any(sockets: &[PathBuf]) -> Option<UnixStream> {
     sockets.iter().find_map(|s| {
         let private = s
             .parent()

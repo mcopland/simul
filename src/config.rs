@@ -14,6 +14,37 @@ pub struct Config {
     pub notify: NotifyConfig,
     pub kiro: KiroConfig,
     pub panes: PanesConfig,
+    pub hooks: HooksConfig,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HookTransport {
+    /// Every hook starts `simul hook`.
+    #[default]
+    Command,
+    /// Claude's tool hooks, which fire on every tool call, POST to the daemon instead; the
+    /// rest stay commands, so a session start can still start the daemon.
+    Http,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default)]
+pub struct HooksConfig {
+    /// Takes effect at the next `simul install-hooks claude` and daemon start.
+    pub transport: HookTransport,
+    /// The 127.0.0.1 port the daemon serves HTTP hooks on. It is written into Claude's
+    /// settings, so it is fixed, not picked at random.
+    pub http_port: u16,
+}
+
+impl Default for HooksConfig {
+    fn default() -> HooksConfig {
+        HooksConfig {
+            transport: HookTransport::Command,
+            http_port: 47463,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -80,6 +111,7 @@ impl Default for Config {
             notify: NotifyConfig::default(),
             kiro: KiroConfig::default(),
             panes: PanesConfig::default(),
+            hooks: HooksConfig::default(),
         }
     }
 }
@@ -281,6 +313,22 @@ mod tests {
         assert!(unknown.is_empty(), "{unknown:?}");
         let (_, unknown) = load_checked_from(&dir.path().join("none.toml")).unwrap();
         assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn hooks_run_as_commands_unless_http_is_chosen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let cfg = load_from(&path).unwrap();
+        assert_eq!(cfg.hooks.transport, HookTransport::Command);
+        assert_eq!(cfg.hooks.http_port, 47463);
+        std::fs::write(&path, "[hooks]\ntransport = \"http\"\nhttp_port = 5000\n").unwrap();
+        let (cfg, unknown) = load_checked_from(&path).unwrap();
+        assert_eq!(cfg.hooks.transport, HookTransport::Http);
+        assert_eq!(cfg.hooks.http_port, 5000);
+        assert!(unknown.is_empty(), "{unknown:?}");
+        std::fs::write(&path, "[hooks]\ntransport = \"pigeon\"\n").unwrap();
+        assert!(load_from(&path).is_err());
     }
 
     #[test]

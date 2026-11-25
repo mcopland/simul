@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use super::install_hooks;
+use super::install_hooks::{self, Handler};
 use crate::client;
+use crate::config::{HookTransport, HooksConfig};
 use crate::daemon::notify::{self, Message};
 use crate::hook::{claude, kiro};
 use crate::paths::{self, env_var};
@@ -93,7 +94,12 @@ fn gather() -> Vec<Check> {
             false
         }
     };
-    checks.push(check_claude_hooks_file(&claude_settings_paths()));
+    // A config that fails to load is reported by its own check; hooks are judged by defaults.
+    let hooks = crate::config::load().map(|c| c.hooks).unwrap_or_default();
+    checks.push(check_claude_hooks_file(&claude_settings_paths(), &hooks));
+    if hooks.transport == HookTransport::Http {
+        checks.push(check_hook_port(hooks.http_port));
+    }
     checks.push(check_kiro_hooks_file(
         install_hooks::kiro_hook_file(env_var).as_deref(),
         Path::new(install_hooks::KIRO_PROJECT_FILE),
@@ -259,8 +265,24 @@ fn claude_settings_paths() -> Vec<PathBuf> {
     paths
 }
 
-fn check_claude_hooks_file(paths: &[PathBuf]) -> Check {
-    check_hook_files("claude hooks", "claude", paths, check_claude_hooks)
+fn check_claude_hooks_file(paths: &[PathBuf], hooks: &HooksConfig) -> Check {
+    check_hook_files("claude hooks", "claude", paths, |v| {
+        check_claude_hooks(v, hooks)
+    })
+}
+
+/// With HTTP hooks, something must listen where Claude posts them.
+fn check_hook_port(port: u16) -> Check {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300)) {
+        Ok(_) => pass("hook port", format!("listening on {addr}")),
+        Err(e) => fail(
+            "hook port",
+            format!(
+                "nothing answers on {addr} ({e}): the daemon is down, or still waiting for another daemon to free the port"
+            ),
+        ),
+    }
 }
 
 /// Passes on the first file whose hooks check out; otherwise lists every file's problem.
@@ -268,7 +290,7 @@ fn check_hook_files<'a>(
     name: &'static str,
     agent: &str,
     paths: impl IntoIterator<Item = &'a PathBuf>,
-    check: fn(&Value) -> std::result::Result<(), String>,
+    check: impl Fn(&Value) -> std::result::Result<(), String>,
 ) -> Check {
     let mut problems = Vec::new();
     for path in paths.into_iter().filter(|p| p.exists()) {
@@ -289,13 +311,38 @@ fn check_hook_files<'a>(
     fail(name, problems.join("; "))
 }
 
-/// Every Claude event has a simul hook whose binary exists.
-pub fn check_claude_hooks(settings: &Value) -> std::result::Result<(), String> {
-    check_installed(&install_hooks::managed(settings), claude::EVENTS, "claude")
+/// Every Claude event has a simul hook whose binary exists, sent the way `[hooks]` says.
+pub fn check_claude_hooks(
+    settings: &Value,
+    config: &HooksConfig,
+) -> std::result::Result<(), String> {
+    let installed = install_hooks::managed(settings);
+    check_installed(&installed, claude::EVENTS, "claude")?;
+    for (event, handler) in &installed {
+        let http = config.transport == HookTransport::Http
+            && install_hooks::HTTP_EVENTS.contains(&event.as_str());
+        let fits = match handler {
+            Handler::Command(_) => !http,
+            Handler::Http(url) => {
+                http && *url == install_hooks::hook_url(config.http_port, "claude", event)
+            }
+        };
+        if !fits {
+            let want = if http {
+                format!("http on port {}", config.http_port)
+            } else {
+                "command".to_owned()
+            };
+            return Err(format!(
+                "the {event} hook does not match [hooks] transport ({want}); rerun `simul install-hooks claude`"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn check_installed(
-    installed: &[(String, String)],
+    installed: &[(String, Handler)],
     events: &[&str],
     agent: &str,
 ) -> std::result::Result<(), String> {
@@ -313,7 +360,11 @@ fn check_installed(
             missing.join(", ")
         ));
     }
-    for (_, cmd) in installed {
+    let commands = installed.iter().filter_map(|(_, h)| match h {
+        Handler::Command(c) => Some(c),
+        Handler::Http(_) => None,
+    });
+    for cmd in commands {
         match first_word(cmd) {
             Some(exe) if Path::new(&exe).exists() => {}
             Some(exe) => return Err(format!("hook binary {exe} does not exist")),
@@ -325,7 +376,11 @@ fn check_installed(
 
 /// Every Kiro trigger has a simul hook whose binary exists.
 pub fn check_kiro_hooks(file: &Value) -> std::result::Result<(), String> {
-    check_installed(&install_hooks::kiro_managed(file), kiro::EVENTS, "kiro")
+    let installed: Vec<(String, Handler)> = install_hooks::kiro_managed(file)
+        .into_iter()
+        .map(|(trigger, command)| (trigger, Handler::Command(command)))
+        .collect();
+    check_installed(&installed, kiro::EVENTS, "kiro")
 }
 
 /// Checks the global and project Kiro hook files; skipped when Kiro CLI isn't installed.
@@ -484,22 +539,65 @@ mod tests {
     #[test]
     fn hooks_check() {
         let exe = std::env::current_exe().unwrap();
-        let good = install_hooks::merge(json!({}), &exe).unwrap();
-        assert_eq!(check_claude_hooks(&good), Ok(()));
-        let gone = install_hooks::merge(json!({}), Path::new("/nonexistent/simul")).unwrap();
+        let cmd = HooksConfig::default();
+        let good = install_hooks::merge(json!({}), &exe, &cmd).unwrap();
+        assert_eq!(check_claude_hooks(&good, &cmd), Ok(()));
+        let gone = install_hooks::merge(json!({}), Path::new("/nonexistent/simul"), &cmd).unwrap();
         assert!(
-            check_claude_hooks(&gone)
+            check_claude_hooks(&gone, &cmd)
                 .unwrap_err()
                 .contains("does not exist")
         );
         assert!(
-            check_claude_hooks(&json!({}))
+            check_claude_hooks(&json!({}), &cmd)
                 .unwrap_err()
                 .contains("install-hooks")
         );
         let mut partial = good.clone();
         partial["hooks"].as_object_mut().unwrap().remove("Stop");
-        assert!(check_claude_hooks(&partial).unwrap_err().contains("Stop"));
+        assert!(
+            check_claude_hooks(&partial, &cmd)
+                .unwrap_err()
+                .contains("Stop")
+        );
+    }
+
+    #[test]
+    fn hooks_check_matches_the_configured_transport() {
+        let exe = std::env::current_exe().unwrap();
+        let cmd = HooksConfig::default();
+        let http = HooksConfig {
+            transport: HookTransport::Http,
+            http_port: 5000,
+        };
+        let as_http = install_hooks::merge(json!({}), &exe, &http).unwrap();
+        assert_eq!(check_claude_hooks(&as_http, &http), Ok(()));
+        let err = check_claude_hooks(&as_http, &cmd).unwrap_err();
+        assert!(
+            err.contains("transport") && err.contains("install-hooks claude"),
+            "{err}"
+        );
+        let as_cmd = install_hooks::merge(json!({}), &exe, &cmd).unwrap();
+        let err = check_claude_hooks(&as_cmd, &http).unwrap_err();
+        assert!(err.contains("transport"), "{err}");
+        let moved = HooksConfig {
+            http_port: 6000,
+            ..http
+        };
+        let err = check_claude_hooks(&as_http, &moved).unwrap_err();
+        assert!(err.contains("6000"), "{err}");
+    }
+
+    #[test]
+    fn hook_port_check_finds_a_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let c = check_hook_port(port);
+        assert!(c.ok, "{}", c.detail);
+        drop(listener);
+        let c = check_hook_port(port);
+        assert!(!c.ok);
+        assert!(c.detail.contains(&port.to_string()), "{}", c.detail);
     }
 
     #[test]

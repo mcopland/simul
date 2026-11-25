@@ -127,7 +127,7 @@ pub async fn accept(listener: UnixListener, tx: mpsc::Sender<Cmd>) {
 }
 
 /// A client that hung up (a closed sidebar, an interrupted `ls`) is normal, not an error.
-fn is_disconnect(e: &anyhow::Error) -> bool {
+pub(super) fn is_disconnect(e: &anyhow::Error) -> bool {
     e.chain()
         .filter_map(|c| c.downcast_ref::<std::io::Error>())
         .any(|io| {

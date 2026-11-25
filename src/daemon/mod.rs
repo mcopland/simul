@@ -1,5 +1,6 @@
 pub mod control_mode;
 mod git_cache;
+pub mod http;
 mod live;
 pub mod notify;
 pub mod runs;
@@ -20,7 +21,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::claude_metrics::{Turn, last_turn};
 use crate::claude_sessions;
-use crate::config::Config;
+use crate::config::{Config, HookTransport};
 use crate::hook::AgentEvent;
 use crate::kiro_sessions;
 use crate::log;
@@ -159,6 +160,13 @@ pub async fn run(opts: Options) -> Result<()> {
     );
     let (tx, mut rx) = mpsc::channel(256);
     let accept = tokio::spawn(server::accept(listener, tx.clone()));
+    let http = (opts.config.hooks.transport == HookTransport::Http).then(|| {
+        tokio::spawn(http::serve_port(
+            opts.config.hooks.http_port,
+            tx.clone(),
+            opts.socket.clone(),
+        ))
+    });
     let control_child = control_mode::ControlChild::default();
     tokio::spawn(control_mode::run(
         opts.tmux.clone(),
@@ -232,6 +240,15 @@ pub async fn run(opts: Options) -> Result<()> {
         && !e.is_cancelled()
     {
         log!("accept task failed: {e}");
+    }
+    // Frees the port at once for a daemon replacing this one.
+    if let Some(http) = http {
+        http.abort();
+        if let Err(e) = http.await
+            && !e.is_cancelled()
+        {
+            log!("HTTP hook task failed: {e}");
+        }
     }
     match exit {
         Exit::TmuxGone => {
