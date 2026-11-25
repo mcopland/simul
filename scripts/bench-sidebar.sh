@@ -13,6 +13,9 @@
 # -H sends tool hooks as Claude's http hooks do, over [hooks] transport = "http": one python3
 # sender POSTs them on a kept-alive connection, and its CPU counts as hook CPU, standing in
 # for Claude's side. Session start and prompt hooks stay commands.
+# Each agent gets a Claude session file (sessions/<n>.json) with its status, as Claude Code
+# writes, so the daemon reads no screens. -S leaves them out: busy panes' screens are then
+# read every second, as for an agent that writes none.
 # Prints one tab-separated row: label, sidebars, sidebar/daemon/tmux/total CPU seconds over
 # the run, the CPU seconds of the daemon's child processes (tmux queries, git), and the
 # sidebars' summed memory in MB: physical footprint where macOS's `footprint` exists, else
@@ -24,16 +27,18 @@
 
 set -euo pipefail
 
-usage="usage: bench-sidebar.sh [-i] [-H] [-w windows] [-a agents] [-r secs] <simul-bin> [secs] [label]"
+usage="usage: bench-sidebar.sh [-i] [-H] [-S] [-w windows] [-a agents] [-r secs] <simul-bin> [secs] [label]"
 idle=false
 windows=13
 agents=1
 rate=0.5
 http=false
-while getopts "iHw:a:r:" opt; do
+scrape=false
+while getopts "iHSw:a:r:" opt; do
 	case "$opt" in
 	i) idle=true ;;
 	H) http=true ;;
+	S) scrape=true ;;
 	w) windows=$OPTARG ;;
 	a) agents=$OPTARG ;;
 	r) rate=$OPTARG ;;
@@ -186,11 +191,25 @@ for s in s1 s2 s3; do
 		t new-window -d -t "$s:" -c "$cwd" sh
 	done
 done
-# The agents' panes, one per window in s1, s2, s3 order, read before sidebars join them.
+# The agents' panes, one per window in s1, s2, s3 order, read before sidebars join them,
+# with where each is as Claude's session file names it: <session>:<window id>.<pane id>.
 agent_panes=()
-while IFS= read -r p; do
+agent_places=()
+while read -r p place; do
 	agent_panes+=("$p")
-done < <(t list-panes -a -F '#{pane_id}' | head -n "$agents")
+	agent_places+=("$place")
+done < <(t list-panes -a -F '#{pane_id} #{session_name}:#{window_id}.#{pane_id}' | head -n "$agents")
+if ! $scrape; then
+	mkdir -p "$dir/claude/sessions"
+	status=busy
+	$idle && status=idle
+	now_ms=$(python3 -I -c 'import time; print(int(time.time() * 1000))')
+	for a in $(seq "$agents"); do
+		# This script's pid stands in for Claude's: alive for the whole run.
+		printf '{"pid":%d,"sessionId":"bench-%d","tmux":"%s","status":"%s","statusUpdatedAt":%s}\n' \
+			$$ "$a" "${agent_places[$a - 1]}" "$status" "$now_ms" >"$dir/claude/sessions/$a.json"
+	done
+fi
 # Output in a window nobody views: s2:1, as before -w, unless s2 has only one window.
 t send-keys -t "s2:$((s2_windows > 1 ? 1 : 0))" 'while sleep 3; do date; done' Enter
 

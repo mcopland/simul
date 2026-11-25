@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # Runs bench-sidebar.sh for each build, interleaved, and prints each column's median.
-# Usage: bench-all.sh [-i] [-H] [-n runs] [-s secs] [-w windows] [-a agents] [-r secs] <label=simul-bin>...
-#   -i, -H, -w, -a and -r go to bench-sidebar.sh, which describes them
+# Usage: bench-all.sh [-i] [-H] [-S] [-n runs] [-s secs] [-w windows] [-a agents] [-r secs] <label=simul-bin>...
+#   -i, -H, -S, -w, -a and -r go to bench-sidebar.sh, which describes them
 #   e.g. bench-all.sh before=/tmp/old/target/release/simul after=target/release/simul
 
 set -euo pipefail
 
-usage="usage: bench-all.sh [-i] [-H] [-n runs] [-s secs] [-w windows] [-a agents] [-r secs] <label=simul-bin>..."
+usage="usage: bench-all.sh [-i] [-H] [-S] [-n runs] [-s secs] [-w windows] [-a agents] [-r secs] <label=simul-bin>..."
 runs=3
 secs=120
 # Options for bench-sidebar.sh, passed through as given.
 pass=()
-while getopts "iHn:s:w:a:r:" opt; do
+while getopts "iHSn:s:w:a:r:" opt; do
 	case "$opt" in
-	i | H) pass+=("-$opt") ;;
+	i | H | S) pass+=("-$opt") ;;
 	w | a | r) pass+=("-$opt" "$OPTARG") ;;
 	n) runs=$OPTARG ;;
 	s) secs=$OPTARG ;;
