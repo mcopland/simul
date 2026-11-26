@@ -3,30 +3,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use crate::config::{HookTransport, HooksConfig};
-use crate::daemon::http::{PANE_HEADER, PATH_PREFIX, TMUX_HEADER};
 use crate::hook::{claude, kiro};
 use crate::paths::env_var;
 use crate::tmux::shell_quote;
 
 /// Trailing shell comment that identifies hooks simul owns, so reinstalling replaces them.
 pub const MARKER: &str = "#simul-managed";
-
-/// Claude events sent over HTTP with `[hooks] transport = "http"`: those that fire on every
-/// tool call. The rest stay commands, so a session start can start the daemon.
-pub const HTTP_EVENTS: &[&str] = &["PreToolUse", "PostToolUse"];
-
-/// What runs a simul hook: a `simul hook` command, or a POST to this URL.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Handler {
-    Command(String),
-    Http(String),
-}
-
-/// Where the daemon serves `agent`'s `event` on `port`.
-pub fn hook_url(port: u16, agent: &str, event: &str) -> String {
-    format!("http://127.0.0.1:{port}{PATH_PREFIX}{agent}/{event}")
-}
 
 /// Where `install-hooks kiro --project` writes, relative to the current directory.
 pub const KIRO_PROJECT_FILE: &str = ".kiro/hooks/simul.json";
@@ -187,18 +169,9 @@ fn ignored_project_hook_files(dir: &Path) -> Result<Vec<String>> {
 fn run_claude(project: bool, settings: Option<PathBuf>) -> Result<()> {
     let path = claude_settings_path(project, settings)?;
     let exe = std::env::current_exe().context("failed to locate the simul binary")?;
-    let hooks = crate::config::load()?.hooks;
-    let written = install(&path, &exe, &hooks)?;
-    let how = match hooks.transport {
-        HookTransport::Command => String::new(),
-        HookTransport::Http => format!(
-            "; {} post to 127.0.0.1:{}",
-            HTTP_EVENTS.join(" and "),
-            hooks.http_port
-        ),
-    };
+    let written = install(&path, &exe)?;
     println!(
-        "installed {} Claude hooks into {}{how}",
+        "installed {} Claude hooks into {}",
         claude::EVENTS.len(),
         written.display()
     );
@@ -236,27 +209,13 @@ pub fn strip_managed(settings: &mut Value) {
 }
 
 fn is_managed(hook: &Value) -> bool {
-    handler(hook).is_some()
-}
-
-/// The handler of a simul hook; `None` for anyone else's.
-fn handler(hook: &Value) -> Option<Handler> {
-    let text = |key| hook.get(key).and_then(Value::as_str).map(str::to_owned);
-    if let Some(command) = text("command").filter(|c| c.ends_with(MARKER)) {
-        return Some(Handler::Command(command));
-    }
-    text("url")
-        .filter(|u| {
-            hook.get("type").and_then(Value::as_str) == Some("http")
-                && u.strip_prefix("http://127.0.0.1:")
-                    .and_then(|rest| rest.split_once('/'))
-                    .is_some_and(|(_, path)| format!("/{path}").starts_with(PATH_PREFIX))
-        })
-        .map(Handler::Http)
+    hook.get("command")
+        .and_then(Value::as_str)
+        .is_some_and(|c| c.ends_with(MARKER))
 }
 
 /// Returns `settings` with exactly one simul hook per Claude event, other hooks untouched.
-pub fn merge(mut settings: Value, exe: &Path, config: &HooksConfig) -> Result<Value> {
+pub fn merge(mut settings: Value, exe: &Path) -> Result<Value> {
     let Some(root) = settings.as_object_mut() else {
         bail!("settings file is not a JSON object");
     };
@@ -269,23 +228,11 @@ pub fn merge(mut settings: Value, exe: &Path, config: &HooksConfig) -> Result<Va
         .as_object_mut()
         .context("settings \"hooks\" vanished during merge")?;
     for event in claude::EVENTS {
-        let hook = if config.transport == HookTransport::Http && HTTP_EVENTS.contains(event) {
-            json!({
-                "type": "http",
-                "url": hook_url(config.http_port, "claude", event),
-                // Claude leaves out any variable not listed in allowedEnvVars.
-                "headers": {PANE_HEADER: "$TMUX_PANE", TMUX_HEADER: "$TMUX"},
-                "allowedEnvVars": ["TMUX_PANE", "TMUX"],
-                "timeout": 1,
-            })
-        } else {
-            json!({
-                "type": "command",
-                "command": hook_command(exe, "claude", event),
-                "timeout": 1,
-            })
-        };
-        let group = json!({"hooks": [hook]});
+        let group = json!({"hooks": [{
+            "type": "command",
+            "command": hook_command(exe, "claude", event),
+            "timeout": 1,
+        }]});
         match hooks.entry(*event).or_insert_with(|| json!([])) {
             Value::Array(groups) => groups.push(group),
             _ => bail!("settings \"hooks.{event}\" is not a JSON array"),
@@ -294,8 +241,8 @@ pub fn merge(mut settings: Value, exe: &Path, config: &HooksConfig) -> Result<Va
     Ok(settings)
 }
 
-/// Handlers of simul-managed hooks, keyed by event.
-pub fn managed(settings: &Value) -> Vec<(String, Handler)> {
+/// Commands of simul-managed hooks, keyed by event.
+pub fn managed(settings: &Value) -> Vec<(String, String)> {
     let Some(events) = settings.get("hooks").and_then(Value::as_object) else {
         return Vec::new();
     };
@@ -308,8 +255,9 @@ pub fn managed(settings: &Value) -> Vec<(String, Handler)> {
                 .flatten()
                 .filter_map(|g| g.get("hooks").and_then(Value::as_array))
                 .flatten()
-                .filter_map(handler)
-                .map(move |h| (event.clone(), h))
+                .filter(|h| is_managed(h))
+                .filter_map(|h| h.get("command").and_then(Value::as_str))
+                .map(move |c| (event.clone(), c.to_owned()))
         })
         .collect()
 }
@@ -469,7 +417,7 @@ pub fn remove_exclude(file: &Path, entry: &str) -> Result<bool> {
 }
 
 /// Merges hooks into the settings file, writing through a symlink rather than replacing it.
-pub fn install(path: &Path, exe: &Path, config: &HooksConfig) -> Result<PathBuf> {
+pub fn install(path: &Path, exe: &Path) -> Result<PathBuf> {
     let settings = if exists(path)? {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
@@ -478,8 +426,8 @@ pub fn install(path: &Path, exe: &Path, config: &HooksConfig) -> Result<PathBuf>
     } else {
         json!({})
     };
-    let merged = merge(settings, exe, config)
-        .with_context(|| format!("cannot merge into {}", path.display()))?;
+    let merged =
+        merge(settings, exe).with_context(|| format!("cannot merge into {}", path.display()))?;
     let mut text = serde_json::to_string_pretty(&merged).context("failed to encode settings")?;
     text.push('\n');
     replace_file(path, &text, true)
@@ -740,97 +688,6 @@ mod tests {
 
     const EXE: &str = "/opt/simul/bin/simul";
 
-    fn command() -> HooksConfig {
-        HooksConfig::default()
-    }
-
-    fn http(port: u16) -> HooksConfig {
-        HooksConfig {
-            transport: HookTransport::Http,
-            http_port: port,
-        }
-    }
-
-    fn simul_handlers(settings: &Value, event: &str) -> Vec<Value> {
-        settings["hooks"][event]
-            .as_array()
-            .unwrap()
-            .iter()
-            .flat_map(|g| g["hooks"].as_array().unwrap().clone())
-            .filter(is_managed)
-            .collect()
-    }
-
-    #[test]
-    fn http_transport_posts_tool_hooks_and_keeps_the_rest_commands() {
-        let out = merge(user_settings(), Path::new(EXE), &http(5000)).unwrap();
-        for event in claude::EVENTS {
-            let ours = simul_handlers(&out, event);
-            assert_eq!(ours.len(), 1, "{event}");
-            if HTTP_EVENTS.contains(event) {
-                assert_eq!(
-                    ours[0],
-                    json!({
-                        "type": "http",
-                        "url": format!("http://127.0.0.1:5000/simul/hook/claude/{event}"),
-                        "headers": {"X-Simul-Pane": "$TMUX_PANE", "X-Simul-Tmux": "$TMUX"},
-                        "allowedEnvVars": ["TMUX_PANE", "TMUX"],
-                        "timeout": 1,
-                    }),
-                    "{event}"
-                );
-            } else {
-                assert_eq!(ours[0]["type"], "command", "{event}");
-            }
-        }
-        assert_eq!(
-            out["hooks"]["PreToolUse"][0]["hooks"][0]["command"], "/u/check.sh",
-            "user hooks stay"
-        );
-    }
-
-    #[test]
-    fn switching_transport_replaces_simul_hooks() {
-        let as_http = merge(user_settings(), Path::new(EXE), &http(5000)).unwrap();
-        let back = merge(as_http.clone(), Path::new(EXE), &command()).unwrap();
-        assert_eq!(
-            back,
-            merge(user_settings(), Path::new(EXE), &command()).unwrap()
-        );
-        let again = merge(back, Path::new(EXE), &http(6000)).unwrap();
-        assert_eq!(
-            again,
-            merge(user_settings(), Path::new(EXE), &http(6000)).unwrap()
-        );
-        assert!(
-            !again.to_string().contains(":5000/"),
-            "the old port is gone"
-        );
-    }
-
-    #[test]
-    fn strip_and_managed_know_http_hooks_but_not_others() {
-        let mut v = merge(json!({}), Path::new(EXE), &http(5000)).unwrap();
-        let m = managed(&v);
-        assert_eq!(m.len(), claude::EVENTS.len());
-        assert!(m.contains(&(
-            "PostToolUse".to_owned(),
-            Handler::Http("http://127.0.0.1:5000/simul/hook/claude/PostToolUse".to_owned())
-        )));
-        assert!(
-            m.iter()
-                .any(|(e, h)| e == "Stop" && matches!(h, Handler::Command(_)))
-        );
-        let user = json!({"type": "http", "url": "http://127.0.0.1:9/audit"});
-        v["hooks"]["PostToolUse"][0]["hooks"]
-            .as_array_mut()
-            .unwrap()
-            .push(user.clone());
-        assert_eq!(managed(&v).len(), claude::EVENTS.len());
-        strip_managed(&mut v);
-        assert_eq!(v, json!({"hooks": {"PostToolUse": [{"hooks": [user]}]}}));
-    }
-
     fn user_settings() -> Value {
         json!({
             "model": "opus",
@@ -860,7 +717,7 @@ mod tests {
 
     #[test]
     fn merge_adds_every_event_and_keeps_user_hooks() {
-        let out = merge(user_settings(), Path::new(EXE), &command()).unwrap();
+        let out = merge(user_settings(), Path::new(EXE)).unwrap();
         for event in claude::EVENTS {
             let groups = out["hooks"][event].as_array().unwrap();
             let ours: Vec<&Value> = groups
@@ -882,18 +739,15 @@ mod tests {
 
     #[test]
     fn merge_is_idempotent_and_replaces_old_paths() {
-        let once = merge(user_settings(), Path::new("/old/simul"), &command()).unwrap();
-        let twice = merge(once, Path::new(EXE), &command()).unwrap();
-        assert_eq!(
-            twice,
-            merge(user_settings(), Path::new(EXE), &command()).unwrap()
-        );
+        let once = merge(user_settings(), Path::new("/old/simul")).unwrap();
+        let twice = merge(once, Path::new(EXE)).unwrap();
+        assert_eq!(twice, merge(user_settings(), Path::new(EXE)).unwrap());
         assert!(!twice.to_string().contains("/old/simul"));
     }
 
     #[test]
     fn strip_drops_emptied_groups_and_events() {
-        let mut v = merge(json!({}), Path::new(EXE), &command()).unwrap();
+        let mut v = merge(json!({}), Path::new(EXE)).unwrap();
         strip_managed(&mut v);
         assert_eq!(v, json!({"hooks": {}}));
         let mut mixed = json!({"hooks": {"Stop": [{"hooks": [
@@ -909,20 +763,20 @@ mod tests {
 
     #[test]
     fn merge_rejects_non_object_hooks() {
-        let err = merge(json!({"hooks": []}), Path::new(EXE), &command()).unwrap_err();
+        let err = merge(json!({"hooks": []}), Path::new(EXE)).unwrap_err();
         assert!(err.to_string().contains("hooks"), "{err}");
-        assert!(merge(json!([]), Path::new(EXE), &command()).is_err());
+        assert!(merge(json!([]), Path::new(EXE)).is_err());
     }
 
     #[test]
     fn managed_lists_installed_commands() {
-        let v = merge(user_settings(), Path::new(EXE), &command()).unwrap();
+        let v = merge(user_settings(), Path::new(EXE)).unwrap();
         let m = managed(&v);
         assert_eq!(m.len(), claude::EVENTS.len());
-        assert!(m.iter().all(|(_, h)| matches!(
-            h,
-            Handler::Command(c) if c.starts_with("'/opt/simul/bin/simul'")
-        )));
+        assert!(
+            m.iter()
+                .all(|(_, c)| c.starts_with("'/opt/simul/bin/simul'"))
+        );
         assert!(managed(&user_settings()).is_empty());
     }
 
@@ -930,7 +784,7 @@ mod tests {
     fn install_creates_missing_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".claude/settings.local.json");
-        install(&path, Path::new(EXE), &command()).unwrap();
+        install(&path, Path::new(EXE)).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(managed(&v).len(), claude::EVENTS.len());
     }
@@ -947,7 +801,7 @@ mod tests {
         .unwrap();
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
-        let written = install(&link, Path::new(EXE), &command()).unwrap();
+        let written = install(&link, Path::new(EXE)).unwrap();
         assert_eq!(written, real.canonicalize().unwrap());
         assert!(
             std::fs::symlink_metadata(&link)
@@ -973,8 +827,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(&path, user_settings().to_string()).unwrap();
-        install(&path, Path::new("/old/simul"), &command()).unwrap();
-        install(&path, Path::new(EXE), &command()).unwrap();
+        install(&path, Path::new("/old/simul")).unwrap();
+        install(&path, Path::new(EXE)).unwrap();
         assert_eq!(backup_of(&path), user_settings());
     }
 
@@ -984,10 +838,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(&path, user_settings().to_string()).unwrap();
-        install(&path, Path::new(EXE), &command()).unwrap();
+        install(&path, Path::new(EXE)).unwrap();
         let edited = json!({"model": "sonnet"});
         std::fs::write(&path, edited.to_string()).unwrap();
-        install(&path, Path::new(EXE), &command()).unwrap();
+        install(&path, Path::new(EXE)).unwrap();
         assert_eq!(backup_of(&path), edited);
     }
 
@@ -998,7 +852,7 @@ mod tests {
         let path = dir.path().join("settings.json");
         std::fs::write(&path, "{\"model\": \"opus\"}\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        install(&path, Path::new(EXE), &command()).unwrap();
+        install(&path, Path::new(EXE)).unwrap();
         let backup = dir.path().join("settings.json.simul-bak");
         let mode = std::fs::metadata(&backup).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "the backup holds the same secrets");
@@ -1013,13 +867,13 @@ mod tests {
         let path = dir.path().join("settings.json");
         std::fs::write(&path, "{\"model\": \"opus\"}\n").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        install(&path, Path::new(EXE), &command()).unwrap();
+        install(&path, Path::new(EXE)).unwrap();
         // As 0.11.2 and earlier wrote it.
         let backup = dir.path().join("settings.json.simul-bak");
         std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o644)).unwrap();
         let before = std::fs::read(&backup).unwrap();
 
-        install(&path, Path::new(EXE), &command()).unwrap();
+        install(&path, Path::new(EXE)).unwrap();
 
         let mode = std::fs::metadata(&backup).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
@@ -1094,10 +948,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let link = dir.path().join("settings.json");
         std::os::unix::fs::symlink(dir.path().join("gone.json"), &link).unwrap();
-        let err = format!(
-            "{:#}",
-            install(&link, Path::new(EXE), &command()).unwrap_err()
-        );
+        let err = format!("{:#}", install(&link, Path::new(EXE)).unwrap_err());
         assert!(
             err.contains("gone.json") && err.contains("does not exist"),
             "{err}"
@@ -1248,7 +1099,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(&path, user_settings().to_string()).unwrap();
-        install(&path, Path::new(EXE), &command()).unwrap();
+        install(&path, Path::new(EXE)).unwrap();
         assert_eq!(uninstall(&path).unwrap(), claude::EVENTS.len());
         assert_eq!(read_json(&path), user_settings());
         assert_eq!(uninstall(&path).unwrap(), 0, "nothing left to remove");
@@ -1260,7 +1111,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(&path, r#"{"model": "opus"}"#).unwrap();
-        install(&path, Path::new(EXE), &command()).unwrap();
+        install(&path, Path::new(EXE)).unwrap();
         uninstall(&path).unwrap();
         assert_eq!(read_json(&path), json!({"model": "opus"}));
     }
@@ -1520,10 +1371,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(&path, "{ not json").unwrap();
-        let err = format!(
-            "{:#}",
-            install(&path, Path::new(EXE), &command()).unwrap_err()
-        );
+        let err = format!("{:#}", install(&path, Path::new(EXE)).unwrap_err());
         assert!(err.contains("settings.json"), "{err}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
     }

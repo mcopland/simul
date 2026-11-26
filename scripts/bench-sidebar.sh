@@ -10,9 +10,6 @@
 # and hook loop. -r sets the seconds per tool call, a PreToolUse and a PostToolUse, in each
 # loop (default 0.5). Tool calls alternate between Write and Read, so work done only after
 # a write shows up.
-# -H sends tool hooks as Claude's http hooks do, over [hooks] transport = "http": one python3
-# sender POSTs them on a kept-alive connection, and its CPU counts as hook CPU, standing in
-# for Claude's side. Session start and prompt hooks stay commands.
 # Each agent gets a Claude session file (sessions/<n>.json) with its status, as Claude Code
 # writes, so the daemon reads no screens. -S leaves them out: busy panes' screens are then
 # read every second, as for an agent that writes none.
@@ -27,17 +24,15 @@
 
 set -euo pipefail
 
-usage="usage: bench-sidebar.sh [-i] [-H] [-S] [-w windows] [-a agents] [-r secs] <simul-bin> [secs] [label]"
+usage="usage: bench-sidebar.sh [-i] [-S] [-w windows] [-a agents] [-r secs] <simul-bin> [secs] [label]"
 idle=false
 windows=13
 agents=1
 rate=0.5
-http=false
 scrape=false
-while getopts "iHSw:a:r:" opt; do
+while getopts "iSw:a:r:" opt; do
 	case "$opt" in
 	i) idle=true ;;
-	H) http=true ;;
 	S) scrape=true ;;
 	w) windows=$OPTARG ;;
 	a) agents=$OPTARG ;;
@@ -84,7 +79,6 @@ sock=$dir/t.sock
 daemon_pid=""
 client_pid=""
 hooks_pids=()
-sender_pid=""
 # Stops the hook loops and waits for them. Killing one would leave a hook in flight, which
 # starts a new daemon if it finds the old one gone.
 stop_hooks() {
@@ -100,7 +94,6 @@ cleanup() {
 	{
 		stop_hooks
 		[ -n "$client_pid" ] && kill "$client_pid"
-		[ -n "$sender_pid" ] && kill "$sender_pid"
 		tmux -S "$sock" kill-server
 		[ -n "$daemon_pid" ] && kill "$daemon_pid"
 		wait
@@ -111,11 +104,6 @@ trap cleanup EXIT
 
 mkdir -p "$dir/config/simul" "$dir/claude" "$dir/kiro" "$dir/repo" "$dir/hooks"
 printf '[notify]\nenabled = false\n' >"$dir/config/simul/config.toml"
-if $http; then
-	# A port free a moment ago; the daemon retries if something takes it first.
-	port=$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
-	printf '[hooks]\ntransport = "http"\nhttp_port = %s\n' "$port" >>"$dir/config/simul/config.toml"
-fi
 repo=$dir/repo
 git -C "$repo" init -q
 # A throwaway repo: the user's global git hooks have no business here.
@@ -245,46 +233,6 @@ wait_for "the attached client" sh -c "tmux -S '$sock' list-clients -F '#{client_
 wait_for "the daemon socket" test -S "$SIMUL_SOCKET"
 "$bin" toggle >/dev/null
 
-if $http; then
-	wait_for "the HTTP hook port" python3 -I -c 'import socket, sys; socket.create_connection(("127.0.0.1", int(sys.argv[1])), 1)' "$port"
-	mkfifo "$dir/hookq"
-	# Reads "<pane> <event> <payload file>" lines until the queue closes.
-	python3 -I -c '
-import http.client, sys
-port, tmux = int(sys.argv[1]), sys.argv[2]
-conn = http.client.HTTPConnection("127.0.0.1", port)
-for line in sys.stdin:
-    pane, event, path = line.split()
-    with open(path, "rb") as f:
-        body = f.read()
-    headers = {"X-Simul-Pane": pane, "X-Simul-Tmux": tmux, "Content-Type": "application/json"}
-    for attempt in range(2):
-        try:
-            conn.request("POST", f"/simul/hook/claude/{event}", body, headers)
-            resp = conn.getresponse()
-            resp.read()
-            if resp.status != 200:
-                print(f"bench-sidebar: HTTP hook {event} got {resp.status}", file=sys.stderr)
-            break
-        except (OSError, http.client.HTTPException) as e:
-            conn.close()
-            if attempt:
-                print(f"bench-sidebar: HTTP hook {event} failed: {e}", file=sys.stderr)
-' "$port" "$TMUX" <"$dir/hookq" &
-	sender_pid=$!
-	# Held open so the sender sees one stream, not an end after each writer.
-	exec 3>"$dir/hookq"
-fi
-
-# Sends agent $1's tool hook $2, with the payload variant $3 if given: queued for the HTTP
-# sender with -H, else as `hook` does. printf is a builtin, so queueing starts no process.
-tool_hook() {
-	if $http; then
-		printf '%s %s %s\n' "${agent_panes[$1 - 1]}" "$2" "$dir/hooks/a$1/$2${3:+-$3}.json" >&3
-	else
-		hook "$@"
-	fi
-}
 # Sends agent $1's hook $2, with the payload variant $3 if given. A failed hook is reported,
 # and the load goes on.
 hook() {
@@ -301,9 +249,9 @@ if ! $idle; then
 			calls=0
 			tool=""
 			while [ ! -e "$dir/stop-hooks" ]; do
-				tool_hook "$a" PreToolUse "$tool"
+				hook "$a" PreToolUse "$tool"
 				sleep "$half"
-				tool_hook "$a" PostToolUse "$tool"
+				hook "$a" PostToolUse "$tool"
 				sleep "$half"
 				calls=$((calls + 2))
 				# Empty is the fixture's Write.
@@ -384,19 +332,12 @@ mem() {
 mem_mb=$(mem "$end_sidebars")
 
 stop_hooks
-sender_cpu=0
-if [ -n "$sender_pid" ]; then
-	sender_cpu=$(cpu "$sender_pid")
-	exec 3>&-
-	wait "$sender_pid" || true
-	sender_pid=""
-fi
 # Idle runs start no loops, so there may be no files; awk then reads /dev/null alone.
 hook_files=(/dev/null)
 for f in "$dir"/hook-cpu-*; do
 	[ -e "$f" ] && hook_files+=("$f")
 done
-hook_cpu=$(awk -F '\t' -v s="$sender_cpu" '{ t += $1; n += $2 } END { printf "%.2f\t%d\n", t + s, n }' "${hook_files[@]}")
+hook_cpu=$(awk -F '\t' '{ t += $1; n += $2 } END { printf "%.2f\t%d\n", t, n }' "${hook_files[@]}")
 # The daemon logs its own and its children's CPU as it exits.
 kill "$daemon_pid"
 wait "$daemon_pid" || true

@@ -36,55 +36,6 @@ fn hook_events_drive_ls() {
     h.wait_state(&pane, None);
 }
 
-/// POSTs one hook to the daemon's HTTP port, as Claude's http hooks do, and returns the
-/// status line of the reply.
-fn post_hook(port: u16, pane: &str, tmux: &str, event: &str, body: &str) -> String {
-    use std::io::{Read, Write};
-    let mut conn = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-    let req = format!(
-        "POST /simul/hook/claude/{event} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Simul-Pane: {pane}\r\n\
-         X-Simul-Tmux: {tmux}\r\nContent-Type: application/json\r\nConnection: close\r\n\
-         Content-Length: {}\r\n\r\n{body}",
-        body.len()
-    );
-    conn.write_all(req.as_bytes()).unwrap();
-    let mut reply = String::new();
-    conn.read_to_string(&mut reply).unwrap();
-    reply.lines().next().unwrap_or_default().to_owned()
-}
-
-#[test]
-fn http_tool_hooks_drive_ls() {
-    // A port that was free a moment ago; the daemon retries if something takes it first.
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let mut h = Harness::with_config(&format!(
-        "blocked_threshold_ms = 100\n[hooks]\ntransport = \"http\"\nhttp_port = {port}\n"
-    ));
-    h.start_daemon();
-    let pane = h.first_pane();
-    eventually("HTTP hook port", || {
-        std::net::TcpStream::connect(("127.0.0.1", port)).is_ok()
-    });
-
-    h.hook_fixture(&pane, "SessionStart", "SessionStart");
-    h.hook_fixture(&pane, "Notification", "Notification-permission_prompt");
-    h.wait_state(&pane, Some("blocked"));
-    let body = std::fs::read_to_string(common::fixture("claude/hooks/PostToolUse.json")).unwrap();
-    let status = post_hook(port, &pane, &h.tmux_env(), "PostToolUse", &body);
-    assert_eq!(status, "HTTP/1.1 200 OK");
-    h.wait_state(&pane, Some("working"));
-    assert!(
-        h.daemon_log()
-            .contains(&format!("serving HTTP hooks on 127.0.0.1:{port}")),
-        "{}",
-        h.daemon_log()
-    );
-}
-
 #[test]
 fn kiro_hook_events_drive_ls() {
     let mut h = Harness::new();
