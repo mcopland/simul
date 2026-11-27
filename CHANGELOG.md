@@ -4,6 +4,8 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-11-27
+
 ### Changed
 
 - The daemon rereads a folder's git status after an agent tool call only when the tool can change files: Claude's Edit, Write, MultiEdit, NotebookEdit, and Bash, and Kiro's fs_write and execute_bash. Reads, searches, and MCP tools no longer start `git status`. Turn ends and the one-minute refresh still catch changes made any other way. In a bench with 20 windows and 20 agents each making a tool call every 5 seconds, half of them reads, `git status` CPU fell by 44%.
@@ -218,7 +220,8 @@ All notable changes to simul are listed here. The format follows [Keep a Changel
 - `simul.tmux` entry point that downloads the prebuilt binary matching `VERSION`.
 - Model and effort for each agent in `simul ls`.
 
-[Unreleased]: https://github.com/mcopland/simul/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/mcopland/simul/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/mcopland/simul/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/mcopland/simul/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/mcopland/simul/compare/v0.11.6...v1.0.0
 [0.11.6]: https://github.com/mcopland/simul/compare/v0.11.5...v0.11.6
